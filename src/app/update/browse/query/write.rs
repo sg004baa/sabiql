@@ -13,11 +13,16 @@ use crate::app::policy::write::write_update::{
 };
 use crate::app::services::AppServices;
 use crate::app::update::action::Action;
-use crate::app::update::helpers::{build_bulk_delete_preview, editable_preview_base};
+use crate::app::update::helpers::{
+    EditGuardrailError, build_bulk_delete_preview, editable_preview_base,
+};
 
-fn build_update_preview(state: &AppState, services: &AppServices) -> Result<WritePreview, String> {
+fn build_update_preview(
+    state: &AppState,
+    services: &AppServices,
+) -> Result<WritePreview, EditGuardrailError> {
     if !state.result_interaction.cell_edit().is_active() {
-        return Err("No active cell edit session".to_string());
+        return Err(EditGuardrailError::NoActiveCellEditSession);
     }
 
     let (result, pk_cols) = editable_preview_base(state)?;
@@ -26,25 +31,25 @@ fn build_update_preview(state: &AppState, services: &AppServices) -> Result<Writ
         .result_interaction
         .cell_edit()
         .row
-        .ok_or_else(|| "No row selected for edit".to_string())?;
+        .ok_or(EditGuardrailError::NoRowSelectedForEdit)?;
     let col_idx = state
         .result_interaction
         .cell_edit()
         .col
-        .ok_or_else(|| "No column selected for edit".to_string())?;
+        .ok_or(EditGuardrailError::NoColumnSelectedForEdit)?;
 
     let row = result
         .rows
         .get(row_idx)
-        .ok_or_else(|| "Row index out of bounds".to_string())?;
+        .ok_or(EditGuardrailError::RowIndexOutOfBounds)?;
     let column_name = result
         .columns
         .get(col_idx)
-        .ok_or_else(|| "Column index out of bounds".to_string())?
+        .ok_or(EditGuardrailError::ColumnIndexOutOfBounds)?
         .clone();
 
     if pk_cols.iter().any(|pk| pk == &column_name) {
-        return Err("Primary key columns are read-only".to_string());
+        return Err(EditGuardrailError::PrimaryKeyColumnsReadOnly);
     }
 
     let pk_pairs = build_pk_pairs(&result.columns, row, pk_cols);
@@ -60,7 +65,7 @@ fn build_update_preview(state: &AppState, services: &AppServices) -> Result<Writ
         let reason = guardrail
             .reason
             .unwrap_or_else(|| "Write blocked by guardrails".to_string());
-        return Err(reason);
+        return Err(EditGuardrailError::GuardrailBlocked(reason));
     }
 
     let sql = services.sql_dialect.build_update_sql(
@@ -136,33 +141,27 @@ pub fn reduce(
         Action::SubmitCellEditWrite => {
             if !state.result_interaction.staged_delete_rows().is_empty() {
                 match build_bulk_delete_preview(state, services) {
-                    Ok((preview, target_page, target_row)) => {
+                    Ok(result) => {
                         let staged_count = state.result_interaction.staged_delete_rows().len();
                         state.query.set_delete_refresh_target(
-                            target_page,
-                            target_row,
+                            result.target_page,
+                            result.target_row,
                             staged_count,
                         );
                         return Some(vec![Effect::DispatchActions(vec![
-                            Action::OpenWritePreviewConfirm(Box::new(preview)),
+                            Action::OpenWritePreviewConfirm(Box::new(result.preview)),
                         ])]);
                     }
-                    Err(msg) => {
-                        state.messages.set_error_at(msg, now);
+                    Err(err) => {
+                        state.messages.set_error_at(err.to_string(), now);
                         return Some(vec![]);
                     }
                 }
             }
 
-            if !state.result_interaction.cell_edit().is_active() {
-                state
-                    .messages
-                    .set_error_at("No active cell edit session".to_string(), now);
-                return Some(vec![]);
-            }
             if state.query.is_running() {
                 state.messages.set_error_at(
-                    "Write is unavailable while query is running".to_string(),
+                    EditGuardrailError::WriteUnavailableWhileQueryRunning.to_string(),
                     now,
                 );
                 return Some(vec![]);
@@ -172,8 +171,8 @@ pub fn reduce(
                 Ok(preview) => Some(vec![Effect::DispatchActions(vec![
                     Action::OpenWritePreviewConfirm(Box::new(preview)),
                 ])]),
-                Err(msg) => {
-                    state.messages.set_error_at(msg, now);
+                Err(err) => {
+                    state.messages.set_error_at(err.to_string(), now);
                     Some(vec![])
                 }
             }
