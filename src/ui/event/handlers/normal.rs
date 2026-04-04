@@ -44,7 +44,7 @@ pub fn handle_normal_mode(combo: KeyCombo, state: &AppState) -> Action {
             Key::Char('o') if !state.query.is_history_mode() => {
                 return Action::OpenQueryHistoryPicker;
             }
-            Key::Char('e') if state.query.visible_result().is_some_and(|r| !r.is_error()) => {
+            Key::Char('e') if state.can_request_csv_export() => {
                 return Action::RequestCsvExport;
             }
             _ => {
@@ -1375,6 +1375,19 @@ mod tests {
             assert!(
                 matches!(k, Action::None),
                 "^K should be blocked in history mode"
+            );
+        }
+
+        #[test]
+        fn blocks_ctrl_e() {
+            let mut state = state_with_history(3);
+            state.query.enter_history(1);
+
+            let result = handle_normal_mode(combo_ctrl(Key::Char('e')), &state);
+
+            assert!(
+                matches!(result, Action::None),
+                "^E should be blocked in history mode"
             );
         }
 
