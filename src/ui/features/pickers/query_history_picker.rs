@@ -8,7 +8,7 @@ use crate::app::model::app_state::AppState;
 use crate::app::model::sql_editor::query_history::GroupedEntry;
 use crate::domain::query_history::QueryResultStatus;
 use crate::ui::primitives::molecules::render_modal;
-use crate::ui::theme::Theme;
+use crate::ui::theme::{StatusTone, ThemePalette};
 
 const TIMESTAMP_WIDTH: usize = 18;
 const STATUS_WIDTH: usize = 2;
@@ -37,14 +37,18 @@ fn format_short_timestamp(iso: &str) -> String {
     format!("{month_name} {day} {time} UTC")
 }
 
-fn status_span(status: QueryResultStatus) -> Span<'static> {
+fn status_span(status: QueryResultStatus, theme: &ThemePalette) -> Span<'static> {
+    let tone = status_tone(status);
     match status {
-        QueryResultStatus::Success => {
-            Span::styled("\u{2713} ", Style::default().fg(Theme::STATUS_SUCCESS))
-        }
-        QueryResultStatus::Failed => {
-            Span::styled("\u{2717} ", Style::default().fg(Theme::STATUS_ERROR))
-        }
+        QueryResultStatus::Success => Span::styled("\u{2713} ", theme.status_style(tone)),
+        QueryResultStatus::Failed => Span::styled("\u{2717} ", theme.status_style(tone)),
+    }
+}
+
+fn status_tone(status: QueryResultStatus) -> StatusTone {
+    match status {
+        QueryResultStatus::Success => StatusTone::Success,
+        QueryResultStatus::Failed => StatusTone::Error,
     }
 }
 
@@ -69,7 +73,7 @@ struct PreviewData {
 pub struct QueryHistoryPicker;
 
 impl QueryHistoryPicker {
-    pub fn render(frame: &mut Frame, state: &AppState) -> u16 {
+    pub fn render(frame: &mut Frame, state: &AppState, theme: &ThemePalette) -> u16 {
         let filter_is_empty = state.query_history_picker.filter_input.content().is_empty();
         let filter_content = state
             .query_history_picker
@@ -105,6 +109,7 @@ impl QueryHistoryPicker {
             Constraint::Max(desired_height),
             " Query History ",
             &border_footer,
+            theme,
         );
 
         let preview_h = compute_preview_height(inner.height);
@@ -128,16 +133,16 @@ impl QueryHistoryPicker {
         let filter_line = if filter_content.is_empty() {
             Line::from(Span::styled(
                 "  type to filter",
-                Style::default().fg(Theme::PLACEHOLDER_TEXT),
+                Style::default().fg(theme.placeholder_text),
             ))
         } else {
             Line::from(vec![
-                Span::styled("  > ", Style::default().fg(Theme::MODAL_TITLE)),
-                Span::raw(filter_content),
+                Span::styled("  > ", Style::default().fg(theme.modal_title)),
+                Span::styled(filter_content, Style::default().fg(theme.text_primary)),
                 Span::styled(
                     "\u{2588}",
                     Style::default()
-                        .fg(Theme::CURSOR_FG)
+                        .fg(theme.cursor_fg)
                         .add_modifier(Modifier::SLOW_BLINK),
                 ),
             ])
@@ -153,11 +158,11 @@ impl QueryHistoryPicker {
             };
             let empty_line = Line::from(Span::styled(
                 format!("  {msg}"),
-                Style::default().fg(Theme::TEXT_SECONDARY),
+                Style::default().fg(theme.text_secondary),
             ));
             frame.render_widget(Paragraph::new(empty_line), list_area);
             if let Some(pa) = preview_area {
-                render_empty_preview(frame, pa);
+                render_empty_preview(frame, pa, theme);
             }
             return list_area.height;
         }
@@ -175,25 +180,20 @@ impl QueryHistoryPicker {
         let items: Vec<ListItem> = grouped
             .iter()
             .enumerate()
-            .map(|(i, ge)| build_list_item(ge, i, selected_idx, query_max))
+            .map(|(i, ge)| build_list_item(ge, i, selected_idx, query_max, theme))
             .collect();
 
         drop(grouped);
         if let Some(pa) = preview_area {
             if let Some(ref pd) = preview_data {
-                render_preview(frame, pa, pd);
+                render_preview(frame, pa, pd, theme);
             } else {
-                render_empty_preview(frame, pa);
+                render_empty_preview(frame, pa, theme);
             }
         }
 
-        let highlight_style = Style::default()
-            .bg(Theme::COMPLETION_SELECTED_BG)
-            .fg(Theme::TEXT_PRIMARY)
-            .add_modifier(Modifier::BOLD);
-
         let list = List::new(items)
-            .highlight_style(highlight_style)
+            .highlight_style(theme.picker_selected_style())
             .highlight_symbol("\u{25b8} ");
 
         let mut list_state = ListState::default()
@@ -209,6 +209,7 @@ fn build_list_item(
     i: usize,
     selected_idx: usize,
     query_max: usize,
+    theme: &ThemePalette,
 ) -> ListItem<'static> {
     let query_display = ge.entry.query.replace('\n', " ");
     let char_len = query_display.chars().count();
@@ -221,15 +222,15 @@ fn build_list_item(
 
     let ts_short = format_short_timestamp(ge.entry.executed_at.as_str());
 
-    let mut spans = vec![status_span(ge.entry.result_status)];
+    let mut spans = vec![status_span(ge.entry.result_status, theme)];
 
     if ge.match_indices.is_empty() {
         spans.push(Span::styled(
             truncated.clone(),
             Style::default().fg(if i == selected_idx {
-                Theme::TEXT_PRIMARY
+                theme.text_primary
             } else {
-                Theme::TEXT_SECONDARY
+                theme.text_secondary
             }),
         ));
     } else {
@@ -237,11 +238,11 @@ fn build_list_item(
         for (ci, ch) in chars.iter().enumerate() {
             let is_match = ge.match_indices.contains(&(ci as u32));
             let color = if is_match {
-                Theme::TEXT_ACCENT
+                theme.text_accent
             } else if i == selected_idx {
-                Theme::TEXT_PRIMARY
+                theme.text_primary
             } else {
-                Theme::TEXT_SECONDARY
+                theme.text_secondary
             };
             let mut style = Style::default().fg(color);
             if is_match {
@@ -264,25 +265,30 @@ fn build_list_item(
     let pad = query_max.saturating_sub(used);
 
     if !badge.is_empty() {
-        spans.push(Span::styled(badge, Style::default().fg(Theme::TEXT_DIM)));
+        spans.push(Span::styled(badge, Style::default().fg(theme.text_dim)));
     }
 
     spans.push(Span::raw(" ".repeat(pad)));
     spans.push(Span::styled(
         format!("  {ts_short}"),
-        Style::default().fg(Theme::TEXT_DIM),
+        Style::default().fg(theme.text_dim),
     ));
 
     ListItem::new(Line::from(spans))
 }
 
-fn render_preview(frame: &mut Frame, area: ratatui::layout::Rect, pd: &PreviewData) {
+fn render_preview(
+    frame: &mut Frame,
+    area: ratatui::layout::Rect,
+    pd: &PreviewData,
+    theme: &ThemePalette,
+) {
     let block = Block::default()
         .borders(Borders::TOP)
-        .border_style(Style::default().fg(Theme::MODAL_BORDER))
+        .border_style(Style::default().fg(theme.modal_border))
         .title(Span::styled(
             " Preview ",
-            Style::default().fg(Theme::MODAL_TITLE),
+            Style::default().fg(theme.modal_title),
         ));
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -290,29 +296,24 @@ fn render_preview(frame: &mut Frame, area: ratatui::layout::Rect, pd: &PreviewDa
     let mut lines: Vec<Line> = Vec::new();
 
     let mut meta_spans = Vec::new();
+    let status_style = theme.status_style(status_tone(pd.result_status));
     match pd.result_status {
         QueryResultStatus::Success => {
-            meta_spans.push(Span::styled(
-                "\u{2713} Success",
-                Style::default().fg(Theme::STATUS_SUCCESS),
-            ));
+            meta_spans.push(Span::styled("\u{2713} Success", status_style));
         }
         QueryResultStatus::Failed => {
-            meta_spans.push(Span::styled(
-                "\u{2717} Failed",
-                Style::default().fg(Theme::STATUS_ERROR),
-            ));
+            meta_spans.push(Span::styled("\u{2717} Failed", status_style));
         }
     }
     if let Some(rows) = pd.affected_rows {
         meta_spans.push(Span::styled(
             format!("  \u{2502} {rows} rows affected"),
-            Style::default().fg(Theme::TEXT_SECONDARY),
+            Style::default().fg(theme.text_secondary),
         ));
     }
     meta_spans.push(Span::styled(
         format!("  \u{2502} {}", format_short_timestamp(&pd.executed_at)),
-        Style::default().fg(Theme::TEXT_DIM),
+        Style::default().fg(theme.text_dim),
     ));
     lines.push(Line::from(meta_spans));
     lines.push(Line::raw(""));
@@ -320,7 +321,7 @@ fn render_preview(frame: &mut Frame, area: ratatui::layout::Rect, pd: &PreviewDa
     for sql_line in pd.query.lines() {
         lines.push(Line::styled(
             sql_line.to_string(),
-            Style::default().fg(Theme::TEXT_PRIMARY),
+            Style::default().fg(theme.text_primary),
         ));
     }
 
@@ -328,20 +329,20 @@ fn render_preview(frame: &mut Frame, area: ratatui::layout::Rect, pd: &PreviewDa
     frame.render_widget(paragraph, inner);
 }
 
-fn render_empty_preview(frame: &mut Frame, area: ratatui::layout::Rect) {
+fn render_empty_preview(frame: &mut Frame, area: ratatui::layout::Rect, theme: &ThemePalette) {
     let block = Block::default()
         .borders(Borders::TOP)
-        .border_style(Style::default().fg(Theme::MODAL_BORDER))
+        .border_style(Style::default().fg(theme.modal_border))
         .title(Span::styled(
             " Preview ",
-            Style::default().fg(Theme::MODAL_TITLE),
+            Style::default().fg(theme.modal_title),
         ));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
     let msg = Paragraph::new(Line::styled(
         "No selection",
-        Style::default().fg(Theme::TEXT_MUTED),
+        Style::default().fg(theme.text_muted),
     ));
     frame.render_widget(msg, inner);
 }
