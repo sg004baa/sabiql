@@ -1,7 +1,14 @@
 use ratatui::style::Style;
 use ratatui::text::Span;
+use std::cmp::Ordering;
 
 use crate::ui::theme::Theme;
+
+pub fn cursor_style() -> Style {
+    Style::default()
+        .bg(Theme::CURSOR_FG)
+        .fg(Theme::SELECTION_BG)
+}
 
 pub fn text_cursor_spans(
     content: &str,
@@ -25,9 +32,7 @@ pub fn text_cursor_spans(
     let cursor_in_view = cursor.checked_sub(vp);
 
     // Block cursor: thin bar (▏) occupies a full cell and shifts text right, so we use bg/fg inversion instead.
-    let cursor_style = Style::default()
-        .bg(Theme::CURSOR_FG)
-        .fg(Theme::SELECTION_BG);
+    let cursor_style = cursor_style();
 
     if cursor >= total {
         let text: String = visible.iter().collect();
@@ -48,9 +53,68 @@ pub fn text_cursor_spans(
     }
 }
 
+pub fn insert_cursor_span(spans: Vec<Span<'static>>, cursor_col: usize) -> Vec<Span<'static>> {
+    let mut output = Vec::new();
+    let mut remaining = cursor_col;
+    let mut iter = spans.into_iter().peekable();
+
+    while let Some(span) = iter.next() {
+        let content = span.content.as_ref();
+        let len = content.chars().count();
+
+        if remaining > len {
+            remaining -= len;
+            output.push(span);
+            continue;
+        }
+
+        if remaining == len {
+            output.push(span);
+            if iter.peek().is_none() {
+                output.push(Span::styled(" ", cursor_style()));
+                return output;
+            }
+
+            remaining = 0;
+            continue;
+        }
+
+        let (before, current, after) = split_at_cursor(content, remaining);
+        if !before.is_empty() {
+            output.push(Span::styled(before, span.style));
+        }
+        output.push(Span::styled(current, span.style.patch(cursor_style())));
+        if !after.is_empty() {
+            output.push(Span::styled(after, span.style));
+        }
+        output.extend(iter);
+        return output;
+    }
+
+    output.push(Span::styled(" ", cursor_style()));
+    output
+}
+
+fn split_at_cursor(text: &str, cursor_col: usize) -> (String, String, String) {
+    let mut before = String::new();
+    let mut current = String::new();
+    let mut after = String::new();
+
+    for (idx, ch) in text.chars().enumerate() {
+        match idx.cmp(&cursor_col) {
+            Ordering::Less => before.push(ch),
+            Ordering::Equal => current.push(ch),
+            Ordering::Greater => after.push(ch),
+        }
+    }
+
+    (before, current, after)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::style::Modifier;
 
     fn spans_to_strings(spans: &[Span<'_>]) -> Vec<String> {
         spans.iter().map(|s| s.content.to_string()).collect()
@@ -159,5 +223,70 @@ mod tests {
 
         assert_eq!(cursor_start.style, cursor_middle.style);
         assert_eq!(cursor_middle.style, cursor_end.style);
+    }
+
+    #[test]
+    fn insert_cursor_span_preserves_existing_styles_across_boundary() {
+        let spans = vec![
+            Span::styled("ab".to_string(), Style::default().fg(Theme::SQL_KEYWORD)),
+            Span::styled("cd".to_string(), Style::default().fg(Theme::SQL_STRING)),
+            Span::styled("ef".to_string(), Style::default().fg(Theme::SQL_COMMENT)),
+        ];
+
+        let inserted = insert_cursor_span(spans, 2);
+
+        let texts: Vec<String> = inserted.iter().map(|s| s.content.to_string()).collect();
+        assert_eq!(texts, vec!["ab", "c", "d", "ef"]);
+        assert_eq!(inserted[0].style.fg, Some(Theme::SQL_KEYWORD));
+        assert_eq!(inserted[1].style, cursor_style());
+        assert_eq!(inserted[2].style.fg, Some(Theme::SQL_STRING));
+        assert_eq!(inserted[3].style.fg, Some(Theme::SQL_COMMENT));
+    }
+
+    #[test]
+    fn insert_cursor_span_uses_next_span_at_boundary() {
+        let spans = vec![
+            Span::styled("ab".to_string(), Style::default().fg(Theme::SQL_KEYWORD)),
+            Span::styled("cd".to_string(), Style::default().fg(Theme::SQL_STRING)),
+        ];
+
+        let inserted = insert_cursor_span(spans, 2);
+
+        let texts: Vec<String> = inserted.iter().map(|s| s.content.to_string()).collect();
+        assert_eq!(texts, vec!["ab", "c", "d"]);
+        assert_eq!(inserted[0].style.fg, Some(Theme::SQL_KEYWORD));
+        assert_eq!(inserted[1].style, cursor_style());
+        assert_eq!(inserted[2].style.fg, Some(Theme::SQL_STRING));
+    }
+
+    #[test]
+    fn insert_cursor_span_preserves_modifiers_on_cursor_character() {
+        let spans = vec![Span::styled(
+            "ab".to_string(),
+            Style::default()
+                .fg(Theme::SQL_KEYWORD)
+                .add_modifier(Modifier::BOLD),
+        )];
+
+        let inserted = insert_cursor_span(spans, 0);
+
+        assert_eq!(inserted[0].content.as_ref(), "a");
+        assert_eq!(inserted[0].style.bg, Some(Theme::CURSOR_FG));
+        assert_eq!(inserted[0].style.fg, Some(Theme::SELECTION_BG));
+        assert!(inserted[0].style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn insert_cursor_span_at_true_end_appends_cursor_cell() {
+        let spans = vec![
+            Span::styled("ab".to_string(), Style::default().fg(Theme::SQL_KEYWORD)),
+            Span::styled("cd".to_string(), Style::default().fg(Theme::SQL_STRING)),
+        ];
+
+        let inserted = insert_cursor_span(spans, 4);
+
+        let texts: Vec<String> = inserted.iter().map(|s| s.content.to_string()).collect();
+        assert_eq!(texts, vec!["ab", "cd", " "]);
+        assert_eq!(inserted[2].style, cursor_style());
     }
 }
