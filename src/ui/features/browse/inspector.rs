@@ -193,6 +193,7 @@ impl Inspector {
         let clamped_scroll_offset = clamp_scroll_offset(scroll_offset, visible_lines, total_lines);
 
         let paragraph = Paragraph::new(lines)
+            .style(Style::default().fg(Theme::TEXT_PRIMARY))
             .wrap(Wrap { trim: false })
             .scroll((clamped_scroll_offset as u16, 0));
         frame.render_widget(paragraph, area);
@@ -339,7 +340,9 @@ impl Inspector {
             })
             .collect();
 
-        let table_widget = RatatuiTable::new(rows, widths).header(header);
+        let table_widget = RatatuiTable::new(rows, widths)
+            .header(header)
+            .style(Style::default().fg(Theme::TEXT_PRIMARY));
         frame.render_widget(table_widget, area);
 
         use crate::ui::primitives::atoms::scroll_indicator::{
@@ -467,7 +470,8 @@ impl Inspector {
     fn render_rls(frame: &mut Frame, area: Rect, table: &Table, scroll_offset: usize) {
         match &table.rls {
             None => {
-                let msg = Paragraph::new("RLS not enabled");
+                let msg = Paragraph::new("RLS not enabled")
+                    .style(Style::default().fg(Theme::PLACEHOLDER_TEXT));
                 frame.render_widget(msg, area);
             }
             Some(rls) => {
@@ -531,6 +535,7 @@ impl Inspector {
                     clamp_scroll_offset(scroll_offset, visible_lines, total_lines);
 
                 let paragraph = Paragraph::new(lines)
+                    .style(Style::default().fg(Theme::TEXT_PRIMARY))
                     .wrap(Wrap { trim: false })
                     .scroll((clamped_scroll_offset as u16, 0));
                 frame.render_widget(paragraph, area);
