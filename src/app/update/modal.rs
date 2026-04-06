@@ -8,6 +8,12 @@ use crate::app::update::action::{
     Action, InputTarget, ListMotion, ListTarget, ScrollAmount, ScrollDirection, ScrollTarget,
 };
 
+fn scroll_help_by(state: &mut AppState, direction: ScrollDirection, delta: usize) {
+    let max_scroll = state.ui.help_max_scroll();
+    state.ui.help_scroll_offset =
+        direction.clamp_vertical_offset(state.ui.help_scroll_offset, max_scroll, delta);
+}
+
 pub fn reduce_modal(state: &mut AppState, action: &Action, now: Instant) -> Option<Vec<Effect>> {
     match action {
         Action::OpenTablePicker => {
@@ -40,20 +46,21 @@ pub fn reduce_modal(state: &mut AppState, action: &Action, now: Instant) -> Opti
         }
         Action::Scroll {
             target: ScrollTarget::Help,
-            direction: ScrollDirection::Up,
-            amount: ScrollAmount::Line,
+            direction,
+            amount,
         } => {
-            state.ui.help_scroll_offset = state.ui.help_scroll_offset.saturating_sub(1);
-            Some(vec![])
-        }
-        Action::Scroll {
-            target: ScrollTarget::Help,
-            direction: ScrollDirection::Down,
-            amount: ScrollAmount::Line,
-        } => {
-            let max_scroll = state.ui.help_max_scroll();
-            if state.ui.help_scroll_offset < max_scroll {
-                state.ui.help_scroll_offset += 1;
+            match amount {
+                ScrollAmount::Line => scroll_help_by(state, *direction, 1),
+                ScrollAmount::ToStart => state.ui.help_scroll_offset = 0,
+                ScrollAmount::ToEnd => state.ui.help_scroll_offset = state.ui.help_max_scroll(),
+                ScrollAmount::HalfPage | ScrollAmount::FullPage => {
+                    if let Some(delta) = amount.page_delta(state.ui.help_visible_rows()) {
+                        scroll_help_by(state, *direction, delta);
+                    }
+                }
+                ScrollAmount::ViewportTop
+                | ScrollAmount::ViewportMiddle
+                | ScrollAmount::ViewportBottom => {}
             }
             Some(vec![])
         }
