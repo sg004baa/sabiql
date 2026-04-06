@@ -1,5 +1,5 @@
 # sabiql
-![hero](https://github.com/user-attachments/assets/2ae676ca-1058-455e-9505-3b4241bd63fd)
+![hero](https://github.com/user-attachments/assets/745ab18f-915c-4017-81a6-465c5c5ee11c)
 
 A fast, driver-less TUI to browse, query, and edit PostgreSQL databases — no drivers, no setup, just `psql`.
 
