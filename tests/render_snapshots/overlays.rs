@@ -133,6 +133,20 @@ fn sql_modal_cursor_at_tail() {
 }
 
 #[test]
+fn sql_modal_normal_cursor_at_tail() {
+    let mut state = create_test_state();
+    let mut terminal = create_test_terminal();
+
+    state.modal.set_mode(InputMode::SqlModal);
+    state.sql_modal.editor.set_content("SELECT 1".to_string());
+    state.sql_modal.set_status(SqlModalStatus::Normal);
+
+    let output = render_to_string(&mut terminal, &mut state);
+
+    insta::assert_snapshot!(output);
+}
+
+#[test]
 fn sql_modal_success_select() {
     let now = test_instant();
     let mut state = create_test_state();

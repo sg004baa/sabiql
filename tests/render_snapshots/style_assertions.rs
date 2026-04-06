@@ -10,6 +10,7 @@ use ratatui::style::{Color, Modifier};
 use sabiql::app::model::shared::input_mode::InputMode;
 use sabiql::app::model::shared::theme_id::ThemeId;
 use sabiql::app::model::sql_editor::modal::SqlModalStatus;
+use sabiql::ui::primitives::atoms::CursorKind;
 use sabiql::ui::theme::{DEFAULT_THEME, TEST_CONTRAST_THEME, ThemePalette};
 
 /// Help modal uses Percentage(70) x Percentage(80), centered in TEST_WIDTH x TEST_HEIGHT.
@@ -273,6 +274,104 @@ fn sql_modal_string_comment_and_operator_use_syntax_colors() {
     assert!(has_string, "Expected a green SQL string cell");
     assert!(has_operator, "Expected a cyan SQL operator cell");
     assert!(has_comment, "Expected a dark gray SQL comment cell");
+}
+
+#[test]
+fn sql_modal_normal_and_insert_use_distinct_cursor_styles() {
+    let mut state = create_test_state();
+    let mut terminal = create_test_terminal();
+
+    state.modal.set_mode(InputMode::SqlModal);
+    state.sql_modal.editor.set_content("SELECT 1".to_string());
+    state.sql_modal.set_status(SqlModalStatus::Normal);
+
+    let normal_buffer = render_and_get_buffer(&mut terminal, &mut state);
+    let has_block_cursor = (0..TEST_HEIGHT)
+        .flat_map(|y| (0..TEST_WIDTH).map(move |x| (x, y)))
+        .any(|(x, y)| {
+            normal_buffer.cell((x, y)).is_some_and(|cell| {
+                cell.bg == DEFAULT_THEME.cursor_bg && cell.fg == DEFAULT_THEME.cursor_text_fg
+            })
+        });
+
+    state.sql_modal.set_status(SqlModalStatus::Editing);
+
+    let insert_buffer = render_and_get_buffer(&mut terminal, &mut state);
+    let has_insert_bar = (0..TEST_HEIGHT)
+        .flat_map(|y| (0..TEST_WIDTH).map(move |x| (x, y)))
+        .any(|(x, y)| {
+            insert_buffer.cell((x, y)).is_some_and(|cell| {
+                cell.symbol() == CursorKind::Insert.glyph()
+                    && cell.fg == DEFAULT_THEME.cursor_fg
+                    && cell.bg != DEFAULT_THEME.cursor_bg
+            })
+        });
+
+    assert!(
+        has_block_cursor,
+        "Expected block cursor styling in SQL normal mode"
+    );
+    assert!(
+        has_insert_bar,
+        "Expected thin insert cursor glyph in SQL insert mode"
+    );
+}
+
+fn sql_modal_block_cursor_position(buffer: &ratatui::buffer::Buffer) -> Option<(u16, u16)> {
+    (0..TEST_HEIGHT)
+        .flat_map(|y| (0..TEST_WIDTH).map(move |x| (x, y)))
+        .find(|&(x, y)| {
+            buffer.cell((x, y)).is_some_and(|cell| {
+                cell.bg == DEFAULT_THEME.cursor_bg && cell.fg == DEFAULT_THEME.cursor_text_fg
+            })
+        })
+}
+
+#[test]
+fn sql_modal_normal_cursor_position_tracks_head_middle_and_tail() {
+    let mut state = create_test_state();
+    let mut terminal = create_test_terminal();
+    let content = "SELECT 1".to_string();
+    let middle_col = 4;
+    let tail_col = content.chars().count();
+
+    state.modal.set_mode(InputMode::SqlModal);
+    state
+        .sql_modal
+        .editor
+        .set_content_with_cursor(content.clone(), 0);
+    state.sql_modal.set_status(SqlModalStatus::Normal);
+
+    let head_buffer = render_and_get_buffer(&mut terminal, &mut state);
+    let head = sql_modal_block_cursor_position(&head_buffer)
+        .expect("Expected block cursor in SQL normal mode at head");
+
+    state
+        .sql_modal
+        .editor
+        .set_content_with_cursor(content.clone(), middle_col);
+    let middle_buffer = render_and_get_buffer(&mut terminal, &mut state);
+    let middle = sql_modal_block_cursor_position(&middle_buffer)
+        .expect("Expected block cursor in SQL normal mode at middle");
+
+    state
+        .sql_modal
+        .editor
+        .set_content_with_cursor(content, tail_col);
+    let tail_buffer = render_and_get_buffer(&mut terminal, &mut state);
+    let tail = sql_modal_block_cursor_position(&tail_buffer)
+        .expect("Expected block cursor in SQL normal mode at tail");
+
+    assert_eq!(
+        head.1, middle.1,
+        "Expected head and middle cursor on the same row"
+    );
+    assert_eq!(
+        middle.1, tail.1,
+        "Expected middle and tail cursor on the same row"
+    );
+    assert_eq!(middle.0, head.0 + middle_col as u16);
+    assert_eq!(tail.0, head.0 + tail_col as u16);
 }
 
 #[test]
