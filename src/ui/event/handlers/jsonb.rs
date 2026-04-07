@@ -3,10 +3,18 @@ use crate::app::update::input::keybindings::{
     JSONB_DETAIL, JSONB_EDIT, JSONB_SEARCH_KEYS, Key, KeyCombo,
 };
 use crate::app::update::input::keymap;
+use crate::app::update::input::vim::{JsonbDetailVimContext, VimSurfaceContext, action_for_key};
 
 pub fn handle_jsonb_detail_keys(combo: KeyCombo, is_searching: bool) -> Action {
     if is_searching {
         return handle_search_input(combo);
+    }
+
+    if let Some(action) = action_for_key(
+        &combo,
+        VimSurfaceContext::JsonbDetail(JsonbDetailVimContext::Viewing),
+    ) {
+        return action;
     }
 
     if let Some(action) = JSONB_DETAIL.resolve(&combo) {
@@ -54,6 +62,13 @@ fn handle_search_input(combo: KeyCombo) -> Action {
 }
 
 pub fn handle_jsonb_edit_keys(combo: KeyCombo) -> Action {
+    if let Some(action) = action_for_key(
+        &combo,
+        VimSurfaceContext::JsonbDetail(JsonbDetailVimContext::Editing),
+    ) {
+        return action;
+    }
+
     if let Some(action) = JSONB_EDIT.resolve(&combo) {
         return action;
     }
@@ -215,6 +230,7 @@ mod tests {
 
     mod jsonb_edit {
         use super::*;
+        use rstest::rstest;
 
         #[test]
         fn ctrl_n_still_falls_through_to_editor_input() {
@@ -226,6 +242,26 @@ mod tests {
                     target: InputTarget::JsonbEdit,
                     ch: 'n',
                 }
+            ));
+        }
+
+        #[rstest]
+        #[case(Key::Char('i'), 'i')]
+        #[case(Key::Char('d'), 'd')]
+        #[case(Key::Char('n'), 'n')]
+        #[case(Key::Char('h'), 'h')]
+        fn vim_character_keys_still_fall_through_to_editor_input(
+            #[case] key: Key,
+            #[case] ch: char,
+        ) {
+            let result = handle_jsonb_edit_keys(combo(key));
+
+            assert!(matches!(
+                result,
+                Action::TextInput {
+                    target: InputTarget::JsonbEdit,
+                    ch: actual_ch,
+                } if actual_ch == ch
             ));
         }
 

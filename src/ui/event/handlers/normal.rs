@@ -1,25 +1,23 @@
 use crate::app::model::app_state::AppState;
 use crate::app::model::shared::focused_pane::FocusedPane;
-use crate::app::model::shared::inspector_tab::InspectorTab;
 use crate::app::model::shared::key_sequence::Prefix;
 use crate::app::model::shared::ui_state::ResultNavMode;
 use crate::app::update::action::Action;
 use crate::app::update::input::keybindings::{self as kb, Key, KeyCombo};
-use crate::app::update::input::nav_intent::{
-    NavIntent, NavigationContext, map_nav_intent, resolve,
+use crate::app::update::input::vim::{
+    BrowseVimContext, VimCommand, VimSurfaceContext, action_for_input, action_for_key,
+    classify_command,
 };
 
 #[cfg(test)]
+use crate::app::model::connection::error::ConnectionErrorInfo;
+#[cfg(test)]
 use crate::app::model::shared::ui_state::FocusMode;
 
-fn resolve_nav(combo: &KeyCombo, nav_ctx: NavigationContext) -> Option<Action> {
-    map_nav_intent(combo).map(|intent| resolve(intent, nav_ctx))
-}
-
 pub fn handle_normal_mode(combo: KeyCombo, state: &AppState) -> Action {
-    let nav_ctx = NavigationContext::from_state(state);
-    let result_navigation = nav_ctx.is_result();
-    let inspector_navigation = nav_ctx.is_inspector();
+    let browse_ctx = BrowseVimContext::from_state(state);
+    let result_navigation = browse_ctx.is_result();
+    let inspector_navigation = browse_ctx.is_inspector();
     let result_nav_mode = state.result_interaction.selection().mode();
 
     // Ctrl combos
@@ -45,7 +43,8 @@ pub fn handle_normal_mode(combo: KeyCombo, state: &AppState) -> Action {
                 return Action::RequestCsvExport;
             }
             _ => {
-                if let Some(action) = resolve_nav(&combo, nav_ctx) {
+                if let Some(action) = action_for_key(&combo, VimSurfaceContext::Browse(browse_ctx))
+                {
                     return action;
                 }
                 if state.query.is_history_mode() {
@@ -62,19 +61,9 @@ pub fn handle_normal_mode(combo: KeyCombo, state: &AppState) -> Action {
         if combo.modifiers.ctrl || combo.modifiers.alt {
             return Action::CancelKeySequence;
         }
-        return match prefix {
-            Prefix::Z => {
-                if inspector_navigation {
-                    return Action::CancelKeySequence;
-                }
-                let intent = match combo.key {
-                    Key::Char('z') => NavIntent::ScrollCursorCenter,
-                    Key::Char('t') => NavIntent::ScrollCursorTop,
-                    Key::Char('b') => NavIntent::ScrollCursorBottom,
-                    _ => return Action::CancelKeySequence,
-                };
-                resolve(intent, nav_ctx)
-            }
+        return match action_for_input(&combo, Some(prefix), VimSurfaceContext::Browse(browse_ctx)) {
+            Some(Action::None) | None => Action::CancelKeySequence,
+            Some(action) => action,
         };
     }
 
@@ -87,8 +76,8 @@ pub fn handle_normal_mode(combo: KeyCombo, state: &AppState) -> Action {
             // Home/End/PageDown/PageUp are blocked in history mode
             // (only char keys g/G and Ctrl+D/U/F/B are allowed for these motions)
             Key::Home | Key::End | Key::PageDown | Key::PageUp => return Action::None,
-            // Scroll keys fall through to normal handling via NavIntent
-            _ if map_nav_intent(&combo).is_some() => {}
+            // Scroll keys fall through to shared vim navigation handling
+            _ if matches!(classify_command(&combo), Some(VimCommand::Navigation(_))) => {}
             Key::Char('z') => {}
             _ => return Action::None,
         }
@@ -110,32 +99,22 @@ pub fn handle_normal_mode(combo: KeyCombo, state: &AppState) -> Action {
     if kb::is_focus_toggle(&combo) {
         return Action::ToggleFocus;
     }
+    if combo.key == Key::Enter
+        && !combo.modifiers.ctrl
+        && !combo.modifiers.alt
+        && !combo.modifiers.shift
+        && state.connection_error.error_info.is_some()
+    {
+        return Action::ConfirmSelection;
+    }
 
-    // NavIntent-based navigation (context-dependent)
-    if let Some(action) = resolve_nav(&combo, nav_ctx) {
+    // Shared vim semantics (navigation, mode, operators)
+    if let Some(action) = action_for_key(&combo, VimSurfaceContext::Browse(browse_ctx)) {
         return action;
     }
 
     // Non-navigation context keys
     match combo.key {
-        Key::Esc => {
-            if result_navigation {
-                match result_nav_mode {
-                    ResultNavMode::CellActive => {
-                        if state.result_interaction.cell_edit().has_pending_draft() {
-                            Action::ResultDiscardCellEdit
-                        } else {
-                            Action::ResultExitToRowActive
-                        }
-                    }
-                    ResultNavMode::RowActive => Action::ResultExitToScroll,
-                    ResultNavMode::Scroll => Action::Escape,
-                }
-            } else {
-                Action::Escape
-            }
-        }
-
         Key::Char(']') => {
             if result_navigation {
                 Action::ResultNextPage
@@ -164,31 +143,8 @@ pub fn handle_normal_mode(combo: KeyCombo, state: &AppState) -> Action {
         Key::Tab if inspector_navigation => Action::InspectorNextTab,
         Key::BackTab if inspector_navigation => Action::InspectorPrevTab,
 
-        Key::Char('y') if result_navigation && result_nav_mode == ResultNavMode::RowActive => {
-            if state.result_interaction.yank_op_pending {
-                Action::ResultRowYank
-            } else {
-                Action::ResultRowYankOperatorPending
-            }
-        }
-        Key::Char('y') if result_navigation && result_nav_mode == ResultNavMode::CellActive => {
-            Action::ResultCellYank
-        }
-        Key::Char('y') if inspector_navigation && state.ui.inspector_tab == InspectorTab::Ddl => {
-            Action::DdlYank
-        }
-        Key::Char('d') if result_navigation && result_nav_mode == ResultNavMode::RowActive => {
-            if state.result_interaction.delete_op_pending {
-                Action::StageRowForDelete
-            } else {
-                Action::ResultDeleteOperatorPending
-            }
-        }
         Key::Char('u') if result_navigation && result_nav_mode == ResultNavMode::RowActive => {
             Action::UnstageLastStagedRow
-        }
-        Key::Char('i') if result_navigation && result_nav_mode == ResultNavMode::CellActive => {
-            Action::ResultEnterCellEdit
         }
         Key::Char('p') => Action::OpenTablePicker,
         Key::Char('s') => Action::OpenSqlModal,
@@ -198,22 +154,6 @@ pub fn handle_normal_mode(combo: KeyCombo, state: &AppState) -> Action {
         }
 
         Key::Char('z') => Action::BeginKeySequence(Prefix::Z),
-
-        Key::Enter => {
-            if state.connection_error.error_info.is_some() {
-                Action::ConfirmSelection
-            } else if result_navigation {
-                match result_nav_mode {
-                    ResultNavMode::Scroll => Action::ResultEnterRowActive,
-                    ResultNavMode::RowActive => Action::ResultEnterCellActive,
-                    ResultNavMode::CellActive => Action::None,
-                }
-            } else if state.ui.focused_pane == FocusedPane::Explorer {
-                Action::ConfirmSelection
-            } else {
-                Action::None
-            }
-        }
 
         _ => Action::None,
     }
@@ -384,6 +324,26 @@ mod tests {
         state.ui.focused_pane = FocusedPane::Explorer;
 
         let result = handle_normal_mode(combo(Key::Enter), &state);
+
+        assert!(matches!(result, Action::ConfirmSelection));
+    }
+
+    #[test]
+    fn alt_enter_does_not_confirm_connection_error() {
+        let mut state = browse_state();
+        state.connection_error.error_info = Some(ConnectionErrorInfo::new("boom"));
+
+        let result = handle_normal_mode(KeyCombo::alt(Key::Enter), &state);
+
+        assert!(matches!(result, Action::None));
+    }
+
+    #[test]
+    fn plain_enter_confirms_connection_error() {
+        let mut state = browse_state();
+        state.connection_error.error_info = Some(ConnectionErrorInfo::new("boom"));
+
+        let result = handle_normal_mode(KeyCombo::plain(Key::Enter), &state);
 
         assert!(matches!(result, Action::ConfirmSelection));
     }

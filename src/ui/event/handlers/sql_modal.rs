@@ -3,27 +3,7 @@ use crate::app::update::action::{
     Action, InputTarget, ScrollAmount, ScrollDirection, ScrollTarget,
 };
 use crate::app::update::input::keybindings::{Key, KeyCombo};
-
-fn line_scroll_action(
-    combo: KeyCombo,
-    target: ScrollTarget,
-    plain: bool,
-    ctrl_only: bool,
-) -> Option<Action> {
-    let direction = match combo.key {
-        Key::Char('j') | Key::Down if plain => Some(ScrollDirection::Down),
-        Key::Char('n') if ctrl_only => Some(ScrollDirection::Down),
-        Key::Char('k') | Key::Up if plain => Some(ScrollDirection::Up),
-        Key::Char('p') if ctrl_only => Some(ScrollDirection::Up),
-        _ => None,
-    }?;
-
-    Some(Action::Scroll {
-        target,
-        direction,
-        amount: ScrollAmount::Line,
-    })
-}
+use crate::app::update::input::vim::{SqlModalVimContext, VimSurfaceContext, action_for_key};
 
 pub fn handle_sql_modal_keys(
     combo: KeyCombo,
@@ -45,10 +25,7 @@ pub fn handle_sql_modal_keys(
     ) {
         let ctrl = combo.modifiers.ctrl;
         let alt = combo.modifiers.alt;
-        let shift = combo.modifiers.shift;
         let plain = !ctrl && !alt;
-        // Treat only pure Ctrl as the alias modifier so Ctrl+Alt (AltGr) does not trigger nav.
-        let ctrl_only = ctrl && !alt && !shift;
 
         if ctrl && combo.key == Key::Char('e') {
             return Action::ExplainRequest;
@@ -64,33 +41,31 @@ pub fn handle_sql_modal_keys(
 
         // Plan tab specific keys (read-only viewer)
         if active_tab == SqlModalTab::Plan {
-            if let Some(action) =
-                line_scroll_action(combo, ScrollTarget::ExplainPlan, plain, ctrl_only)
-            {
+            if let Some(action) = action_for_key(
+                &combo,
+                VimSurfaceContext::SqlModal(SqlModalVimContext::PlanViewer),
+            ) {
                 return action;
             }
 
             return match combo.key {
                 Key::Char('e') if alt => Action::ExplainAnalyzeRequest,
-                Key::Char('y') if plain => Action::SqlModalYank,
-                Key::Esc if plain => Action::CloseSqlModal,
                 _ => Action::None,
             };
         }
 
         // Compare tab specific keys (read-only viewer)
         if active_tab == SqlModalTab::Compare {
-            if let Some(action) =
-                line_scroll_action(combo, ScrollTarget::ExplainCompare, plain, ctrl_only)
-            {
+            if let Some(action) = action_for_key(
+                &combo,
+                VimSurfaceContext::SqlModal(SqlModalVimContext::CompareViewer),
+            ) {
                 return action;
             }
 
             return match combo.key {
                 Key::Char('e') if alt => Action::ExplainAnalyzeRequest,
-                Key::Char('y') if plain => Action::SqlModalYank,
                 Key::Char('e') if plain => Action::CompareEditQuery,
-                Key::Esc if plain => Action::CloseSqlModal,
                 _ => Action::None,
             };
         }
@@ -105,10 +80,15 @@ pub fn handle_sql_modal_keys(
             return Action::SqlModalClear;
         }
 
+        if let Some(action) = action_for_key(
+            &combo,
+            VimSurfaceContext::SqlModal(SqlModalVimContext::QueryNormal),
+        ) {
+            return action;
+        }
+
         return match combo.key {
             Key::Enter if alt => Action::SqlModalSubmit,
-            Key::Char('y') if plain => Action::SqlModalYank,
-            Key::Enter if plain => Action::SqlModalEnterInsert,
             Key::Up => Action::TextMoveCursor {
                 target: InputTarget::SqlModal,
                 direction: CursorMove::Up,
@@ -133,7 +113,6 @@ pub fn handle_sql_modal_keys(
                 target: InputTarget::SqlModal,
                 direction: CursorMove::End,
             },
-            Key::Esc if plain => Action::CloseSqlModal,
             _ => Action::None,
         };
     }
@@ -241,50 +220,60 @@ pub fn handle_sql_modal_keys(
         return Action::ExplainAnalyzeRequest;
     }
 
-    match (combo.key, completion_visible) {
-        // Completion navigation (when popup is visible)
-        (Key::Char('p'), true) if ctrl_only => Action::CompletionPrev,
-        (Key::Char('n'), true) if ctrl_only => Action::CompletionNext,
-        (Key::Up, true) => Action::CompletionPrev,
-        (Key::Down, true) => Action::CompletionNext,
-        (Key::Tab | Key::Enter, true) => Action::CompletionAccept,
-        (Key::Esc | Key::Left | Key::Right, true) => Action::CompletionDismiss,
+    if completion_visible {
+        match combo.key {
+            Key::Char('p') if ctrl_only => return Action::CompletionPrev,
+            Key::Char('n') if ctrl_only => return Action::CompletionNext,
+            Key::Up => return Action::CompletionPrev,
+            Key::Down => return Action::CompletionNext,
+            Key::Tab | Key::Enter => return Action::CompletionAccept,
+            Key::Esc | Key::Left | Key::Right => return Action::CompletionDismiss,
+            _ => {}
+        }
+    }
 
-        (Key::Esc, false) => Action::SqlModalEnterNormal,
-        (Key::Left, false) => Action::TextMoveCursor {
+    if let Some(action) = action_for_key(
+        &combo,
+        VimSurfaceContext::SqlModal(SqlModalVimContext::QueryEditing),
+    ) {
+        return action;
+    }
+
+    match combo.key {
+        Key::Left => Action::TextMoveCursor {
             target: InputTarget::SqlModal,
             direction: CursorMove::Left,
         },
-        (Key::Right, false) => Action::TextMoveCursor {
+        Key::Right => Action::TextMoveCursor {
             target: InputTarget::SqlModal,
             direction: CursorMove::Right,
         },
-        (Key::Up, false) => Action::TextMoveCursor {
+        Key::Up => Action::TextMoveCursor {
             target: InputTarget::SqlModal,
             direction: CursorMove::Up,
         },
-        (Key::Down, false) => Action::TextMoveCursor {
+        Key::Down => Action::TextMoveCursor {
             target: InputTarget::SqlModal,
             direction: CursorMove::Down,
         },
-        (Key::Home, _) => Action::TextMoveCursor {
+        Key::Home => Action::TextMoveCursor {
             target: InputTarget::SqlModal,
             direction: CursorMove::Home,
         },
-        (Key::End, _) => Action::TextMoveCursor {
+        Key::End => Action::TextMoveCursor {
             target: InputTarget::SqlModal,
             direction: CursorMove::End,
         },
         // Editing
-        (Key::Backspace, _) => Action::TextBackspace {
+        Key::Backspace => Action::TextBackspace {
             target: InputTarget::SqlModal,
         },
-        (Key::Delete, _) => Action::TextDelete {
+        Key::Delete => Action::TextDelete {
             target: InputTarget::SqlModal,
         },
-        (Key::Enter, false) => Action::SqlModalNewLine,
-        (Key::Tab, false) => Action::SqlModalTab,
-        (Key::Char(c), _) => Action::TextInput {
+        Key::Enter => Action::SqlModalNewLine,
+        Key::Tab => Action::SqlModalTab,
+        Key::Char(c) => Action::TextInput {
             target: InputTarget::SqlModal,
             ch: c,
         },
@@ -474,6 +463,20 @@ mod tests {
         );
 
         assert_action(result, expected);
+    }
+
+    #[rstest]
+    #[case(Key::Enter)]
+    #[case(Key::Char('i'))]
+    fn normal_sql_tab_accepts_shared_insert_keys(#[case] code: Key) {
+        let result = handle_sql_modal_keys(
+            combo(code),
+            false,
+            &SqlModalStatus::Normal,
+            SqlModalTab::Sql,
+        );
+
+        assert_action(result, Expected::SqlModalEnterInsert);
     }
 
     #[rstest]
@@ -880,7 +883,7 @@ mod tests {
     #[case(Key::Down, Expected::ExplainPlanScrollDown)]
     #[case(Key::Char('k'), Expected::ExplainPlanScrollUp)]
     #[case(Key::Up, Expected::ExplainPlanScrollUp)]
-    fn plan_tab_scroll_keys_scroll_plan(#[case] code: Key, #[case] expected: Expected) {
+    fn plan_tab_jk_and_arrow_keys_scroll_plan(#[case] code: Key, #[case] expected: Expected) {
         let result = handle_sql_modal_keys(
             combo(code),
             false,
