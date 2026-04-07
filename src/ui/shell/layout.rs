@@ -11,7 +11,7 @@ use crate::app::ports::RenderOutput;
 use crate::app::services::AppServices;
 use crate::ui::features::browse::explorer::Explorer;
 use crate::ui::features::browse::inspector::Inspector;
-use crate::ui::features::browse::jsonb_detail::JsonbDetail;
+use crate::ui::features::browse::jsonb_detail::{JsonbDetail, JsonbDetailRenderMetrics};
 use crate::ui::features::browse::result::ResultPane;
 use crate::ui::features::connections::error::ConnectionError;
 use crate::ui::features::connections::selector::ConnectionSelector;
@@ -141,9 +141,13 @@ impl MainLayout {
             None
         };
 
-        let jsonb_detail_scroll_offset = match state.input_mode() {
+        let jsonb_detail_editor_visible_rows = match state.input_mode() {
             InputMode::JsonbDetail | InputMode::JsonbEdit => {
-                JsonbDetail::render(frame, state, now, theme)
+                JsonbDetail::render(frame, state, now, theme).map(
+                    |JsonbDetailRenderMetrics {
+                         editor_visible_rows,
+                     }| editor_visible_rows,
+                )
             }
             _ => None,
         };
@@ -164,7 +168,7 @@ impl MainLayout {
             er_picker_pane_height,
             er_picker_filter_visible_width,
             query_history_picker_pane_height,
-            jsonb_detail_scroll_offset,
+            jsonb_detail_editor_visible_rows,
             confirm_preview_viewport_height,
             confirm_preview_content_height,
             confirm_preview_scroll,

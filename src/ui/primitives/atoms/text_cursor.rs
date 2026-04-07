@@ -1,7 +1,11 @@
 use std::cmp::Ordering;
 
+use ratatui::Frame;
+use ratatui::layout::Rect;
 use ratatui::style::Style;
-use ratatui::text::Span;
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Paragraph, Wrap};
+use unicode_width::UnicodeWidthStr;
 
 use crate::ui::theme::ThemePalette;
 
@@ -93,21 +97,10 @@ pub fn text_cursor_spans_with_kind(
             }
         }
         CursorKind::Insert => {
-            if cursor >= total {
-                let text: String = visible.iter().collect();
-                vec![Span::raw(text), Span::styled(kind.glyph(), cursor_style)]
-            } else if let Some(ci) = cursor_in_view.filter(|&i| i <= visible.len()) {
-                let before: String = visible[..ci].iter().collect();
-                let after: String = visible[ci..].iter().collect();
-                vec![
-                    Span::raw(before),
-                    Span::styled(kind.glyph(), cursor_style),
-                    Span::raw(after),
-                ]
-            } else {
-                let text: String = visible.iter().collect();
-                vec![Span::raw(text)]
-            }
+            let _ = cursor_in_view;
+            let _ = cursor_style;
+            let text: String = visible.iter().collect();
+            vec![Span::raw(text)]
         }
     }
 }
@@ -143,13 +136,16 @@ pub fn insert_cursor_span_with_kind(
 
         if remaining == len {
             output.push(span);
-            if iter.peek().is_none() {
+            if iter.peek().is_none() && matches!(kind, CursorKind::Block) {
                 output.push(Span::styled(kind.glyph(), cursor_style));
                 return output;
             }
 
+            if iter.peek().is_none() {
+                return output;
+            }
+
             if matches!(kind, CursorKind::Insert) {
-                output.push(Span::styled(kind.glyph(), cursor_style));
                 output.extend(iter);
                 return output;
             }
@@ -171,20 +167,204 @@ pub fn insert_cursor_span_with_kind(
                 }
             }
             CursorKind::Insert => {
-                output.push(Span::styled(kind.glyph(), cursor_style));
                 let mut remainder = current;
                 remainder.push_str(&after);
                 if !remainder.is_empty() {
                     output.push(Span::styled(remainder, span.style));
                 }
+                output.extend(iter);
+                return output;
             }
         }
         output.extend(iter);
         return output;
     }
 
-    output.push(Span::styled(kind.glyph(), cursor_style));
+    if matches!(kind, CursorKind::Block) {
+        output.push(Span::styled(kind.glyph(), cursor_style));
+    }
     output
+}
+
+pub fn set_terminal_cursor(
+    frame: &mut Frame,
+    area: Rect,
+    content: &str,
+    cursor_row: usize,
+    cursor_col: usize,
+    scroll_row: usize,
+    x_offset: u16,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let available_width = area.width.saturating_sub(x_offset) as usize;
+    if available_width == 0 {
+        return;
+    }
+
+    let Some((visible_row, visible_col)) =
+        visual_cursor_position(content, cursor_row, cursor_col, scroll_row, available_width)
+    else {
+        return;
+    };
+    if visible_row >= area.height as usize {
+        return;
+    }
+
+    let x = area
+        .x
+        .saturating_add(x_offset)
+        .saturating_add(visible_col as u16)
+        .min(area.right().saturating_sub(1));
+    let y = area.y.saturating_add(visible_row as u16);
+
+    frame.set_cursor_position((x, y));
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ModalTextSurface<'a> {
+    pub content: &'a str,
+    pub cursor_row: usize,
+    pub cursor_col: usize,
+    pub scroll_row: usize,
+    pub cursor_kind: CursorKind,
+    pub empty_placeholder: &'a str,
+    pub base_style: Style,
+    pub current_line_style: Style,
+}
+
+pub fn build_modal_text_surface_lines(
+    surface: ModalTextSurface<'_>,
+    mut line_spans: Vec<Vec<Span<'static>>>,
+    theme: &ThemePalette,
+) -> Vec<Line<'static>> {
+    let placeholder_span = placeholder_span(surface.cursor_kind, theme);
+
+    let mut lines = if surface.content.is_empty() {
+        vec![
+            Line::from(vec![
+                placeholder_span.clone(),
+                Span::styled(
+                    surface.empty_placeholder.to_string(),
+                    Style::default().fg(theme.placeholder_text),
+                ),
+            ])
+            .style(surface.current_line_style),
+        ]
+    } else {
+        if let Some(line) = line_spans.get_mut(surface.cursor_row) {
+            let spans = std::mem::take(line);
+            *line =
+                insert_cursor_span_with_kind(spans, surface.cursor_col, surface.cursor_kind, theme);
+        }
+
+        line_spans
+            .into_iter()
+            .enumerate()
+            .map(|(row, spans)| {
+                if row == surface.cursor_row {
+                    Line::from(spans).style(surface.current_line_style)
+                } else {
+                    Line::from(spans)
+                }
+            })
+            .collect()
+    };
+
+    if surface.content.ends_with('\n') && surface.cursor_row == surface.content.lines().count() {
+        lines.push(Line::from(vec![placeholder_span]).style(surface.current_line_style));
+    }
+
+    lines
+}
+
+pub fn render_modal_text_surface(
+    frame: &mut Frame,
+    area: Rect,
+    surface: ModalTextSurface<'_>,
+    lines: Vec<Line<'static>>,
+) {
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((surface.scroll_row as u16, 0))
+            .style(surface.base_style),
+        area,
+    );
+
+    if matches!(surface.cursor_kind, CursorKind::Insert) {
+        set_terminal_cursor(
+            frame,
+            area,
+            surface.content,
+            surface.cursor_row,
+            surface.cursor_col,
+            surface.scroll_row,
+            0,
+        );
+    }
+}
+
+fn display_width_up_to_char(text: &str, cursor_col: usize) -> u16 {
+    let byte_idx = text
+        .char_indices()
+        .nth(cursor_col)
+        .map_or(text.len(), |(idx, _)| idx);
+    UnicodeWidthStr::width(&text[..byte_idx]).min(u16::MAX as usize) as u16
+}
+
+fn placeholder_span(kind: CursorKind, theme: &ThemePalette) -> Span<'static> {
+    match kind {
+        CursorKind::Block => Span::styled(kind.glyph(), cursor_style_for(kind, theme)),
+        CursorKind::Insert => Span::raw(" "),
+    }
+}
+
+fn visual_cursor_position(
+    content: &str,
+    cursor_row: usize,
+    cursor_col: usize,
+    scroll_row: usize,
+    available_width: usize,
+) -> Option<(usize, usize)> {
+    if available_width == 0 || cursor_row < scroll_row {
+        return None;
+    }
+
+    let mut wrapped_rows_before_cursor = 0;
+    let mut current_line = "";
+
+    for (row, line) in content.split('\n').enumerate() {
+        if row < scroll_row {
+            continue;
+        }
+
+        match row.cmp(&cursor_row) {
+            Ordering::Less => {
+                wrapped_rows_before_cursor += wrapped_visual_rows(line, available_width);
+            }
+            Ordering::Equal => {
+                current_line = line;
+                break;
+            }
+            Ordering::Greater => return None,
+        }
+    }
+
+    let cursor_display_width = display_width_up_to_char(current_line, cursor_col) as usize;
+
+    Some((
+        wrapped_rows_before_cursor + cursor_display_width / available_width,
+        cursor_display_width % available_width,
+    ))
+}
+
+fn wrapped_visual_rows(line: &str, available_width: usize) -> usize {
+    UnicodeWidthStr::width(line)
+        .max(1)
+        .div_ceil(available_width)
 }
 
 fn split_at_cursor(text: &str, cursor_col: usize) -> (String, String, String) {
@@ -288,6 +468,14 @@ mod tests {
     }
 
     #[test]
+    fn display_width_uses_terminal_cell_width() {
+        assert_eq!(display_width_up_to_char("a語b", 0), 0);
+        assert_eq!(display_width_up_to_char("a語b", 1), 1);
+        assert_eq!(display_width_up_to_char("a語b", 2), 3);
+        assert_eq!(display_width_up_to_char("a語b", 3), 4);
+    }
+
+    #[test]
     fn visible_width_usize_max_sentinel() {
         let spans = text_cursor_spans("hello", 2, 0, usize::MAX, &DEFAULT_THEME);
 
@@ -319,7 +507,7 @@ mod tests {
     }
 
     #[test]
-    fn insert_mode_cursor_uses_bar_glyph() {
+    fn insert_mode_cursor_preserves_text_without_glyph() {
         let spans = text_cursor_spans_with_kind(
             "abc",
             1,
@@ -330,15 +518,11 @@ mod tests {
         );
 
         let texts = spans_to_strings(&spans);
-        assert_eq!(texts, vec!["a", CursorKind::Insert.glyph(), "bc"]);
-        assert_eq!(
-            spans[1].style,
-            cursor_style_for(CursorKind::Insert, &DEFAULT_THEME)
-        );
+        assert_eq!(texts, vec!["abc"]);
     }
 
     #[test]
-    fn insert_mode_cursor_at_end_appends_bar_glyph() {
+    fn insert_mode_cursor_at_end_keeps_text_width() {
         let spans = text_cursor_spans_with_kind(
             "abc",
             3,
@@ -349,7 +533,12 @@ mod tests {
         );
 
         let texts = spans_to_strings(&spans);
-        assert_eq!(texts, vec!["abc", CursorKind::Insert.glyph()]);
+        assert_eq!(texts, vec!["abc"]);
+    }
+
+    #[test]
+    fn visual_cursor_position_wraps_with_display_width() {
+        assert_eq!(visual_cursor_position("a語b", 0, 2, 0, 2), Some((1, 1)));
     }
 
     #[test]
@@ -439,7 +628,7 @@ mod tests {
     }
 
     #[test]
-    fn insert_cursor_span_with_insert_kind_keeps_text_after_bar() {
+    fn insert_cursor_span_with_insert_kind_preserves_text_without_glyph() {
         let spans = vec![Span::styled(
             "abcd".to_string(),
             Style::default().fg(DEFAULT_THEME.sql_keyword),
@@ -448,11 +637,8 @@ mod tests {
         let inserted = insert_cursor_span_with_kind(spans, 2, CursorKind::Insert, &DEFAULT_THEME);
 
         let texts: Vec<String> = inserted.iter().map(|s| s.content.to_string()).collect();
-        assert_eq!(texts, vec!["ab", CursorKind::Insert.glyph(), "cd"]);
-        assert_eq!(
-            inserted[1].style,
-            cursor_style_for(CursorKind::Insert, &DEFAULT_THEME)
-        );
-        assert_eq!(inserted[2].style.fg, Some(DEFAULT_THEME.sql_keyword));
+        assert_eq!(texts, vec!["ab", "cd"]);
+        assert_eq!(inserted[0].style.fg, Some(DEFAULT_THEME.sql_keyword));
+        assert_eq!(inserted[1].style.fg, Some(DEFAULT_THEME.sql_keyword));
     }
 }

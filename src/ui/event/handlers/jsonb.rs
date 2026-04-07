@@ -1,6 +1,6 @@
 use crate::app::update::action::{Action, CursorMove, InputTarget};
 use crate::app::update::input::keybindings::{
-    JSONB_DETAIL_KEYS, JSONB_EDIT_KEYS, JSONB_SEARCH_KEYS, Key, KeyCombo,
+    JSONB_DETAIL, JSONB_EDIT, JSONB_SEARCH_KEYS, Key, KeyCombo,
 };
 use crate::app::update::input::keymap;
 
@@ -9,7 +9,10 @@ pub fn handle_jsonb_detail_keys(combo: KeyCombo, is_searching: bool) -> Action {
         return handle_search_input(combo);
     }
 
-    keymap::resolve(&combo, JSONB_DETAIL_KEYS).unwrap_or(Action::None)
+    if let Some(action) = JSONB_DETAIL.resolve(&combo) {
+        return action;
+    }
+    Action::None
 }
 
 fn handle_search_input(combo: KeyCombo) -> Action {
@@ -51,7 +54,7 @@ fn handle_search_input(combo: KeyCombo) -> Action {
 }
 
 pub fn handle_jsonb_edit_keys(combo: KeyCombo) -> Action {
-    if let Some(action) = keymap::resolve(&combo, JSONB_EDIT_KEYS) {
+    if let Some(action) = JSONB_EDIT.resolve(&combo) {
         return action;
     }
 
@@ -120,17 +123,63 @@ mod tests {
         use super::*;
 
         #[test]
-        fn ctrl_n_moves_cursor_down_in_viewing_mode() {
+        fn ctrl_n_moves_cursor_down_in_normal_mode() {
             let result = handle_jsonb_detail_keys(combo_ctrl(Key::Char('n')), false);
 
-            assert!(matches!(result, Action::JsonbCursorDown));
+            assert!(matches!(
+                result,
+                Action::TextMoveCursor {
+                    target: InputTarget::JsonbEdit,
+                    direction: CursorMove::Down,
+                }
+            ));
         }
 
         #[test]
-        fn ctrl_p_moves_cursor_up_in_viewing_mode() {
+        fn ctrl_p_moves_cursor_up_in_normal_mode() {
             let result = handle_jsonb_detail_keys(combo_ctrl(Key::Char('p')), false);
 
-            assert!(matches!(result, Action::JsonbCursorUp));
+            assert!(matches!(
+                result,
+                Action::TextMoveCursor {
+                    target: InputTarget::JsonbEdit,
+                    direction: CursorMove::Up,
+                }
+            ));
+        }
+
+        #[test]
+        fn enter_enters_insert_mode() {
+            let result = handle_jsonb_detail_keys(combo(Key::Enter), false);
+
+            assert!(matches!(result, Action::JsonbEnterEdit));
+        }
+
+        #[test]
+        fn h_moves_cursor_left_in_normal_mode() {
+            let result = handle_jsonb_detail_keys(combo(Key::Char('h')), false);
+
+            assert!(matches!(
+                result,
+                Action::TextMoveCursor {
+                    target: InputTarget::JsonbEdit,
+                    direction: CursorMove::Left,
+                }
+            ));
+        }
+
+        #[test]
+        fn n_moves_to_next_search_match() {
+            let result = handle_jsonb_detail_keys(combo(Key::Char('n')), false);
+
+            assert!(matches!(result, Action::JsonbSearchNext));
+        }
+
+        #[test]
+        fn upper_n_moves_to_previous_search_match() {
+            let result = handle_jsonb_detail_keys(combo(Key::Char('N')), false);
+
+            assert!(matches!(result, Action::JsonbSearchPrev));
         }
     }
 
