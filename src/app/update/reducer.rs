@@ -2610,7 +2610,7 @@ mod tests {
         fn y_then_d_cancels_yank_starts_delete() {
             let mut state = create_test_state();
             state.ui.focused_pane = FocusedPane::Result;
-            state.result_interaction.enter_row(0);
+            state.result_interaction.activate_cell(0, 0);
             let now = Instant::now();
 
             reduce(

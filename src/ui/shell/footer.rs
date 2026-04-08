@@ -100,22 +100,10 @@ impl Footer {
                             RESULT_ACTIVE_KEYS[idx::result_active::DRAFT_DISCARD].as_hint(),
                             GLOBAL_KEYS[idx::global::QUIT].as_hint(),
                         ]
-                    } else {
-                        // Actions → Navigation → Help → Close/Cancel → Quit
+                    } else if state.result_interaction.staged_delete_rows().is_empty() {
                         vec![
                             RESULT_ACTIVE_KEYS[idx::result_active::EDIT].as_hint(),
                             RESULT_ACTIVE_KEYS[idx::result_active::YANK].as_hint(),
-                            GLOBAL_KEYS[idx::global::HELP].as_hint(),
-                            RESULT_ACTIVE_KEYS[idx::result_active::ESC_BACK].as_hint(),
-                            GLOBAL_KEYS[idx::global::QUIT].as_hint(),
-                        ]
-                    }
-                } else if result_navigation && nav_mode == ResultNavMode::RowActive {
-                    if state.result_interaction.staged_delete_rows().is_empty() {
-                        // Normal RowActive mode
-                        // Actions → Navigation → Help → Close/Cancel → Quit
-                        vec![
-                            RESULT_ACTIVE_KEYS[idx::result_active::ENTER_DEEPEN].as_hint(),
                             RESULT_ACTIVE_KEYS[idx::result_active::ROW_YANK].as_hint(),
                             RESULT_ACTIVE_KEYS[idx::result_active::STAGE_DELETE].as_hint(),
                             GLOBAL_KEYS[idx::global::HELP].as_hint(),
@@ -123,8 +111,6 @@ impl Footer {
                             GLOBAL_KEYS[idx::global::QUIT].as_hint(),
                         ]
                     } else {
-                        // Staged-delete mode: actions relevant to committing/undoing the staged delete
-                        // Actions → Navigation → Help → Close/Cancel → Quit
                         vec![
                             RESULT_ACTIVE_KEYS[idx::result_active::STAGE_DELETE].as_hint(),
                             RESULT_ACTIVE_KEYS[idx::result_active::UNSTAGE_DELETE].as_hint(),
@@ -138,6 +124,10 @@ impl Footer {
                     // Actions → Navigation → Help → Close/Cancel → Quit
                     let mut list =
                         vec![RESULT_ACTIVE_KEYS[idx::result_active::ENTER_DEEPEN].as_hint()];
+                    if !state.result_interaction.staged_delete_rows().is_empty() {
+                        list.push(RESULT_ACTIVE_KEYS[idx::result_active::UNSTAGE_DELETE].as_hint());
+                        list.push(CELL_EDIT_KEYS[idx::cell_edit::WRITE].as_hint());
+                    }
                     if state.can_request_csv_export() {
                         list.push(GLOBAL_KEYS[idx::global::CSV_EXPORT].as_hint());
                     }
@@ -181,6 +171,12 @@ impl Footer {
                     // Navigation
                     if state.ui.focused_pane == FocusedPane::Result {
                         list.push(RESULT_ACTIVE_KEYS[idx::result_active::ENTER_DEEPEN].as_hint());
+                        if !state.result_interaction.staged_delete_rows().is_empty() {
+                            list.push(
+                                RESULT_ACTIVE_KEYS[idx::result_active::UNSTAGE_DELETE].as_hint(),
+                            );
+                            list.push(CELL_EDIT_KEYS[idx::cell_edit::WRITE].as_hint());
+                        }
                         if state.query.can_paginate_visible_result() {
                             list.push(FOOTER_NAV_KEYS[idx::footer_nav::PAGE_NAV].as_hint());
                         }

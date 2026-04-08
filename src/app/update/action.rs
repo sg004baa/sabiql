@@ -439,9 +439,7 @@ pub enum Action {
     ResultPrevPage,
 
     // Result pane selection
-    ResultEnterRowActive,
-    ResultEnterCellActive,
-    ResultExitToRowActive,
+    ResultActivateCell,
     ResultExitToScroll,
     ResultCellLeft,
     ResultCellRight,

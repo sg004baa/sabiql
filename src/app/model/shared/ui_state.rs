@@ -30,7 +30,6 @@ pub const DEFAULT_JSONB_DETAIL_EDITOR_VISIBLE_ROWS: usize = 8;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResultNavMode {
     Scroll,
-    RowActive,
     CellActive,
 }
 
@@ -67,7 +66,7 @@ pub struct YankFlash {
     pub until: Instant,
 }
 
-// Invariant: `cell` is `Some` only when `row` is `Some`.
+// Invariant: `row` and `cell` are both `Some` for CellActive, or both `None` for Scroll.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ResultSelection {
     row: Option<usize>,
@@ -75,39 +74,50 @@ pub struct ResultSelection {
 }
 
 impl ResultSelection {
+    fn is_consistent(&self) -> bool {
+        self.row.is_some() == self.cell.is_some()
+    }
+
     pub fn mode(&self) -> ResultNavMode {
-        match (self.row, self.cell) {
-            (Some(_), Some(_)) => ResultNavMode::CellActive,
-            (Some(_), None) => ResultNavMode::RowActive,
-            _ => ResultNavMode::Scroll,
+        if self.row.is_some() && self.cell.is_some() {
+            ResultNavMode::CellActive
+        } else {
+            ResultNavMode::Scroll
         }
     }
 
     pub fn row(&self) -> Option<usize> {
-        self.row
+        if self.is_consistent() { self.row } else { None }
     }
 
     pub fn cell(&self) -> Option<usize> {
-        self.cell
-    }
-
-    pub fn enter_row(&mut self, row: usize) {
-        self.row = Some(row);
-        self.cell = None;
-    }
-
-    pub fn move_row(&mut self, row: usize) {
-        self.row = Some(row);
-    }
-
-    pub fn enter_cell(&mut self, col: usize) {
-        if self.row.is_some() {
-            self.cell = Some(col);
+        if self.is_consistent() {
+            self.cell
+        } else {
+            None
         }
     }
 
-    pub fn exit_to_row(&mut self) {
-        self.cell = None;
+    pub fn enter_cell(&mut self, row: usize, col: usize) {
+        self.row = Some(row);
+        self.cell = Some(col);
+        debug_assert!(self.is_consistent());
+    }
+
+    pub fn move_row(&mut self, row: usize) {
+        debug_assert!(self.is_consistent());
+        if self.cell.is_some() {
+            self.row = Some(row);
+        }
+        debug_assert!(self.is_consistent());
+    }
+
+    pub fn move_cell(&mut self, col: usize) {
+        debug_assert!(self.is_consistent());
+        if self.row.is_some() {
+            self.cell = Some(col);
+        }
+        debug_assert!(self.is_consistent());
     }
 
     pub fn reset(&mut self) {
@@ -127,7 +137,7 @@ impl ResultSelection {
             return;
         }
         if max_cols == 0 {
-            self.cell = None;
+            self.reset();
             return;
         }
         if let Some(c) = self.cell
@@ -593,22 +603,22 @@ mod tests {
         }
 
         #[test]
-        fn enter_row_transitions_to_row_active() {
+        fn enter_cell_transitions_to_cell_active() {
             let mut sel = ResultSelection::default();
 
-            sel.enter_row(5);
+            sel.enter_cell(5, 7);
 
-            assert_eq!(sel.mode(), ResultNavMode::RowActive);
+            assert_eq!(sel.mode(), ResultNavMode::CellActive);
             assert_eq!(sel.row(), Some(5));
-            assert!(sel.cell().is_none());
+            assert_eq!(sel.cell(), Some(7));
         }
 
         #[test]
-        fn enter_cell_transitions_to_cell_active() {
+        fn move_cell_updates_column_when_active() {
             let mut sel = ResultSelection::default();
-            sel.enter_row(3);
+            sel.enter_cell(3, 1);
 
-            sel.enter_cell(7);
+            sel.move_cell(7);
 
             assert_eq!(sel.mode(), ResultNavMode::CellActive);
             assert_eq!(sel.row(), Some(3));
@@ -616,31 +626,18 @@ mod tests {
         }
 
         #[test]
-        fn enter_cell_without_row_is_noop() {
+        fn move_cell_without_selection_is_noop() {
             let mut sel = ResultSelection::default();
 
-            sel.enter_cell(5);
+            sel.move_cell(5);
 
             assert_eq!(sel.mode(), ResultNavMode::Scroll);
         }
 
         #[test]
-        fn exit_to_row_clears_cell_only() {
-            let mut sel = ResultSelection::default();
-            sel.enter_row(2);
-            sel.enter_cell(4);
-
-            sel.exit_to_row();
-
-            assert_eq!(sel.mode(), ResultNavMode::RowActive);
-            assert_eq!(sel.row(), Some(2));
-        }
-
-        #[test]
         fn reset_clears_both() {
             let mut sel = ResultSelection::default();
-            sel.enter_row(1);
-            sel.enter_cell(2);
+            sel.enter_cell(1, 2);
 
             sel.reset();
 
@@ -648,22 +645,21 @@ mod tests {
         }
 
         #[test]
-        fn enter_row_clears_previous_cell() {
+        fn enter_cell_replaces_previous_selection() {
             let mut sel = ResultSelection::default();
-            sel.enter_row(0);
-            sel.enter_cell(3);
+            sel.enter_cell(0, 3);
 
-            sel.enter_row(5);
+            sel.enter_cell(5, 1);
 
-            assert_eq!(sel.mode(), ResultNavMode::RowActive);
+            assert_eq!(sel.mode(), ResultNavMode::CellActive);
             assert_eq!(sel.row(), Some(5));
+            assert_eq!(sel.cell(), Some(1));
         }
 
         #[test]
         fn move_row_preserves_cell() {
             let mut sel = ResultSelection::default();
-            sel.enter_row(0);
-            sel.enter_cell(3);
+            sel.enter_cell(0, 3);
 
             sel.move_row(5);
 
@@ -673,20 +669,19 @@ mod tests {
         }
 
         #[test]
-        fn move_row_in_row_active_stays_row_active() {
+        fn move_row_in_scroll_mode_is_noop() {
             let mut sel = ResultSelection::default();
-            sel.enter_row(2);
 
             sel.move_row(7);
 
-            assert_eq!(sel.mode(), ResultNavMode::RowActive);
-            assert_eq!(sel.row(), Some(7));
+            assert_eq!(sel.mode(), ResultNavMode::Scroll);
+            assert_eq!(sel.row(), None);
         }
 
         #[test]
         fn clamp_resets_when_zero_rows() {
             let mut sel = ResultSelection::default();
-            sel.enter_row(5);
+            sel.enter_cell(5, 0);
 
             sel.clamp(0, 10);
 
@@ -696,8 +691,7 @@ mod tests {
         #[test]
         fn clamp_resets_when_row_out_of_bounds() {
             let mut sel = ResultSelection::default();
-            sel.enter_row(10);
-            sel.enter_cell(2);
+            sel.enter_cell(10, 2);
 
             sel.clamp(5, 10);
 
@@ -707,8 +701,7 @@ mod tests {
         #[test]
         fn clamp_caps_cell_to_max_cols() {
             let mut sel = ResultSelection::default();
-            sel.enter_row(0);
-            sel.enter_cell(9);
+            sel.enter_cell(0, 9);
 
             sel.clamp(10, 5);
 
@@ -716,26 +709,36 @@ mod tests {
         }
 
         #[test]
-        fn clamp_clears_cell_when_zero_cols() {
+        fn clamp_resets_when_zero_cols() {
             let mut sel = ResultSelection::default();
-            sel.enter_row(0);
-            sel.enter_cell(3);
+            sel.enter_cell(0, 3);
 
             sel.clamp(10, 0);
 
-            assert_eq!(sel.mode(), ResultNavMode::RowActive);
+            assert_eq!(sel.mode(), ResultNavMode::Scroll);
         }
 
         #[test]
         fn clamp_preserves_valid_selection() {
             let mut sel = ResultSelection::default();
-            sel.enter_row(3);
-            sel.enter_cell(2);
+            sel.enter_cell(3, 2);
 
             sel.clamp(10, 10);
 
             assert_eq!(sel.row(), Some(3));
             assert_eq!(sel.cell(), Some(2));
+        }
+
+        #[test]
+        fn accessors_hide_inconsistent_state() {
+            let sel = ResultSelection {
+                row: Some(1),
+                cell: None,
+            };
+
+            assert_eq!(sel.row(), None);
+            assert_eq!(sel.cell(), None);
+            assert_eq!(sel.mode(), ResultNavMode::Scroll);
         }
     }
 }

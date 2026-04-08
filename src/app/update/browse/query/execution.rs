@@ -65,6 +65,8 @@ pub fn reduce(
         } => {
             if *generation == 0 || *generation == state.session.selection_generation() {
                 state.query.mark_idle();
+                let preserved_result_col = state.result_interaction.selection().cell();
+                let preserved_horizontal_offset = state.result_interaction.horizontal_offset;
 
                 let is_adhoc_error = result.source == QuerySource::Adhoc && result.is_error();
                 if !is_adhoc_error {
@@ -108,12 +110,18 @@ pub fn reduce(
                     match state.query.post_delete_row_selection() {
                         PostDeleteRowSelection::Keep => {}
                         PostDeleteRowSelection::Clear => {
-                            state.result_interaction.exit_row_to_scroll();
+                            state.result_interaction.reset_interaction();
                         }
                         PostDeleteRowSelection::Select(row) => {
-                            if !result.rows.is_empty() {
+                            if !result.rows.is_empty() && !result.columns.is_empty() {
                                 let clamped = row.min(result.rows.len() - 1);
-                                state.result_interaction.enter_row(clamped);
+                                let max_col = result.columns.len() - 1;
+                                let col = preserved_result_col
+                                    .unwrap_or(preserved_horizontal_offset)
+                                    .min(max_col);
+                                state.result_interaction.horizontal_offset =
+                                    preserved_horizontal_offset.min(max_col).min(col);
+                                state.result_interaction.activate_cell(clamped, col);
 
                                 let visible = state.result_visible_rows();
                                 if visible > 0 && clamped >= visible {
@@ -424,7 +432,7 @@ mod tests {
             let mut state = create_test_state();
             state.result_interaction.scroll_offset = 50;
             state.result_interaction.horizontal_offset = 10;
-            state.result_interaction.enter_row(5);
+            state.result_interaction.activate_cell(5, 0);
             state.result_interaction.stage_row(0);
             state.result_interaction.stage_row(2);
             let result = adhoc_result();
@@ -459,7 +467,7 @@ mod tests {
             state.query.set_current_result(preview_result(5));
             state.result_interaction.scroll_offset = 20;
             state.result_interaction.horizontal_offset = 5;
-            state.result_interaction.enter_row(3);
+            state.result_interaction.activate_cell(3, 0);
             let result = adhoc_error_result();
 
             reduce_query(
@@ -505,6 +513,78 @@ mod tests {
             assert_eq!(state.query.history_index(), None);
             assert!(state.query.current_result().is_some());
         }
+
+        #[test]
+        fn preview_delete_reselection_preserves_active_column_and_offset() {
+            let mut state = create_test_state();
+            let result = Arc::new(QueryResult {
+                query: "SELECT * FROM users".to_string(),
+                columns: vec!["id".to_string(), "name".to_string(), "email".to_string()],
+                rows: vec![
+                    vec![
+                        "1".to_string(),
+                        "Alice".to_string(),
+                        "a@example.com".to_string(),
+                    ],
+                    vec![
+                        "2".to_string(),
+                        "Bob".to_string(),
+                        "b@example.com".to_string(),
+                    ],
+                ],
+                row_count: 2,
+                execution_time_ms: 10,
+                executed_at: Instant::now(),
+                source: QuerySource::Preview,
+                error: None,
+                command_tag: None,
+            });
+            state
+                .query
+                .set_post_delete_selection(PostDeleteRowSelection::Select(1));
+            state.result_interaction.horizontal_offset = 1;
+            state.result_interaction.activate_cell(3, 2);
+            state.query.set_current_result(Arc::clone(&result));
+
+            reduce_query(
+                &mut state,
+                &Action::QueryCompleted {
+                    result,
+                    generation: 0,
+                    target_page: Some(0),
+                },
+                Instant::now(),
+                &AppServices::stub(),
+            );
+
+            assert_eq!(state.result_interaction.selection().row(), Some(1));
+            assert_eq!(state.result_interaction.selection().cell(), Some(2));
+            assert_eq!(state.result_interaction.horizontal_offset, 1);
+        }
+
+        #[test]
+        fn preview_delete_clear_still_clears_staged_rows() {
+            let mut state = create_test_state();
+            state
+                .query
+                .set_post_delete_selection(PostDeleteRowSelection::Clear);
+            state.result_interaction.activate_cell(0, 0);
+            state.result_interaction.stage_row(0);
+
+            reduce_query(
+                &mut state,
+                &Action::QueryCompleted {
+                    result: preview_result(1),
+                    generation: 0,
+                    target_page: Some(0),
+                },
+                Instant::now(),
+                &AppServices::stub(),
+            );
+
+            assert_eq!(state.result_interaction.selection().row(), None);
+            assert!(state.result_interaction.staged_delete_rows().is_empty());
+        }
     }
 
     mod query_failed {
@@ -516,8 +596,7 @@ mod tests {
         fn resets_result_selection_and_offsets() {
             let mut state = create_test_state();
             state.session.set_selection_generation(1);
-            state.result_interaction.enter_row(5);
-            state.result_interaction.enter_cell(2);
+            state.result_interaction.activate_cell(5, 2);
             state.result_interaction.scroll_offset = 10;
             state.result_interaction.horizontal_offset = 3;
 
