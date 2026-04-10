@@ -10,7 +10,7 @@ use crate::app::ports::clipboard::ClipboardError;
 use crate::app::ports::connection_store::ConnectionStoreError;
 use crate::app::ports::folder_opener::FolderOpenError;
 use crate::app::ports::query_history::QueryHistoryError;
-use crate::domain::connection::{ConnectionProfile, ServiceEntry};
+use crate::domain::connection::{ConnectionNameError, ConnectionProfile, ServiceEntry};
 use std::collections::HashMap;
 
 use crate::domain::{ConnectionId, DatabaseMetadata, QueryResult, Table};
@@ -18,7 +18,7 @@ use crate::domain::{ConnectionId, DatabaseMetadata, QueryResult, Table};
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum ConnectionSaveError {
     #[error("{0}")]
-    Validation(#[from] crate::domain::connection::ConnectionNameError),
+    Validation(#[from] ConnectionNameError),
     #[error("{0}")]
     Store(#[from] ConnectionStoreError),
 }
