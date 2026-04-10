@@ -8,7 +8,7 @@ use crate::app::model::sql_editor::completion::CompletionState;
 use crate::app::model::sql_editor::modal::{SqlModalStatus, SqlModalTab};
 use crate::app::policy::sql::statement_classifier::{self, StatementKind};
 use crate::app::policy::write::sql_risk::{ConfirmationType, evaluate_sql_risk, split_statements};
-use crate::app::update::action::{Action, ScrollAmount, ScrollDirection, ScrollTarget};
+use crate::app::update::action::{Action, ScrollAmount, ScrollTarget};
 
 fn is_multi_statement(content: &str) -> bool {
     split_statements(content).len() > 1
@@ -205,15 +205,7 @@ pub fn reduce_explain(state: &mut AppState, action: &Action, now: Instant) -> Op
                 }
                 _ => unreachable!(),
             };
-            match direction {
-                ScrollDirection::Up => *offset = offset.saturating_sub(1),
-                ScrollDirection::Down => {
-                    if *offset < max {
-                        *offset += 1;
-                    }
-                }
-                _ => {}
-            }
+            *offset = direction.clamp_vertical_offset(*offset, max, 1);
             Some(vec![])
         }
 
