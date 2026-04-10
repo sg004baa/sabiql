@@ -246,6 +246,7 @@ pub fn reduce_explain(state: &mut AppState, action: &Action, now: Instant) -> Op
 mod tests {
     use super::*;
     use crate::app::model::shared::input_mode::InputMode;
+    use crate::app::update::action::ScrollDirection;
     use std::time::Instant;
 
     fn sql_modal_state() -> AppState {

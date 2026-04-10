@@ -7,7 +7,8 @@ use crate::app::model::shared::input_mode::InputMode;
 use crate::app::model::shared::key_sequence::KeySequenceState;
 use crate::app::model::shared::text_input::{TextInputLike, TextInputState};
 use crate::app::model::sql_editor::modal::{
-    HIGH_RISK_INPUT_VISIBLE_WIDTH, SqlModalStatus, SqlModalTab, sql_modal_visible_rows,
+    HIGH_RISK_INPUT_VISIBLE_WIDTH, SqlModalContext, SqlModalStatus, SqlModalTab,
+    sql_modal_visible_rows,
 };
 use crate::app::policy::sql::statement_classifier::{self, StatementKind};
 use crate::app::policy::write::sql_risk::{
@@ -248,11 +249,7 @@ pub fn reduce_sql_modal(
             target: target @ (InputTarget::SqlModalHighRisk | InputTarget::SqlModalAnalyzeHighRisk),
             ch: c,
         } => {
-            let input = match target {
-                InputTarget::SqlModalHighRisk => state.sql_modal.confirming_high_input_mut(),
-                _ => state.sql_modal.confirming_analyze_high_input_mut(),
-            };
-            if let Some(input) = input {
+            if let Some(input) = high_risk_input_mut(&mut state.sql_modal, *target) {
                 input.insert_char(*c);
                 input.update_viewport(HIGH_RISK_INPUT_VISIBLE_WIDTH);
             }
@@ -261,11 +258,7 @@ pub fn reduce_sql_modal(
         Action::TextBackspace {
             target: target @ (InputTarget::SqlModalHighRisk | InputTarget::SqlModalAnalyzeHighRisk),
         } => {
-            let input = match target {
-                InputTarget::SqlModalHighRisk => state.sql_modal.confirming_high_input_mut(),
-                _ => state.sql_modal.confirming_analyze_high_input_mut(),
-            };
-            if let Some(input) = input {
+            if let Some(input) = high_risk_input_mut(&mut state.sql_modal, *target) {
                 input.backspace();
                 input.update_viewport(HIGH_RISK_INPUT_VISIBLE_WIDTH);
             }
@@ -275,11 +268,7 @@ pub fn reduce_sql_modal(
             target: target @ (InputTarget::SqlModalHighRisk | InputTarget::SqlModalAnalyzeHighRisk),
             direction: movement,
         } => {
-            let input = match target {
-                InputTarget::SqlModalHighRisk => state.sql_modal.confirming_high_input_mut(),
-                _ => state.sql_modal.confirming_analyze_high_input_mut(),
-            };
-            if let Some(input) = input {
+            if let Some(input) = high_risk_input_mut(&mut state.sql_modal, *target) {
                 input.move_cursor(*movement);
                 input.update_viewport(HIGH_RISK_INPUT_VISIBLE_WIDTH);
             }
@@ -445,6 +434,17 @@ pub fn reduce_sql_modal(
             Some(vec![])
         }
 
+        _ => None,
+    }
+}
+
+fn high_risk_input_mut(
+    sql_modal: &mut SqlModalContext,
+    target: InputTarget,
+) -> Option<&mut TextInputState> {
+    match target {
+        InputTarget::SqlModalHighRisk => sql_modal.confirming_high_input_mut(),
+        InputTarget::SqlModalAnalyzeHighRisk => sql_modal.confirming_analyze_high_input_mut(),
         _ => None,
     }
 }
