@@ -188,32 +188,20 @@ impl EffectRunner {
                 Effect::Sequence(seq_effects) => {
                     for seq_effect in seq_effects {
                         dispatched.extend(
-                            self.run_single(seq_effect, tui, state, completion_engine, services)
+                            self.run_normal(seq_effect, tui, state, completion_engine, services)
                                 .await?,
                         );
                     }
                 }
                 single_effect => {
                     dispatched.extend(
-                        self.run_single(single_effect, tui, state, completion_engine, services)
+                        self.run_normal(single_effect, tui, state, completion_engine, services)
                             .await?,
                     );
                 }
             }
         }
         Ok(dispatched)
-    }
-
-    async fn run_single<T: Renderer>(
-        &self,
-        effect: Effect,
-        tui: &mut T,
-        state: &mut AppState,
-        completion_engine: &RefCell<CompletionEngine>,
-        services: &AppServices,
-    ) -> Result<Vec<Action>> {
-        self.run_normal(effect, tui, state, completion_engine, services)
-            .await
     }
 
     async fn run_normal<T: Renderer>(
