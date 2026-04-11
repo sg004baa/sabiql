@@ -388,21 +388,15 @@ mod tests {
         }
 
         fn make_runner_with_dsn_builder(action_tx: mpsc::Sender<Action>) -> EffectRunner {
-            EffectRunner::builder()
-                .metadata_provider(Arc::new(MockMetadataProvider::new()))
-                .query_executor(Arc::new(MockQueryExecutor::new()))
-                .dsn_builder(Arc::new(FakeDsnBuilder))
-                .er_exporter(Arc::new(NoopErExporter))
-                .config_writer(Arc::new(NoopConfigWriter))
-                .er_log_writer(Arc::new(NoopErLogWriter))
-                .connection_store(Arc::new(MockConnectionStore::new()))
-                .service_file_reader(Arc::new(NoopServiceFileReader))
-                .clipboard(Arc::new(NoopClipboardWriter))
-                .folder_opener(Arc::new(NoopFolderOpener))
-                .query_history_store(Arc::new(NoopQueryHistoryStore))
-                .metadata_cache(TtlCache::new(60))
-                .action_tx(action_tx)
-                .build()
+            make_runner_builder(
+                Arc::new(MockMetadataProvider::new()),
+                Arc::new(MockQueryExecutor::new()),
+                Arc::new(MockConnectionStore::new()),
+                TtlCache::new(60),
+                action_tx,
+            )
+            .dsn_builder(Arc::new(FakeDsnBuilder))
+            .build()
         }
 
         #[tokio::test]

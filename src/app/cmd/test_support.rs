@@ -95,13 +95,13 @@ impl QueryHistoryStore for NoopQueryHistoryStore {
     }
 }
 
-pub fn make_runner(
+pub fn make_runner_builder(
     metadata_provider: Arc<dyn MetadataProvider>,
     query_executor: Arc<dyn QueryExecutor>,
     connection_store: Arc<dyn ConnectionStore>,
     cache: TtlCache<String, Arc<DatabaseMetadata>>,
     action_tx: mpsc::Sender<Action>,
-) -> EffectRunner {
+) -> crate::app::cmd::runner::EffectRunnerBuilder {
     EffectRunner::builder()
         .metadata_provider(metadata_provider)
         .query_executor(query_executor)
@@ -116,7 +116,23 @@ pub fn make_runner(
         .query_history_store(Arc::new(NoopQueryHistoryStore))
         .metadata_cache(cache)
         .action_tx(action_tx)
-        .build()
+}
+
+pub fn make_runner(
+    metadata_provider: Arc<dyn MetadataProvider>,
+    query_executor: Arc<dyn QueryExecutor>,
+    connection_store: Arc<dyn ConnectionStore>,
+    cache: TtlCache<String, Arc<DatabaseMetadata>>,
+    action_tx: mpsc::Sender<Action>,
+) -> EffectRunner {
+    make_runner_builder(
+        metadata_provider,
+        query_executor,
+        connection_store,
+        cache,
+        action_tx,
+    )
+    .build()
 }
 
 pub fn sample_metadata() -> DatabaseMetadata {
