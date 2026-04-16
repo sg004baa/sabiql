@@ -96,11 +96,11 @@ On first run, enter your connection details — saved to `~/.config/sabiql/conne
 - [x] SQL modal with DML/DDL safety guardrails
 - [x] Query history persistence & fuzzy search
 - [x] CSV export & clipboard yank
+- [x] EXPLAIN workflow (plan tree view & comparison)
 - [x] JSON/JSONB support (tree view, editing, validation)
 - [ ] Neovim integration (`sabiql.nvim`)
 - [ ] SQLite support
 - [ ] Zero-config connection (env vars, `.pgpass`, URI auto-detect)
-- [x] EXPLAIN workflow (plan tree view & comparison)
 - [ ] Google Cloud SQL / AlloyDB support
 - [ ] Theme switching (foreground palette only)
 - [ ] MySQL support
