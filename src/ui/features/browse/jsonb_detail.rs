@@ -7,6 +7,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::model::app_state::AppState;
 use crate::app::model::browse::jsonb_detail::JsonbDetailMode;
+use crate::app::model::shared::flash_timer::FlashId;
 use crate::app::model::shared::text_input::TextInputLike;
 use crate::ui::primitives::atoms::{
     CursorKind, ModalTextSurface, build_modal_text_surface_lines, render_modal_text_surface,
@@ -46,7 +47,7 @@ impl JsonbDetail {
         let hint = if is_editing {
             " Esc:Normal "
         } else {
-            " y:Copy  /:Search  Enter/i:Insert  Esc:Close "
+            " y:Copy  /:Search  i:Insert  Esc:Close "
         };
 
         let (_area, inner) = render_modal(
@@ -108,7 +109,7 @@ impl JsonbDetail {
             empty_placeholder: if is_editing {
                 " Enter JSON..."
             } else {
-                " Press Enter or i to edit..."
+                " Press i to edit..."
             },
             base_style: Style::default().fg(theme.semantic.text.primary),
             current_line_style: Style::default().bg(theme.component.editor.current_line_bg),
@@ -120,10 +121,7 @@ impl JsonbDetail {
             .collect();
         let mut lines = build_modal_text_surface_lines(surface, line_spans, theme);
 
-        let flash_active = state.flash_timers.is_active(
-            crate::app::model::shared::flash_timer::FlashId::JsonbDetail,
-            now,
-        );
+        let flash_active = state.flash_timers.is_active(FlashId::JsonbDetail, now);
         crate::ui::primitives::atoms::apply_yank_flash(&mut lines, flash_active, theme);
 
         render_modal_text_surface(frame, area, surface, lines);
