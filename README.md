@@ -103,7 +103,7 @@ On first run, enter your connection details — saved to `~/.config/sabiql/conne
 - [ ] Zero-config connection (env vars, `.pgpass`, URI auto-detect)
 - [ ] Google Cloud SQL / AlloyDB support
 - [ ] Theme switching (foreground palette only)
-- [ ] MySQL support
+- [x] MySQL support
 
 Have a feature request? [Open an issue](https://github.com/riii111/sabiql/issues/new) feedback is welcome!
 
