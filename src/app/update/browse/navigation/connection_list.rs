@@ -104,7 +104,9 @@ mod tests {
     use super::*;
     use crate::app::services::AppServices;
     use crate::app::update::browse::navigation::reduce_navigation;
-    use crate::domain::connection::{ConnectionId, ConnectionName, ConnectionProfile, SslMode};
+    use crate::domain::connection::{
+        ConnectionId, ConnectionName, ConnectionProfile, DatabaseType, SslMode,
+    };
 
     fn create_test_profile(name: &str) -> ConnectionProfile {
         ConnectionProfile {
@@ -116,6 +118,7 @@ mod tests {
             username: "user".to_string(),
             password: "pass".to_string(),
             ssl_mode: SslMode::Prefer,
+            database_type: DatabaseType::PostgreSQL,
         }
     }
 
@@ -311,6 +314,7 @@ mod tests {
                 username: "user".to_string(),
                 password: "pass".to_string(),
                 ssl_mode: SslMode::Prefer,
+                database_type: DatabaseType::PostgreSQL,
             }
         }
 

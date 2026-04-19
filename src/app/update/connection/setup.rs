@@ -6,9 +6,10 @@ use crate::app::model::connection::setup::{
     CONNECTION_INPUT_VISIBLE_WIDTH, ConnectionField, ConnectionSetupState,
 };
 use crate::app::model::shared::input_mode::InputMode;
+use crate::app::model::shared::text_input::TextInputState;
 use crate::app::update::action::{Action, ConnectionTarget, InputTarget};
 use crate::app::update::helpers::{validate_all, validate_field};
-use crate::domain::connection::SslMode;
+use crate::domain::connection::{DatabaseType, SslMode};
 
 pub fn reduce(state: &mut AppState, action: &Action, now: Instant) -> Option<Vec<Effect>> {
     match action {
@@ -55,7 +56,7 @@ pub fn reduce(state: &mut AppState, action: &Action, now: Instant) -> Option<Vec
                         setup.port.update_viewport(CONNECTION_INPUT_VISIBLE_WIDTH);
                     }
                 }
-                ConnectionField::SslMode => {}
+                ConnectionField::DatabaseType | ConnectionField::SslMode => {}
                 _ => {
                     if let Some(input) = setup.focused_input_mut() {
                         input.insert_str(&clean);
@@ -79,7 +80,7 @@ pub fn reduce(state: &mut AppState, action: &Action, now: Instant) -> Option<Vec
                         setup.port.update_viewport(CONNECTION_INPUT_VISIBLE_WIDTH);
                     }
                 }
-                ConnectionField::SslMode => {}
+                ConnectionField::DatabaseType | ConnectionField::SslMode => {}
                 _ => {
                     if let Some(input) = setup.focused_input_mut() {
                         input.insert_char(*c);
@@ -113,7 +114,8 @@ pub fn reduce(state: &mut AppState, action: &Action, now: Instant) -> Option<Vec
         Action::ConnectionSetupNextField => {
             let setup = &mut state.connection_setup;
             validate_field(setup, setup.focused_field);
-            if let Some(next) = setup.focused_field.next() {
+            let skip_ssl = setup.skip_ssl();
+            if let Some(next) = setup.focused_field.next_for(skip_ssl) {
                 setup.focused_field = next;
             }
             Some(vec![])
@@ -121,27 +123,45 @@ pub fn reduce(state: &mut AppState, action: &Action, now: Instant) -> Option<Vec
         Action::ConnectionSetupPrevField => {
             let setup = &mut state.connection_setup;
             validate_field(setup, setup.focused_field);
-            if let Some(prev) = setup.focused_field.prev() {
+            let skip_ssl = setup.skip_ssl();
+            if let Some(prev) = setup.focused_field.prev_for(skip_ssl) {
                 setup.focused_field = prev;
             }
             Some(vec![])
         }
         Action::ConnectionSetupToggleDropdown => {
             let setup = &mut state.connection_setup;
-            if setup.focused_field == ConnectionField::SslMode {
-                setup.ssl_dropdown.is_open = !setup.ssl_dropdown.is_open;
-                if setup.ssl_dropdown.is_open {
-                    setup.ssl_dropdown.selected_index = SslMode::all_variants()
-                        .iter()
-                        .position(|v| *v == setup.ssl_mode)
-                        .unwrap_or(2);
+            match setup.focused_field {
+                ConnectionField::DatabaseType => {
+                    setup.db_type_dropdown.is_open = !setup.db_type_dropdown.is_open;
+                    if setup.db_type_dropdown.is_open {
+                        setup.db_type_dropdown.selected_index = DatabaseType::ALL
+                            .iter()
+                            .position(|t| *t == setup.database_type)
+                            .unwrap_or(0);
+                    }
                 }
+                ConnectionField::SslMode => {
+                    setup.ssl_dropdown.is_open = !setup.ssl_dropdown.is_open;
+                    if setup.ssl_dropdown.is_open {
+                        setup.ssl_dropdown.selected_index = SslMode::all_variants()
+                            .iter()
+                            .position(|v| *v == setup.ssl_mode)
+                            .unwrap_or(2);
+                    }
+                }
+                _ => {}
             }
             Some(vec![])
         }
         Action::ConnectionSetupDropdownNext => {
             let setup = &mut state.connection_setup;
-            if setup.ssl_dropdown.is_open {
+            if setup.db_type_dropdown.is_open {
+                let max = DatabaseType::ALL.len() - 1;
+                if setup.db_type_dropdown.selected_index < max {
+                    setup.db_type_dropdown.selected_index += 1;
+                }
+            } else if setup.ssl_dropdown.is_open {
                 let max = SslMode::all_variants().len() - 1;
                 if setup.ssl_dropdown.selected_index < max {
                     setup.ssl_dropdown.selected_index += 1;
@@ -151,7 +171,10 @@ pub fn reduce(state: &mut AppState, action: &Action, now: Instant) -> Option<Vec
         }
         Action::ConnectionSetupDropdownPrev => {
             let setup = &mut state.connection_setup;
-            if setup.ssl_dropdown.is_open {
+            if setup.db_type_dropdown.is_open {
+                setup.db_type_dropdown.selected_index =
+                    setup.db_type_dropdown.selected_index.saturating_sub(1);
+            } else if setup.ssl_dropdown.is_open {
                 setup.ssl_dropdown.selected_index =
                     setup.ssl_dropdown.selected_index.saturating_sub(1);
             }
@@ -159,7 +182,25 @@ pub fn reduce(state: &mut AppState, action: &Action, now: Instant) -> Option<Vec
         }
         Action::ConnectionSetupDropdownConfirm => {
             let setup = &mut state.connection_setup;
-            if setup.ssl_dropdown.is_open {
+            if setup.db_type_dropdown.is_open {
+                if let Some(&new_type) =
+                    DatabaseType::ALL.get(setup.db_type_dropdown.selected_index)
+                {
+                    let old_type = setup.database_type;
+                    setup.database_type = new_type;
+                    // Auto-switch port when type changes and port still has default
+                    if old_type != new_type {
+                        let old_default = old_type.default_port().to_string();
+                        let current_port = setup.port.content().to_string();
+                        if current_port == old_default || current_port.is_empty() {
+                            let new_port = new_type.default_port().to_string();
+                            let len = new_port.len();
+                            setup.port = TextInputState::new(&new_port, len);
+                        }
+                    }
+                }
+                setup.db_type_dropdown.is_open = false;
+            } else if setup.ssl_dropdown.is_open {
                 if let Some(mode) = SslMode::all_variants().get(setup.ssl_dropdown.selected_index) {
                     setup.ssl_mode = *mode;
                 }
@@ -168,7 +209,9 @@ pub fn reduce(state: &mut AppState, action: &Action, now: Instant) -> Option<Vec
             Some(vec![])
         }
         Action::ConnectionSetupDropdownCancel => {
-            state.connection_setup.ssl_dropdown.is_open = false;
+            let setup = &mut state.connection_setup;
+            setup.db_type_dropdown.is_open = false;
+            setup.ssl_dropdown.is_open = false;
             Some(vec![])
         }
         Action::ConnectionSetupSave => {
@@ -186,6 +229,7 @@ pub fn reduce(state: &mut AppState, action: &Action, now: Instant) -> Option<Vec
                     user: setup.user.content().to_string(),
                     password: setup.password.content().to_string(),
                     ssl_mode: setup.ssl_mode,
+                    database_type: setup.database_type,
                 }])
             } else {
                 Some(vec![])
@@ -229,7 +273,7 @@ pub fn reduce(state: &mut AppState, action: &Action, now: Instant) -> Option<Vec
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::connection::ConnectionProfile;
+    use crate::domain::connection::{ConnectionProfile, DatabaseType};
 
     fn create_profile(name: &str) -> ConnectionProfile {
         ConnectionProfile::new(
@@ -240,6 +284,7 @@ mod tests {
             "user".to_string(),
             "pass".to_string(),
             SslMode::default(),
+            DatabaseType::PostgreSQL,
         )
         .unwrap()
     }

@@ -1,13 +1,14 @@
 use std::collections::HashMap;
 
 use crate::app::model::shared::text_input::TextInputState;
-use crate::domain::connection::{ConnectionId, ConnectionProfile, SslMode};
+use crate::domain::connection::{ConnectionId, ConnectionProfile, DatabaseType, SslMode};
 
 pub const CONNECTION_INPUT_WIDTH: u16 = 30;
 pub const CONNECTION_INPUT_VISIBLE_WIDTH: usize = (CONNECTION_INPUT_WIDTH - 4) as usize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ConnectionField {
+    DatabaseType,
     Name,
     Host,
     Port,
@@ -20,6 +21,7 @@ pub enum ConnectionField {
 impl ConnectionField {
     pub fn all() -> &'static [Self] {
         &[
+            Self::DatabaseType,
             Self::Name,
             Self::Host,
             Self::Port,
@@ -32,6 +34,7 @@ impl ConnectionField {
 
     pub fn next(&self) -> Option<Self> {
         match self {
+            Self::DatabaseType => Some(Self::Name),
             Self::Name => Some(Self::Host),
             Self::Host => Some(Self::Port),
             Self::Port => Some(Self::Database),
@@ -44,7 +47,8 @@ impl ConnectionField {
 
     pub fn prev(&self) -> Option<Self> {
         match self {
-            Self::Name => None,
+            Self::DatabaseType => None,
+            Self::Name => Some(Self::DatabaseType),
             Self::Host => Some(Self::Name),
             Self::Port => Some(Self::Host),
             Self::Database => Some(Self::Port),
@@ -63,6 +67,7 @@ impl ConnectionField {
 
     pub fn label(&self) -> &'static str {
         match self {
+            Self::DatabaseType => "Type:",
             Self::Name => "Name:",
             Self::Host => "Host:",
             Self::Port => "Port:",
@@ -72,10 +77,28 @@ impl ConnectionField {
             Self::SslMode => "SSL Mode:",
         }
     }
+
+    /// Returns the next field, skipping `SslMode` when `skip_ssl` is true.
+    pub fn next_for(self, skip_ssl: bool) -> Option<Self> {
+        let n = self.next()?;
+        if skip_ssl && n == Self::SslMode {
+            return None;
+        }
+        Some(n)
+    }
+
+    /// Returns the previous field, skipping `SslMode` when `skip_ssl` is true.
+    pub fn prev_for(self, skip_ssl: bool) -> Option<Self> {
+        let p = self.prev()?;
+        if skip_ssl && p == Self::SslMode {
+            return p.prev();
+        }
+        Some(p)
+    }
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct SslModeDropdown {
+pub struct DropdownState {
     pub is_open: bool,
     pub selected_index: usize,
 }
@@ -89,9 +112,11 @@ pub struct ConnectionSetupState {
     pub user: TextInputState,
     pub password: TextInputState,
     pub ssl_mode: SslMode,
+    pub database_type: DatabaseType,
 
     pub focused_field: ConnectionField,
-    pub ssl_dropdown: SslModeDropdown,
+    pub db_type_dropdown: DropdownState,
+    pub ssl_dropdown: DropdownState,
     pub validation_errors: HashMap<ConnectionField, String>,
 
     pub is_first_run: bool,
@@ -109,12 +134,20 @@ impl Default for ConnectionSetupState {
             user: TextInputState::default(),
             password: TextInputState::default(),
             ssl_mode: SslMode::Prefer,
-            focused_field: ConnectionField::Name,
-            ssl_dropdown: SslModeDropdown::default(),
+            database_type: DatabaseType::default(),
+            focused_field: ConnectionField::DatabaseType,
+            db_type_dropdown: DropdownState::default(),
+            ssl_dropdown: DropdownState::default(),
             validation_errors: HashMap::new(),
             is_first_run: true,
             editing_id: None,
         }
+    }
+}
+
+impl ConnectionSetupState {
+    pub fn skip_ssl(&self) -> bool {
+        self.database_type == DatabaseType::MySQL
     }
 }
 
@@ -135,7 +168,7 @@ impl ConnectionSetupState {
             ConnectionField::Database => self.database.content(),
             ConnectionField::User => self.user.content(),
             ConnectionField::Password => self.password.content(),
-            ConnectionField::SslMode => "",
+            ConnectionField::DatabaseType | ConnectionField::SslMode => "",
         }
     }
 
@@ -147,7 +180,7 @@ impl ConnectionSetupState {
             ConnectionField::Database => Some(&self.database),
             ConnectionField::User => Some(&self.user),
             ConnectionField::Password => Some(&self.password),
-            ConnectionField::SslMode => None,
+            ConnectionField::DatabaseType | ConnectionField::SslMode => None,
         }
     }
 
@@ -159,7 +192,7 @@ impl ConnectionSetupState {
             ConnectionField::Database => Some(&mut self.database),
             ConnectionField::User => Some(&mut self.user),
             ConnectionField::Password => Some(&mut self.password),
-            ConnectionField::SslMode => None,
+            ConnectionField::DatabaseType | ConnectionField::SslMode => None,
         }
     }
 
@@ -189,6 +222,10 @@ impl From<&ConnectionProfile> for ConnectionSetupState {
         let db_len = profile.database.chars().count();
         let user_len = profile.username.chars().count();
         let pw_len = profile.password.chars().count();
+        let db_type_index = DatabaseType::ALL
+            .iter()
+            .position(|t| *t == profile.database_type)
+            .unwrap_or(0);
         Self {
             name: TextInputState::new(profile.name.as_str(), name_len),
             host: TextInputState::new(&profile.host, host_len),
@@ -197,8 +234,13 @@ impl From<&ConnectionProfile> for ConnectionSetupState {
             user: TextInputState::new(&profile.username, user_len),
             password: TextInputState::new(&profile.password, pw_len),
             ssl_mode: profile.ssl_mode,
-            focused_field: ConnectionField::Name,
-            ssl_dropdown: SslModeDropdown::default(),
+            database_type: profile.database_type,
+            focused_field: ConnectionField::DatabaseType,
+            db_type_dropdown: DropdownState {
+                is_open: false,
+                selected_index: db_type_index,
+            },
+            ssl_dropdown: DropdownState::default(),
             validation_errors: HashMap::new(),
             is_first_run: false,
             editing_id: Some(profile.id.clone()),
@@ -215,6 +257,7 @@ mod tests {
         use super::*;
 
         #[rstest]
+        #[case(ConnectionField::DatabaseType, Some(ConnectionField::Name))]
         #[case(ConnectionField::Name, Some(ConnectionField::Host))]
         #[case(ConnectionField::Host, Some(ConnectionField::Port))]
         #[case(ConnectionField::Port, Some(ConnectionField::Database))]
@@ -230,7 +273,8 @@ mod tests {
         }
 
         #[rstest]
-        #[case(ConnectionField::Name, None)]
+        #[case(ConnectionField::DatabaseType, None)]
+        #[case(ConnectionField::Name, Some(ConnectionField::DatabaseType))]
         #[case(ConnectionField::Host, Some(ConnectionField::Name))]
         #[case(ConnectionField::Port, Some(ConnectionField::Host))]
         #[case(ConnectionField::Database, Some(ConnectionField::Port))]
@@ -245,6 +289,7 @@ mod tests {
         }
 
         #[rstest]
+        #[case(ConnectionField::DatabaseType, false)]
         #[case(ConnectionField::Name, true)]
         #[case(ConnectionField::Host, true)]
         #[case(ConnectionField::Port, true)]
@@ -262,9 +307,28 @@ mod tests {
         #[test]
         fn all_returns_fields_in_order() {
             let all = ConnectionField::all();
-            assert_eq!(all.len(), 7);
-            assert_eq!(all[0], ConnectionField::Name);
-            assert_eq!(all[6], ConnectionField::SslMode);
+            assert_eq!(all.len(), 8);
+            assert_eq!(all[0], ConnectionField::DatabaseType);
+            assert_eq!(all[7], ConnectionField::SslMode);
+        }
+
+        #[test]
+        fn next_for_skips_ssl_mode() {
+            assert_eq!(ConnectionField::Password.next_for(true), None,);
+            assert_eq!(
+                ConnectionField::Password.next_for(false),
+                Some(ConnectionField::SslMode),
+            );
+        }
+
+        #[test]
+        fn prev_for_skips_ssl_mode() {
+            // SslMode.prev_for(true) still returns Password (its direct predecessor).
+            // The skip logic only applies when the *result* would be SslMode.
+            assert_eq!(
+                ConnectionField::SslMode.prev_for(true),
+                Some(ConnectionField::Password),
+            );
         }
     }
 
@@ -281,7 +345,7 @@ mod tests {
             assert!(state.user.content().is_empty());
             assert!(state.password.content().is_empty());
             assert_eq!(state.ssl_mode, SslMode::Prefer);
-            assert_eq!(state.focused_field, ConnectionField::Name);
+            assert_eq!(state.focused_field, ConnectionField::DatabaseType);
             assert!(state.is_first_run);
             assert!(state.editing_id.is_none());
         }
@@ -337,6 +401,7 @@ mod tests {
                 "testuser",
                 "secret",
                 SslMode::Require,
+                DatabaseType::PostgreSQL,
             )
             .unwrap();
 
@@ -369,6 +434,7 @@ mod tests {
                 "user",
                 "",
                 SslMode::Prefer,
+                DatabaseType::PostgreSQL,
             )
             .unwrap();
             let state = ConnectionSetupState::from(&profile);

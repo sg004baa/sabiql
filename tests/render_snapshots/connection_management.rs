@@ -1,5 +1,7 @@
 use super::*;
-use sabiql::domain::connection::{ConnectionId, ConnectionName, ConnectionProfile, SslMode};
+use sabiql::domain::connection::{
+    ConnectionId, ConnectionName, ConnectionProfile, DatabaseType, SslMode,
+};
 
 fn three_connections() -> (ConnectionId, Vec<ConnectionProfile>) {
     let active_id = ConnectionId::new();
@@ -13,6 +15,7 @@ fn three_connections() -> (ConnectionId, Vec<ConnectionProfile>) {
             username: "admin".to_string(),
             password: "secret".to_string(),
             ssl_mode: SslMode::Require,
+            database_type: DatabaseType::PostgreSQL,
         },
         ConnectionProfile {
             id: ConnectionId::new(),
@@ -23,6 +26,7 @@ fn three_connections() -> (ConnectionId, Vec<ConnectionProfile>) {
             username: "user".to_string(),
             password: "pass".to_string(),
             ssl_mode: SslMode::Prefer,
+            database_type: DatabaseType::PostgreSQL,
         },
         ConnectionProfile {
             id: ConnectionId::new(),
@@ -33,6 +37,7 @@ fn three_connections() -> (ConnectionId, Vec<ConnectionProfile>) {
             username: "dev".to_string(),
             password: "dev".to_string(),
             ssl_mode: SslMode::Disable,
+            database_type: DatabaseType::PostgreSQL,
         },
     ];
     (active_id, profiles)

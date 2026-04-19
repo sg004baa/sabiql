@@ -6,7 +6,7 @@ use crate::app::model::app_state::AppState;
 use crate::app::model::connection::setup::{
     CONNECTION_INPUT_VISIBLE_WIDTH, CONNECTION_INPUT_WIDTH, ConnectionField, ConnectionSetupState,
 };
-use crate::domain::connection::SslMode;
+use crate::domain::connection::{DatabaseType, SslMode};
 use crate::ui::primitives::atoms::text_cursor_spans;
 use crate::ui::primitives::molecules::render_modal;
 use crate::ui::theme::ThemePalette;
@@ -33,9 +33,10 @@ pub struct ConnectionSetup;
 impl ConnectionSetup {
     pub fn render(frame: &mut Frame, state: &AppState, theme: &ThemePalette) {
         let form_state = &state.connection_setup;
+        let skip_ssl = form_state.skip_ssl();
 
         let modal_width = LABEL_WIDTH + INPUT_WIDTH + ERROR_WIDTH + 8;
-        let modal_height = 13;
+        let modal_height: u16 = if skip_ssl { 13 } else { 14 };
 
         let (title, hint) = if form_state.is_edit_mode() {
             (
@@ -58,84 +59,128 @@ impl ConnectionSetup {
         );
 
         let inner = modal_inner.inner(Margin::new(2, 1));
-        let chunks = Layout::vertical([
+
+        let mut constraints = vec![
+            Constraint::Length(FIELD_HEIGHT), // DatabaseType
             Constraint::Length(FIELD_HEIGHT), // Name
             Constraint::Length(FIELD_HEIGHT), // Host
             Constraint::Length(FIELD_HEIGHT), // Port
             Constraint::Length(FIELD_HEIGHT), // Database
             Constraint::Length(FIELD_HEIGHT), // User
             Constraint::Length(FIELD_HEIGHT), // Password
-            Constraint::Length(FIELD_HEIGHT), // SslMode
-            Constraint::Length(1),            // spacer
-            Constraint::Length(1),            // notice
-        ])
-        .split(inner);
+        ];
+        if !skip_ssl {
+            constraints.push(Constraint::Length(FIELD_HEIGHT)); // SslMode
+        }
+        constraints.push(Constraint::Length(1)); // spacer
+        constraints.push(Constraint::Length(1)); // notice
+
+        let chunks = Layout::vertical(constraints).split(inner);
+
+        // Row indices shift depending on whether SslMode is present
+        let mut row = 0;
+
+        Self::render_selector_field(
+            frame,
+            chunks[row],
+            "Type:",
+            &form_state.database_type.to_string(),
+            form_state.focused_field == ConnectionField::DatabaseType,
+            theme,
+        );
+        row += 1;
 
         Self::render_text_field(
             frame,
-            chunks[0],
+            chunks[row],
             form_state,
             ConnectionField::Name,
             false,
             theme,
         );
+        row += 1;
         Self::render_text_field(
             frame,
-            chunks[1],
+            chunks[row],
             form_state,
             ConnectionField::Host,
             false,
             theme,
         );
+        row += 1;
         Self::render_text_field(
             frame,
-            chunks[2],
+            chunks[row],
             form_state,
             ConnectionField::Port,
             false,
             theme,
         );
+        row += 1;
         Self::render_text_field(
             frame,
-            chunks[3],
+            chunks[row],
             form_state,
             ConnectionField::Database,
             false,
             theme,
         );
+        row += 1;
         Self::render_text_field(
             frame,
-            chunks[4],
+            chunks[row],
             form_state,
             ConnectionField::User,
             false,
             theme,
         );
+        row += 1;
         Self::render_text_field(
             frame,
-            chunks[5],
+            chunks[row],
             form_state,
             ConnectionField::Password,
             true,
             theme,
         );
-        Self::render_ssl_field(
-            frame,
-            chunks[6],
-            form_state.ssl_mode,
-            form_state.focused_field == ConnectionField::SslMode,
-            theme,
-        );
+        row += 1;
 
+        let ssl_row = row;
+        if !skip_ssl {
+            Self::render_selector_field(
+                frame,
+                chunks[row],
+                "SSL Mode:",
+                &form_state.ssl_mode.to_string(),
+                form_state.focused_field == ConnectionField::SslMode,
+                theme,
+            );
+            row += 1;
+        }
+
+        // spacer row is `row`, notice is `row + 1`
         let notice = "Note: Connection info is stored locally in plain text";
         let notice_para =
             Paragraph::new(notice).style(Style::default().fg(theme.component.feedback.note_text));
-        frame.render_widget(notice_para, chunks[8]);
+        frame.render_widget(notice_para, chunks[row + 1]);
 
-        if form_state.ssl_dropdown.is_open {
-            Self::render_dropdown(
+        // Dropdowns (rendered last so they overlap fields below)
+        if form_state.db_type_dropdown.is_open {
+            Self::render_dropdown_items(
                 frame,
-                chunks[6],
+                chunks[0],
+                DatabaseType::ALL.iter().map(ToString::to_string).collect(),
+                form_state.db_type_dropdown.selected_index,
+                theme,
+            );
+        } else if !skip_ssl && form_state.ssl_dropdown.is_open {
+            Self::render_dropdown_items(
+                frame,
+                chunks[ssl_row],
+                SslMode::all_variants()
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect(),
                 form_state.ssl_dropdown.selected_index,
                 theme,
             );
@@ -233,10 +278,11 @@ impl ConnectionSetup {
         }
     }
 
-    fn render_ssl_field(
+    fn render_selector_field(
         frame: &mut Frame,
         area: Rect,
-        ssl_mode: SslMode,
+        label: &str,
+        value: &str,
         is_focused: bool,
         theme: &ThemePalette,
     ) {
@@ -247,19 +293,16 @@ impl ConnectionSetup {
         ])
         .split(area);
 
-        // Label: gray (like Explorer content), bold when focused
         let label_style = if is_focused {
             Style::default().fg(theme.semantic.text.secondary).bold()
         } else {
             Style::default().fg(theme.semantic.text.secondary)
         };
-        let label_para = Paragraph::new("SSL Mode:").style(label_style);
+        let label_para = Paragraph::new(label.to_string()).style(label_style);
         frame.render_widget(label_para, chunks[0]);
 
-        // Value: white (emphasized), same width as text fields
         let content_width = CONNECTION_INPUT_VISIBLE_WIDTH;
-        let ssl_mode_str = ssl_mode.to_string();
-        let display_content = format!("{:<1$} ▼", ssl_mode_str, content_width - 2);
+        let display_content = format!("{:<1$} ▼", value, content_width - 2);
 
         let border_style = theme.modal_input_border_style(is_focused, false);
 
@@ -267,9 +310,10 @@ impl ConnectionSetup {
         frame.render_widget(input_para, chunks[1]);
     }
 
-    fn render_dropdown(
+    fn render_dropdown_items(
         frame: &mut Frame,
-        ssl_field_area: Rect,
+        field_area: Rect,
+        items: Vec<String>,
         selected_index: usize,
         theme: &ThemePalette,
     ) {
@@ -278,13 +322,14 @@ impl ConnectionSetup {
             Constraint::Length(INPUT_WIDTH),
             Constraint::Length(ERROR_WIDTH),
         ])
-        .split(ssl_field_area);
+        .split(field_area);
 
+        let item_count = items.len().min(DROPDOWN_ITEM_COUNT);
         let dropdown_area = Rect {
             x: chunks[1].x,
             y: chunks[1].y + 1,
             width: INPUT_WIDTH,
-            height: DROPDOWN_ITEM_COUNT as u16 + 2,
+            height: item_count as u16 + 2,
         };
 
         frame.render_widget(Clear, dropdown_area);
@@ -296,9 +341,8 @@ impl ConnectionSetup {
         frame.render_widget(block, dropdown_area);
 
         let inner = dropdown_area.inner(Margin::new(1, 1));
-        let variants = SslMode::all_variants();
 
-        for (i, variant) in variants.iter().enumerate() {
+        for (i, label) in items.iter().enumerate() {
             if i >= DROPDOWN_ITEM_COUNT {
                 break;
             }
@@ -316,7 +360,7 @@ impl ConnectionSetup {
                 Style::default().fg(theme.semantic.text.secondary)
             };
 
-            let item_para = Paragraph::new(variant.to_string()).style(item_style);
+            let item_para = Paragraph::new(label.clone()).style(item_style);
             frame.render_widget(item_para, item_area);
         }
     }

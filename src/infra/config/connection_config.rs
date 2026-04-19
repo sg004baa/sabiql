@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::domain::connection::{
-    ConnectionId, ConnectionName, ConnectionNameError, ConnectionProfile, SslMode,
+    ConnectionId, ConnectionName, ConnectionNameError, ConnectionProfile, DatabaseType, SslMode,
 };
 
 pub const CURRENT_VERSION: u32 = 2;
@@ -27,6 +27,8 @@ pub struct ConnectionConfigEntry {
     pub username: String,
     pub password: String,
     pub ssl_mode: SslMode,
+    #[serde(default)]
+    pub database_type: DatabaseType,
 }
 
 impl From<&[ConnectionProfile]> for ConnectionConfigFile {
@@ -44,6 +46,7 @@ impl From<&[ConnectionProfile]> for ConnectionConfigFile {
                     username: p.username.clone(),
                     password: p.password.clone(),
                     ssl_mode: p.ssl_mode,
+                    database_type: p.database_type,
                 })
                 .collect(),
         }
@@ -67,6 +70,7 @@ impl TryFrom<&ConnectionConfigFile> for Vec<ConnectionProfile> {
                     username: entry.username.clone(),
                     password: entry.password.clone(),
                     ssl_mode: entry.ssl_mode,
+                    database_type: entry.database_type,
                 })
             })
             .collect()

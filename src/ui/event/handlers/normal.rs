@@ -385,11 +385,11 @@ mod tests {
             }
 
             #[test]
-            fn alt_enter_noop_when_connection_error_is_open() {
+            fn ctrl_enter_noop_when_connection_error_is_open() {
                 let mut state = browse_state();
                 state.connection_error.error_info = Some(ConnectionErrorInfo::new("boom"));
 
-                let result = handle_normal_mode(KeyCombo::alt(Key::Enter), &state);
+                let result = handle_normal_mode(KeyCombo::ctrl(Key::Enter), &state);
 
                 assert!(matches!(result, Action::None));
             }

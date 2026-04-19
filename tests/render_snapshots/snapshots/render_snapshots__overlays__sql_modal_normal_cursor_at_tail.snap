@@ -1,5 +1,6 @@
 ---
 source: tests/render_snapshots/overlays.rs
+assertion_line: 146
 expression: output
 ---
 test_project | - | - | no dsn | localhost:5432/test                             
@@ -20,7 +21,7 @@ test_project | - | - | no dsn | localhost:5432/test
 │       │                                                              │       │
 │       │ ──────────────────────────────────────────────────────────── │       │
 │       │  [NORMAL]                                             Ready  │       │
-│       ╰ ⌥Enter: Run │ i: Insert │ Tab/⇧Tab: Switch │ Esc: Close ─────╯       │
+│       ╰ ^Enter: Run │ i: Insert │ Tab/⇧Tab: Switch │ Esc: Close ─────╯       │
 │                  ││                                                          │
 │                  ││                                                          │
 └──────────────────┘└──────────────────────────────────────────────────────────┘

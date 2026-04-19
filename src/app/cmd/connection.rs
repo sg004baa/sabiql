@@ -34,6 +34,7 @@ pub(crate) async fn run(
             user,
             password,
             ssl_mode,
+            database_type,
         } => {
             let profile = match id {
                 Some(existing_id) => {
@@ -46,6 +47,7 @@ pub(crate) async fn run(
                         user,
                         password,
                         ssl_mode,
+                        database_type,
                     ) {
                         Ok(p) => p,
                         Err(e) => {
@@ -58,7 +60,14 @@ pub(crate) async fn run(
                 }
                 None => {
                     match ConnectionProfile::new(
-                        name, host, port, database, user, password, ssl_mode,
+                        name,
+                        host,
+                        port,
+                        database,
+                        user,
+                        password,
+                        ssl_mode,
+                        database_type,
                     ) {
                         Ok(p) => p,
                         Err(e) => {
@@ -221,7 +230,7 @@ mod tests {
     use crate::app::ports::{ConnectionStoreError, DsnBuilder, RenderOutput, Renderer};
     use crate::app::services::AppServices;
     use crate::app::update::action::{Action, ConnectionTarget, ConnectionsLoadedPayload};
-    use crate::domain::connection::{ConnectionId, ConnectionProfile, SslMode};
+    use crate::domain::connection::{ConnectionId, ConnectionProfile, DatabaseType, SslMode};
     use color_eyre::eyre::Result;
 
     struct NoopRenderer;
@@ -412,6 +421,7 @@ mod tests {
                 "user",
                 "pass",
                 SslMode::Prefer,
+                DatabaseType::PostgreSQL,
             )
             .unwrap();
 
