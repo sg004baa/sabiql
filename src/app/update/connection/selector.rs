@@ -99,7 +99,7 @@ pub fn reduce(state: &mut AppState, action: &Action, now: Instant) -> Option<Vec
 mod tests {
     use super::*;
     use crate::app::model::connection::list::build_connection_list;
-    use crate::domain::connection::{ConnectionProfile, SslMode};
+    use crate::domain::connection::{ConnectionProfile, DatabaseType, SslMode};
 
     fn create_profile(name: &str) -> ConnectionProfile {
         ConnectionProfile::new(
@@ -110,6 +110,7 @@ mod tests {
             "user".to_string(),
             "pass".to_string(),
             SslMode::default(),
+            DatabaseType::PostgreSQL,
         )
         .unwrap()
     }

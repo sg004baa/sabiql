@@ -174,7 +174,7 @@ fn set_file_permissions(_path: &Path) -> Result<(), ConnectionStoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::connection::SslMode;
+    use crate::domain::connection::{DatabaseType, SslMode};
     use tempfile::TempDir;
 
     fn make_test_profile(name: &str) -> ConnectionProfile {
@@ -186,6 +186,7 @@ mod tests {
             "testuser",
             "testpass",
             SslMode::Prefer,
+            DatabaseType::PostgreSQL,
         )
         .unwrap()
     }

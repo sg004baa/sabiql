@@ -261,8 +261,8 @@ pub fn validate_field(state: &mut ConnectionSetupState, field: ConnectionField) 
                     .insert(field, "Name must be 50 characters or less".to_string());
             }
         }
-        ConnectionField::Password | ConnectionField::SslMode => {
-            // Optional fields, no validation needed
+        ConnectionField::DatabaseType | ConnectionField::Password | ConnectionField::SslMode => {
+            // Non-text / optional fields, no validation needed
         }
     }
 }

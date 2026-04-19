@@ -22,8 +22,8 @@ use sabiql::app::update::action::Action;
 use sabiql::app::update::reducer::reduce;
 use sabiql::error;
 use sabiql::infra::adapters::{
-    ArboardClipboard, FileConfigWriter, FileQueryHistoryStore, FsErLogWriter, NativeFolderOpener,
-    PgServiceFileReader, PostgresAdapter, TomlConnectionStore,
+    ArboardClipboard, DispatchAdapter, FileConfigWriter, FileQueryHistoryStore, FsErLogWriter,
+    NativeFolderOpener, PgServiceFileReader, TomlConnectionStore,
 };
 use sabiql::infra::config::project_root::{find_project_root, get_project_name};
 use sabiql::infra::export::DotExporter;
@@ -76,7 +76,7 @@ async fn main() -> Result<()> {
 
     let (action_tx, mut action_rx) = mpsc::channel::<Action>(256);
 
-    let adapter = Arc::new(PostgresAdapter::new());
+    let adapter = Arc::new(DispatchAdapter::new());
     let metadata_cache = TtlCache::new(300);
     let completion_engine = RefCell::new(CompletionEngine::new());
     let connection_store = TomlConnectionStore::new()?;
@@ -85,6 +85,7 @@ async fn main() -> Result<()> {
 
     let service_file_reader: Arc<dyn ServiceFileReader> = Arc::new(PgServiceFileReader::new());
 
+    let adapter_for_callback = Arc::clone(&adapter);
     let effect_runner = EffectRunner::builder()
         .metadata_provider(Arc::clone(&adapter) as _)
         .query_executor(Arc::clone(&adapter) as _)
@@ -99,6 +100,9 @@ async fn main() -> Result<()> {
         .query_history_store(Arc::new(FileQueryHistoryStore::new()))
         .metadata_cache(metadata_cache.clone())
         .action_tx(action_tx.clone())
+        .on_database_type_change(Box::new(move |db_type| {
+            adapter_for_callback.set_active_type(db_type);
+        }))
         .build();
 
     let services = AppServices {

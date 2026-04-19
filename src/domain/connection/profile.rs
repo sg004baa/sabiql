@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use super::database_type::DatabaseType;
 use super::id::ConnectionId;
 use super::name::{ConnectionName, ConnectionNameError};
 use super::ssl_mode::SslMode;
@@ -14,6 +15,8 @@ pub struct ConnectionProfile {
     pub username: String,
     pub password: String,
     pub ssl_mode: SslMode,
+    #[serde(default)]
+    pub database_type: DatabaseType,
 }
 
 impl ConnectionProfile {
@@ -25,6 +28,7 @@ impl ConnectionProfile {
         username: impl Into<String>,
         password: impl Into<String>,
         ssl_mode: SslMode,
+        database_type: DatabaseType,
     ) -> Result<Self, ConnectionNameError> {
         Ok(Self {
             id: ConnectionId::new(),
@@ -35,9 +39,14 @@ impl ConnectionProfile {
             username: username.into(),
             password: password.into(),
             ssl_mode,
+            database_type,
         })
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "constructor mirrors struct fields"
+    )]
     pub fn with_id(
         id: ConnectionId,
         name: impl Into<String>,
@@ -47,6 +56,7 @@ impl ConnectionProfile {
         username: impl Into<String>,
         password: impl Into<String>,
         ssl_mode: SslMode,
+        database_type: DatabaseType,
     ) -> Result<Self, ConnectionNameError> {
         Ok(Self {
             id,
@@ -57,6 +67,7 @@ impl ConnectionProfile {
             username: username.into(),
             password: password.into(),
             ssl_mode,
+            database_type,
         })
     }
 
@@ -78,6 +89,7 @@ mod tests {
             "testuser",
             "testpass",
             SslMode::Prefer,
+            DatabaseType::PostgreSQL,
         )
         .unwrap()
     }
@@ -102,6 +114,7 @@ mod tests {
                 "testuser",
                 "testpass",
                 SslMode::Prefer,
+                DatabaseType::PostgreSQL,
             );
             assert!(result.is_err());
         }

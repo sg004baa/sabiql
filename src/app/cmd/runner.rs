@@ -26,6 +26,7 @@ use crate::app::ports::{
 use crate::app::services::AppServices;
 use crate::app::update::action::Action;
 use crate::domain::DatabaseMetadata;
+use crate::domain::connection::DatabaseType;
 
 struct ConnectionDeps {
     dsn_builder: Arc<dyn DsnBuilder>,
@@ -57,6 +58,7 @@ pub struct EffectRunner {
     utility: UtilityDeps,
     metadata_cache: TtlCache<String, Arc<DatabaseMetadata>>,
     action_tx: mpsc::Sender<Action>,
+    on_database_type_change: Option<Box<dyn Fn(DatabaseType) + Send + Sync>>,
 }
 
 pub struct EffectRunnerBuilder {
@@ -73,6 +75,7 @@ pub struct EffectRunnerBuilder {
     query_history_store: Option<Arc<dyn QueryHistoryStore>>,
     metadata_cache: Option<TtlCache<String, Arc<DatabaseMetadata>>>,
     action_tx: Option<mpsc::Sender<Action>>,
+    on_database_type_change: Option<Box<dyn Fn(DatabaseType) + Send + Sync>>,
 }
 
 impl EffectRunnerBuilder {
@@ -141,6 +144,11 @@ impl EffectRunnerBuilder {
         self.action_tx = Some(v);
         self
     }
+    #[must_use]
+    pub fn on_database_type_change(mut self, v: Box<dyn Fn(DatabaseType) + Send + Sync>) -> Self {
+        self.on_database_type_change = Some(v);
+        self
+    }
 
     pub fn build(self) -> EffectRunner {
         EffectRunner {
@@ -171,6 +179,7 @@ impl EffectRunnerBuilder {
             },
             metadata_cache: self.metadata_cache.expect("metadata_cache is required"),
             action_tx: self.action_tx.expect("action_tx is required"),
+            on_database_type_change: self.on_database_type_change,
         }
     }
 }
@@ -195,6 +204,7 @@ impl EffectRunner {
             query_history_store: None,
             metadata_cache: None,
             action_tx: None,
+            on_database_type_change: None,
         }
     }
 
@@ -316,6 +326,18 @@ impl EffectRunner {
             | Effect::DeleteConnection { .. }
             | Effect::SwitchConnection { .. }
             | Effect::SwitchToService { .. }) => {
+                if let Some(ref setter) = self.on_database_type_change {
+                    match &e {
+                        Effect::SaveAndConnect { database_type, .. } => setter(*database_type),
+                        Effect::SwitchConnection { connection_index } => {
+                            if let Some(profile) = state.connections().get(*connection_index) {
+                                setter(profile.database_type);
+                            }
+                        }
+                        Effect::SwitchToService { .. } => setter(DatabaseType::PostgreSQL),
+                        _ => {}
+                    }
+                }
                 cmd_connection::run(
                     e,
                     &self.action_tx,

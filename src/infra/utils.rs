@@ -2,6 +2,10 @@ pub fn quote_ident(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
+pub fn quote_ident_mysql(name: &str) -> String {
+    format!("`{}`", name.replace('`', "``"))
+}
+
 pub fn quote_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
@@ -9,6 +13,21 @@ pub fn quote_literal(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quote_ident_mysql_simple() {
+        assert_eq!(quote_ident_mysql("users"), "`users`");
+    }
+
+    #[test]
+    fn quote_ident_mysql_with_backtick() {
+        assert_eq!(quote_ident_mysql("user`name"), "`user``name`");
+    }
+
+    #[test]
+    fn quote_ident_mysql_empty() {
+        assert_eq!(quote_ident_mysql(""), "``");
+    }
 
     #[test]
     fn quote_ident_simple() {

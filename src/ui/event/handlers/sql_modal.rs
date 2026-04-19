@@ -134,7 +134,7 @@ pub fn handle_sql_modal_keys_with_prefix(
         }
 
         return match combo.key {
-            Key::Enter if alt => Action::SqlModalSubmit,
+            Key::Enter if ctrl => Action::SqlModalSubmit,
             Key::Up => Action::TextMoveCursor {
                 target: InputTarget::SqlModal,
                 direction: CursorMove::Up,
@@ -234,7 +234,7 @@ pub fn handle_sql_modal_keys_with_prefix(
     let shift = combo.modifiers.shift;
     let ctrl_only = ctrl && !alt && !shift;
 
-    if alt && combo.key == Key::Enter {
+    if ctrl && combo.key == Key::Enter {
         return Action::SqlModalSubmit;
     }
 
@@ -583,9 +583,9 @@ mod tests {
         }
 
         #[test]
-        fn alt_enter_submits_query() {
+        fn ctrl_enter_submits_query() {
             let result = handle_sql_modal_keys(
-                combo_alt(Key::Enter),
+                combo_ctrl(Key::Enter),
                 false,
                 &SqlModalStatus::Editing,
                 SqlModalTab::Sql,
@@ -914,9 +914,9 @@ mod tests {
         }
 
         #[test]
-        fn alt_enter_submits() {
+        fn ctrl_enter_submits() {
             let result = handle_sql_modal_keys(
-                combo_alt(Key::Enter),
+                combo_ctrl(Key::Enter),
                 false,
                 &SqlModalStatus::Normal,
                 SqlModalTab::Sql,

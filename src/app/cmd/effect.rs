@@ -1,6 +1,6 @@
 use crate::app::update::action::Action;
 use crate::domain::Table;
-use crate::domain::connection::{ConnectionId, SslMode};
+use crate::domain::connection::{ConnectionId, DatabaseType, SslMode};
 
 #[derive(Debug, Clone)]
 pub enum Effect {
@@ -15,6 +15,7 @@ pub enum Effect {
         user: String,
         password: String,
         ssl_mode: SslMode,
+        database_type: DatabaseType,
     },
     LoadConnectionForEdit {
         id: ConnectionId,

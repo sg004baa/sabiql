@@ -25,6 +25,7 @@ impl ConnectionErrorKind {
             || stderr_lower.contains("name or service not known")
             || stderr_lower.contains("nodename nor servname provided")
             || stderr_lower.contains("no such host")
+            || stderr_lower.contains("unknown mysql server host")
         {
             return Self::HostUnreachable;
         }
@@ -32,12 +33,14 @@ impl ConnectionErrorKind {
         if stderr_lower.contains("password authentication failed")
             || stderr_lower.contains("authentication failed")
             || (stderr_lower.contains("fatal:") && stderr_lower.contains("password"))
+            || stderr_lower.contains("access denied for user")
         {
             return Self::AuthFailed;
         }
 
-        if stderr_lower.contains("does not exist")
-            && (stderr_lower.contains("database") || stderr_lower.contains("fatal:"))
+        if (stderr_lower.contains("does not exist")
+            && (stderr_lower.contains("database") || stderr_lower.contains("fatal:")))
+            || stderr_lower.contains("unknown database")
         {
             return Self::DatabaseNotFound;
         }
@@ -65,7 +68,7 @@ impl ConnectionErrorKind {
 
     pub fn hint(&self) -> &'static str {
         match self {
-            Self::CliNotFound => "Install the database CLI (e.g. psql) and add it to PATH",
+            Self::CliNotFound => "Install the database CLI (psql or mysql) and add it to PATH",
             Self::HostUnreachable => "Check the hostname",
             Self::AuthFailed => "Check username and password",
             Self::DatabaseNotFound => "Check database name",
@@ -234,6 +237,7 @@ mod tests {
         #[rstest]
         #[case(r#"psql: error: could not translate host name "host" to address: nodename nor servname provided"#)]
         #[case(r#"psql: error: could not translate host name "host" to address: Name or service not known"#)]
+        #[case(r"ERROR 2005 (HY000): Unknown MySQL server host 'badhost' (0)")]
         fn stderr_as_host_unreachable(#[case] stderr: &str) {
             assert_eq!(
                 ConnectionErrorKind::classify(stderr),
@@ -244,6 +248,9 @@ mod tests {
         #[rstest]
         #[case(r#"FATAL: password authentication failed for user "user""#)]
         #[case(r"psql: error: FATAL:  password authentication failed")]
+        #[case(
+            r"ERROR 1045 (28000): Access denied for user 'root'@'localhost' (using password: YES)"
+        )]
         fn stderr_as_auth_failed(#[case] stderr: &str) {
             assert_eq!(
                 ConnectionErrorKind::classify(stderr),
@@ -251,10 +258,12 @@ mod tests {
             );
         }
 
-        #[test]
-        fn stderr_as_database_not_found() {
+        #[rstest]
+        #[case(r#"FATAL: database "nonexistent" does not exist"#)]
+        #[case(r"ERROR 1049 (42000): Unknown database 'nonexistent'")]
+        fn stderr_as_database_not_found(#[case] stderr: &str) {
             assert_eq!(
-                ConnectionErrorKind::classify(r#"FATAL: database "nonexistent" does not exist"#),
+                ConnectionErrorKind::classify(stderr),
                 ConnectionErrorKind::DatabaseNotFound
             );
         }
@@ -318,7 +327,7 @@ mod tests {
             assert_eq!(info.summary(), "Database CLI not found");
             assert_eq!(
                 info.hint(),
-                "Install the database CLI (e.g. psql) and add it to PATH"
+                "Install the database CLI (psql or mysql) and add it to PATH"
             );
         }
     }

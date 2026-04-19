@@ -714,7 +714,9 @@ mod tests {
     mod connection_catalog {
         use super::*;
         use crate::app::model::connection::list::ConnectionListItem;
-        use crate::domain::connection::{ConnectionId, ConnectionName, ConnectionProfile, SslMode};
+        use crate::domain::connection::{
+            ConnectionId, ConnectionName, ConnectionProfile, DatabaseType, SslMode,
+        };
 
         fn make_profile(name: &str) -> ConnectionProfile {
             ConnectionProfile {
@@ -726,6 +728,7 @@ mod tests {
                 username: "user".to_string(),
                 password: "pass".to_string(),
                 ssl_mode: SslMode::Prefer,
+                database_type: DatabaseType::PostgreSQL,
             }
         }
 

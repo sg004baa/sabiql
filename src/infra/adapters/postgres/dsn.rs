@@ -43,7 +43,7 @@ impl DsnBuilder for PostgresAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::connection::SslMode;
+    use crate::domain::connection::{DatabaseType, SslMode};
 
     fn make_test_profile() -> ConnectionProfile {
         ConnectionProfile::new(
@@ -54,6 +54,7 @@ mod tests {
             "testuser",
             "testpass",
             SslMode::Prefer,
+            DatabaseType::PostgreSQL,
         )
         .unwrap()
     }
@@ -86,6 +87,7 @@ mod tests {
                 "user@org",
                 "p@ss:word",
                 SslMode::Prefer,
+                DatabaseType::PostgreSQL,
             )
             .unwrap();
             let dsn = adapter.build_dsn(&profile);

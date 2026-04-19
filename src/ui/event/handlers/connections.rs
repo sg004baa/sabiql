@@ -6,7 +6,8 @@ pub fn handle_connection_setup_keys(combo: KeyCombo, state: &AppState) -> Action
     use crate::app::model::connection::setup::ConnectionField;
     use crate::app::update::action::CursorMove;
 
-    let dropdown_open = state.connection_setup.ssl_dropdown.is_open;
+    let dropdown_open = state.connection_setup.db_type_dropdown.is_open
+        || state.connection_setup.ssl_dropdown.is_open;
     let ctrl = combo.modifiers.ctrl;
     let alt = combo.modifiers.alt;
     let shift = combo.modifiers.shift;
@@ -34,8 +35,11 @@ pub fn handle_connection_setup_keys(combo: KeyCombo, state: &AppState) -> Action
         Key::BackTab => Action::ConnectionSetupPrevField,
         Key::Esc => Action::ConnectionSetupCancel,
 
-        // SSL Mode toggle (Enter on SslMode field)
-        Key::Enter if state.connection_setup.focused_field == ConnectionField::SslMode => {
+        // Dropdown toggle (Enter on DatabaseType or SslMode field)
+        Key::Enter
+            if state.connection_setup.focused_field == ConnectionField::DatabaseType
+                || state.connection_setup.focused_field == ConnectionField::SslMode =>
+        {
             Action::ConnectionSetupToggleDropdown
         }
 
