@@ -243,6 +243,10 @@ impl MySqlAdapter {
     }
 
     /// Execute a write query (UPDATE, DELETE, INSERT) and return affected rows.
+    ///
+    /// Appends `SELECT ROW_COUNT()` so the affected-row count is reliably
+    /// returned via stdout, regardless of `--batch` or pipe-mode suppression
+    /// of the "Query OK" info message.
     pub(in crate::infra::adapters::mysql) async fn execute_write_raw(
         &self,
         dsn: &str,
@@ -251,7 +255,13 @@ impl MySqlAdapter {
     ) -> Result<WriteExecutionResult, DbOperationError> {
         let start = Instant::now();
 
-        let mut cmd = Self::build_mysql_cmd(dsn, &[], query, read_only)?;
+        let wrapped = format!("{query}; SELECT ROW_COUNT()");
+        let mut cmd = Self::build_mysql_cmd(
+            dsn,
+            &["--batch", "--skip-column-names"],
+            &wrapped,
+            read_only,
+        )?;
 
         let output = Self::collect_output(&mut cmd, self.timeout_secs).await?;
         let elapsed = start.elapsed().as_millis() as u64;
@@ -262,9 +272,11 @@ impl MySqlAdapter {
             ));
         }
 
-        let affected_rows = Self::parse_affected_rows(&output.stdout)
-            .or_else(|| Self::parse_affected_rows(&output.stderr))
-            .ok_or_else(|| {
+        let affected_rows = output
+            .stdout
+            .trim()
+            .parse::<usize>()
+            .map_err(|_| {
                 DbOperationError::QueryFailed(
                     "Failed to parse affected row count".to_string(),
                 )
