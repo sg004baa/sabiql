@@ -251,7 +251,7 @@ impl MySqlAdapter {
     ) -> Result<WriteExecutionResult, DbOperationError> {
         let start = Instant::now();
 
-        let mut cmd = Self::build_mysql_cmd(dsn, &["--batch"], query, read_only)?;
+        let mut cmd = Self::build_mysql_cmd(dsn, &[], query, read_only)?;
 
         let output = Self::collect_output(&mut cmd, self.timeout_secs).await?;
         let elapsed = start.elapsed().as_millis() as u64;
@@ -262,13 +262,13 @@ impl MySqlAdapter {
             ));
         }
 
-        // In --batch mode, mysql doesn't output "Query OK" by default.
-        // Check stderr for info messages, or parse stdout.
-        // For write queries, the info line goes to stdout when not in batch,
-        // but in batch mode we check the exit status and parse any output.
-        let affected_rows = Self::parse_affected_rows(&output.stderr)
-            .or_else(|| Self::parse_affected_rows(&output.stdout))
-            .unwrap_or(0);
+        let affected_rows = Self::parse_affected_rows(&output.stdout)
+            .or_else(|| Self::parse_affected_rows(&output.stderr))
+            .ok_or_else(|| {
+                DbOperationError::QueryFailed(
+                    "Failed to parse affected row count".to_string(),
+                )
+            })?;
 
         Ok(WriteExecutionResult {
             affected_rows,
