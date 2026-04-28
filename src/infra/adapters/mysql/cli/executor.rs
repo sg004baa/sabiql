@@ -78,9 +78,13 @@ impl MySqlAdapter {
             .arg("-P")
             .arg(parts.port.to_string())
             .arg("-u")
-            .arg(&parts.user)
-            .arg("-D")
-            .arg(&parts.database);
+            .arg(&parts.user);
+
+        // Empty database means "browse all schemas" — connect without binding
+        // to a specific database so DATABASE() is NULL and SHOW DATABASES works.
+        if !parts.database.is_empty() {
+            cmd.arg("-D").arg(&parts.database);
+        }
 
         // Pass password via environment variable to avoid it showing in process list
         cmd.env("MYSQL_PWD", &parts.password);
@@ -483,6 +487,14 @@ mod tests {
         #[test]
         fn invalid_scheme_returns_error() {
             assert!(parse_dsn("postgres://user:pass@localhost/mydb").is_err());
+        }
+
+        #[test]
+        fn missing_database_path_yields_empty_database() {
+            let parts = parse_dsn("mysql://user:pass@localhost:3306").unwrap();
+            assert_eq!(parts.host, "localhost");
+            assert_eq!(parts.port, 3306);
+            assert_eq!(parts.database, "");
         }
     }
 

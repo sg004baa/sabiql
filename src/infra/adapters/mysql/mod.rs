@@ -45,8 +45,20 @@ impl Default for MySqlAdapter {
 #[async_trait]
 impl MetadataProvider for MySqlAdapter {
     async fn fetch_metadata(&self, dsn: &str) -> Result<DatabaseMetadata, DbOperationError> {
-        let schemas_json = self.execute_meta_query(dsn, Self::schemas_query()).await?;
-        let tables_json = self.execute_meta_query(dsn, Self::tables_query()).await?;
+        let all_dbs = Self::dsn_has_no_database(dsn);
+        let schemas_sql: String = if all_dbs {
+            Self::schemas_query_all().to_string()
+        } else {
+            Self::schemas_query().to_string()
+        };
+        let tables_sql: String = if all_dbs {
+            Self::tables_query_all()
+        } else {
+            Self::tables_query().to_string()
+        };
+
+        let schemas_json = self.execute_meta_query(dsn, &schemas_sql).await?;
+        let tables_json = self.execute_meta_query(dsn, &tables_sql).await?;
 
         let schemas = Self::parse_schemas(&schemas_json)?;
         let tables = Self::parse_tables(&tables_json)?;
@@ -63,9 +75,12 @@ impl MetadataProvider for MySqlAdapter {
         &self,
         dsn: &str,
     ) -> Result<Vec<TableSignature>, DbOperationError> {
-        let json = self
-            .execute_meta_query(dsn, Self::table_signatures_query())
-            .await?;
+        let sql: String = if Self::dsn_has_no_database(dsn) {
+            Self::table_signatures_query_all()
+        } else {
+            Self::table_signatures_query().to_string()
+        };
+        let json = self.execute_meta_query(dsn, &sql).await?;
         Self::parse_table_signatures(&json)
     }
 

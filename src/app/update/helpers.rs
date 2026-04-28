@@ -6,6 +6,7 @@ use crate::app::policy::write::write_guardrails::{
 use crate::app::policy::write::write_update::build_pk_pairs;
 use crate::app::services::AppServices;
 use crate::domain::QueryResult;
+use crate::domain::connection::DatabaseType;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum EditGuardrailError {
@@ -236,7 +237,11 @@ pub fn validate_field(state: &mut ConnectionSetupState, field: ConnectionField) 
             }
         }
         ConnectionField::Database => {
-            if state.database.content().trim().is_empty() {
+            // MySQL allows an empty database to browse all schemas at once;
+            // PostgreSQL still requires a specific database to connect to.
+            if state.database_type != DatabaseType::MySQL
+                && state.database.content().trim().is_empty()
+            {
                 state
                     .validation_errors
                     .insert(field, "Required".to_string());
@@ -341,6 +346,41 @@ mod tests {
             validate_field(&mut state, ConnectionField::Name);
 
             assert!(!state.validation_errors.contains_key(&ConnectionField::Name));
+        }
+    }
+
+    mod validate_field_database {
+        use super::*;
+
+        #[test]
+        fn postgres_empty_database_sets_required_error() {
+            let mut state = ConnectionSetupState {
+                database_type: DatabaseType::PostgreSQL,
+                ..Default::default()
+            };
+
+            validate_field(&mut state, ConnectionField::Database);
+
+            assert_eq!(
+                state.validation_errors.get(&ConnectionField::Database),
+                Some(&"Required".to_string())
+            );
+        }
+
+        #[test]
+        fn mysql_empty_database_is_allowed() {
+            let mut state = ConnectionSetupState {
+                database_type: DatabaseType::MySQL,
+                ..Default::default()
+            };
+
+            validate_field(&mut state, ConnectionField::Database);
+
+            assert!(
+                !state
+                    .validation_errors
+                    .contains_key(&ConnectionField::Database)
+            );
         }
     }
 

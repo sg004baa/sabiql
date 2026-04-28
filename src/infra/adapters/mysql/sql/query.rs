@@ -3,6 +3,11 @@ use crate::infra::utils::{quote_ident_mysql, quote_literal};
 use super::super::MySqlAdapter;
 
 impl MySqlAdapter {
+    /// Filter excluding MySQL/InnoDB internal schemas. Used when no database
+    /// is bound to the connection so users only see their own schemas.
+    const NON_SYSTEM_SCHEMAS_FILTER: &'static str =
+        "TABLE_SCHEMA NOT IN ('mysql', 'information_schema', 'performance_schema', 'sys')";
+
     pub(in crate::infra::adapters::mysql) fn tables_query() -> &'static str {
         r"
         SELECT JSON_ARRAYAGG(JSON_OBJECT(
@@ -16,6 +21,24 @@ impl MySqlAdapter {
           AND t.TABLE_TYPE = 'BASE TABLE'
         ORDER BY t.TABLE_NAME
         "
+    }
+
+    pub(in crate::infra::adapters::mysql) fn tables_query_all() -> String {
+        format!(
+            r"
+        SELECT JSON_ARRAYAGG(JSON_OBJECT(
+            'schema', t.TABLE_SCHEMA,
+            'name', t.TABLE_NAME,
+            'row_count_estimate', t.TABLE_ROWS,
+            'has_rls', CAST('false' AS JSON)
+        ))
+        FROM information_schema.TABLES t
+        WHERE t.{filter}
+          AND t.TABLE_TYPE = 'BASE TABLE'
+        ORDER BY t.TABLE_SCHEMA, t.TABLE_NAME
+        ",
+            filter = Self::NON_SYSTEM_SCHEMAS_FILTER,
+        )
     }
 
     pub(in crate::infra::adapters::mysql) fn table_signatures_query() -> &'static str {
@@ -52,11 +75,57 @@ impl MySqlAdapter {
         "
     }
 
+    pub(in crate::infra::adapters::mysql) fn table_signatures_query_all() -> String {
+        format!(
+            r"
+        SELECT JSON_ARRAYAGG(JSON_OBJECT(
+            'schema', t.TABLE_SCHEMA,
+            'name', t.TABLE_NAME,
+            'signature', MD5(CONCAT(
+                COALESCE((
+                    SELECT GROUP_CONCAT(
+                        CONCAT(c.COLUMN_NAME, ':', c.COLUMN_TYPE, ':', c.IS_NULLABLE, ':', COALESCE(c.COLUMN_DEFAULT, ''))
+                        ORDER BY c.ORDINAL_POSITION SEPARATOR '|'
+                    )
+                    FROM information_schema.COLUMNS c
+                    WHERE c.TABLE_SCHEMA = t.TABLE_SCHEMA
+                      AND c.TABLE_NAME = t.TABLE_NAME
+                ), ''),
+                '##FK##',
+                COALESCE((
+                    SELECT GROUP_CONCAT(
+                        CONCAT(rc.CONSTRAINT_NAME, ':', rc.REFERENCED_TABLE_NAME)
+                        ORDER BY rc.CONSTRAINT_NAME SEPARATOR '|'
+                    )
+                    FROM information_schema.REFERENTIAL_CONSTRAINTS rc
+                    WHERE rc.CONSTRAINT_SCHEMA = t.TABLE_SCHEMA
+                      AND rc.TABLE_NAME = t.TABLE_NAME
+                ), '')
+            ))
+        ))
+        FROM information_schema.TABLES t
+        WHERE t.{filter}
+          AND t.TABLE_TYPE = 'BASE TABLE'
+        ORDER BY t.TABLE_SCHEMA, t.TABLE_NAME
+        ",
+            filter = Self::NON_SYSTEM_SCHEMAS_FILTER,
+        )
+    }
+
     pub(in crate::infra::adapters::mysql) fn schemas_query() -> &'static str {
         r"
         SELECT JSON_ARRAYAGG(JSON_OBJECT('name', s.SCHEMA_NAME))
         FROM information_schema.SCHEMATA s
         WHERE s.SCHEMA_NAME = DATABASE()
+        "
+    }
+
+    pub(in crate::infra::adapters::mysql) fn schemas_query_all() -> &'static str {
+        r"
+        SELECT JSON_ARRAYAGG(JSON_OBJECT('name', s.SCHEMA_NAME))
+        FROM information_schema.SCHEMATA s
+        WHERE s.SCHEMA_NAME NOT IN ('mysql', 'information_schema', 'performance_schema', 'sys')
+        ORDER BY s.SCHEMA_NAME
         "
     }
 
@@ -401,6 +470,34 @@ mod tests {
                 sql.contains(ESCAPED),
                 "Hostile input must be quote_literal-escaped in: {sql}"
             );
+        }
+    }
+
+    mod all_databases_queries {
+        use super::*;
+
+        #[test]
+        fn schemas_query_all_excludes_system_schemas() {
+            let sql = MySqlAdapter::schemas_query_all();
+            assert!(sql.contains("'mysql'"));
+            assert!(sql.contains("'information_schema'"));
+            assert!(sql.contains("'performance_schema'"));
+            assert!(sql.contains("'sys'"));
+            assert!(sql.contains("NOT IN"));
+        }
+
+        #[test]
+        fn tables_query_all_uses_non_system_filter_instead_of_database_call() {
+            let sql = MySqlAdapter::tables_query_all();
+            assert!(!sql.contains("DATABASE()"));
+            assert!(sql.contains("TABLE_SCHEMA NOT IN"));
+        }
+
+        #[test]
+        fn table_signatures_query_all_uses_non_system_filter_instead_of_database_call() {
+            let sql = MySqlAdapter::table_signatures_query_all();
+            assert!(!sql.contains("t.TABLE_SCHEMA = DATABASE()"));
+            assert!(sql.contains("TABLE_SCHEMA NOT IN"));
         }
     }
 
