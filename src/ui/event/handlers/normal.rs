@@ -148,6 +148,22 @@ pub fn handle_normal_mode(combo: KeyCombo, state: &AppState) -> Action {
             }
         }
 
+        // Pane cycling: < / > move focus backward / forward through panes
+        Key::Char('>') => {
+            if state.ui.is_focus_mode() {
+                Action::ToggleFocus
+            } else {
+                Action::FocusNextPane
+            }
+        }
+        Key::Char('<') => {
+            if state.ui.is_focus_mode() {
+                Action::ToggleFocus
+            } else {
+                Action::FocusPrevPane
+            }
+        }
+
         // Inspector sub-tab navigation (Tab/Shift+Tab, only when Inspector focused)
         Key::Tab if inspector_navigation => Action::InspectorNextTab,
         Key::BackTab if inspector_navigation => Action::InspectorPrevTab,
@@ -488,6 +504,52 @@ mod tests {
                 let result = handle_normal_mode(combo(Key::BackTab), &state);
 
                 assert!(matches!(result, Action::None));
+            }
+
+            #[rstest]
+            #[case(FocusedPane::Explorer)]
+            #[case(FocusedPane::Inspector)]
+            #[case(FocusedPane::Result)]
+            fn gt_cycles_focus_forward(#[case] from: FocusedPane) {
+                let mut state = browse_state();
+                state.ui.focused_pane = from;
+
+                let result = handle_normal_mode(combo(Key::Char('>')), &state);
+
+                assert!(matches!(result, Action::FocusNextPane));
+            }
+
+            #[rstest]
+            #[case(FocusedPane::Explorer)]
+            #[case(FocusedPane::Inspector)]
+            #[case(FocusedPane::Result)]
+            fn lt_cycles_focus_backward(#[case] from: FocusedPane) {
+                let mut state = browse_state();
+                state.ui.focused_pane = from;
+
+                let result = handle_normal_mode(combo(Key::Char('<')), &state);
+
+                assert!(matches!(result, Action::FocusPrevPane));
+            }
+
+            #[test]
+            fn gt_toggles_focus_mode_when_focus_mode_active() {
+                let mut state = browse_state();
+                state.ui.focus_mode = FocusMode::focused(FocusedPane::Explorer);
+
+                let result = handle_normal_mode(combo(Key::Char('>')), &state);
+
+                assert!(matches!(result, Action::ToggleFocus));
+            }
+
+            #[test]
+            fn lt_toggles_focus_mode_when_focus_mode_active() {
+                let mut state = browse_state();
+                state.ui.focus_mode = FocusMode::focused(FocusedPane::Explorer);
+
+                let result = handle_normal_mode(combo(Key::Char('<')), &state);
+
+                assert!(matches!(result, Action::ToggleFocus));
             }
         }
     }
