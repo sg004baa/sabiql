@@ -7,16 +7,28 @@ use crate::app::model::shared::focused_pane::FocusedPane;
 use crate::app::model::shared::input_mode::InputMode;
 use crate::app::update::action::Action;
 
+fn switch_focus(state: &mut AppState, pane: FocusedPane) {
+    if pane != FocusedPane::Result {
+        state.result_interaction.reset_interaction();
+        if state.modal.active_mode() == InputMode::CellEdit {
+            state.modal.set_mode(InputMode::Normal);
+        }
+    }
+    state.ui.focused_pane = pane;
+}
+
 pub fn reduce(state: &mut AppState, action: &Action, _now: Instant) -> Option<Vec<Effect>> {
     match action {
         Action::SetFocusedPane(pane) => {
-            if *pane != FocusedPane::Result {
-                state.result_interaction.reset_interaction();
-                if state.modal.active_mode() == InputMode::CellEdit {
-                    state.modal.set_mode(InputMode::Normal);
-                }
-            }
-            state.ui.focused_pane = *pane;
+            switch_focus(state, *pane);
+            Some(vec![])
+        }
+        Action::FocusNextPane => {
+            switch_focus(state, state.ui.focused_pane.next());
+            Some(vec![])
+        }
+        Action::FocusPrevPane => {
+            switch_focus(state, state.ui.focused_pane.prev());
             Some(vec![])
         }
         Action::ToggleFocus => {

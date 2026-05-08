@@ -237,6 +237,8 @@ pub enum Action {
     Render,
     Resize(u16, u16),
     SetFocusedPane(FocusedPane),
+    FocusNextPane,
+    FocusPrevPane,
 
     // Parametric variants (consolidation targets)
     Scroll {
