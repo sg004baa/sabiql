@@ -180,6 +180,7 @@ pub fn handle_normal_mode(combo: KeyCombo, state: &AppState) -> Action {
         }
         Key::Char('s') => Action::OpenSqlModal,
         Key::Char('e') => Action::OpenErTablePicker,
+        Key::Char('/') => Action::OpenTablePicker,
         Key::Char('c') if state.ui.focused_pane == FocusedPane::Explorer => {
             Action::OpenConnectionSelector
         }
@@ -244,6 +245,15 @@ mod tests {
                 let state = browse_state();
 
                 let result = handle_normal_mode(combo_ctrl(Key::Char('p')), &state);
+
+                assert!(matches!(result, Action::OpenTablePicker));
+            }
+
+            #[test]
+            fn slash_opens_table_picker() {
+                let state = browse_state();
+
+                let result = handle_normal_mode(combo(Key::Char('/')), &state);
 
                 assert!(matches!(result, Action::OpenTablePicker));
             }

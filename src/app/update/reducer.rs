@@ -147,6 +147,14 @@ fn select_table(state: &mut AppState, table: &TableSummary) -> Vec<Effect> {
             .select_table(&table.schema, &table.name, &mut state.query.pagination);
     state.result_interaction.reset_interaction();
 
+    if let Some(index) = state
+        .tables()
+        .iter()
+        .position(|t| t.schema == table.schema && t.name == table.name)
+    {
+        state.ui.set_explorer_selection(Some(index));
+    }
+
     let schema = table.schema.clone();
     let table_name = table.name.clone();
 
@@ -1019,6 +1027,38 @@ mod tests {
             );
 
             assert!(state.session.table_detail().is_none());
+        }
+
+        fn three_table_metadata(now: Instant) -> Arc<DatabaseMetadata> {
+            Arc::new(DatabaseMetadata {
+                database_name: "test".to_string(),
+                schemas: vec![],
+                table_summaries: vec![
+                    TableSummary::new("public".to_string(), "alpha".to_string(), Some(1), false),
+                    TableSummary::new("public".to_string(), "beta".to_string(), Some(2), false),
+                    TableSummary::new("public".to_string(), "gamma".to_string(), Some(3), false),
+                ],
+                fetched_at: now,
+            })
+        }
+
+        #[test]
+        fn table_picker_confirm_syncs_explorer_cursor_to_picked_table() {
+            let now = Instant::now();
+            let mut state = create_test_state();
+            state.session.set_metadata(Some(three_table_metadata(now)));
+            state.modal.set_mode(InputMode::TablePicker);
+            state.ui.set_explorer_selection(Some(0));
+            state.ui.table_picker.set_selection(2);
+
+            reduce(
+                &mut state,
+                Action::ConfirmSelection,
+                now,
+                &AppServices::stub(),
+            );
+
+            assert_eq!(state.ui.explorer_selected, 2);
         }
     }
 
