@@ -47,7 +47,7 @@ impl ConfirmDialog {
         theme: &ThemePalette,
     ) -> ConfirmPreviewMetrics {
         let dialog = &state.confirm_dialog;
-        let hint = " Enter: Confirm │ Esc: Cancel ";
+        let hint = " Enter: Confirm │ Esc/q: Cancel ";
 
         let full_area = frame.area();
         let max_modal_width = full_area.width.saturating_sub(2).max(20);
@@ -240,9 +240,9 @@ impl ConfirmDialog {
         // Build hint string
         // Hint order: Actions → Close/Cancel
         let hint: &str = if blocked {
-            " Esc: Cancel "
+            " Esc/q: Cancel "
         } else {
-            " Enter: Confirm │ Esc: Cancel "
+            " Enter: Confirm │ Esc/q: Cancel "
         };
 
         let (_, modal_inner) = render_modal_with_border_color(

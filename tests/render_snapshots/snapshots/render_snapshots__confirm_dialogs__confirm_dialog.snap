@@ -16,7 +16,7 @@ test_project | - | - | no dsn | localhost:5432/test
 │                  ││ Are you sure you want to quit?       │───────────────────┘
 │                  ││                                      │───────────────────┐
 │                  ││                                      │                   │
-│                  │╰ Enter: Confirm │ Esc: Cancel ────────╯                   │
+│                  │╰ Enter: Confirm │ Esc/q: Cancel ──────╯                   │
 │                  ││                                                          │
 │                  ││                                                          │
 │                  ││                                                          │

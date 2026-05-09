@@ -72,6 +72,9 @@ pub fn handle_sql_modal_keys_with_prefix(
 
         // Plan tab specific keys (read-only viewer)
         if active_tab == SqlModalTab::Plan {
+            if plain && combo.key == Key::Char('q') {
+                return Action::CloseSqlModal;
+            }
             if let Some(action) = action_for_key(
                 &combo,
                 VimSurfaceContext::SqlModal(SqlModalVimContext::PlanViewer),
@@ -87,6 +90,9 @@ pub fn handle_sql_modal_keys_with_prefix(
 
         // Compare tab specific keys (read-only viewer)
         if active_tab == SqlModalTab::Compare {
+            if plain && combo.key == Key::Char('q') {
+                return Action::CloseSqlModal;
+            }
             if let Some(action) = action_for_key(
                 &combo,
                 VimSurfaceContext::SqlModal(SqlModalVimContext::CompareViewer),
@@ -109,6 +115,9 @@ pub fn handle_sql_modal_keys_with_prefix(
         }
         if ctrl && combo.key == Key::Char('l') {
             return Action::SqlModalClear;
+        }
+        if plain && combo.key == Key::Char('q') {
+            return Action::CloseSqlModal;
         }
         if plain && combo.key == Key::Char('g') {
             return Action::BeginKeySequence(Prefix::G);

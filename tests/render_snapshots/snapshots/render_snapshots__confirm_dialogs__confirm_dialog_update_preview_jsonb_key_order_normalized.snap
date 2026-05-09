@@ -23,4 +23,4 @@ test_project | test_db | - | no dsn | localhost:5432/test
 │           │ '{"company_size":["100-500","600+"],"industries":["t │           │
 │           │ echnology","finance"]}'                              │           │
 │           │                                                      │           │
-└───────────╰ Enter: Confirm │ Esc: Cancel ────────────────────────╯───────────┘
+└───────────╰ Enter: Confirm │ Esc/q: Cancel ──────────────────────╯───────────┘

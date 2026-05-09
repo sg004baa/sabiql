@@ -16,7 +16,7 @@ test_project | - | - | no dsn | localhost:5432/test
 │                  ││                                      │───────────────────┘
 │                  ││ This action cannot be undone.        │───────────────────┐
 │                  ││                                      │                   │
-│                  │╰ Enter: Confirm │ Esc: Cancel ────────╯                   │
+│                  │╰ Enter: Confirm │ Esc/q: Cancel ──────╯                   │
 │                  ││                                                          │
 │                  ││                                                          │
 │                  ││                                                          │

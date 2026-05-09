@@ -181,13 +181,17 @@ pub const HELP_ROWS: &[ModeRow] = &[
         ],
     },
     ModeRow {
-        key_short: "?/Esc",
-        key: "? / Esc",
+        key_short: "?/Esc/q",
+        key: "? / Esc / q",
         desc_short: "Close",
         description: "Close help",
         bindings: &[ExecBinding {
             action: Action::CloseHelp,
-            combos: &[KeyCombo::plain(Key::Char('?')), KeyCombo::plain(Key::Esc)],
+            combos: &[
+                KeyCombo::plain(Key::Char('?')),
+                KeyCombo::plain(Key::Esc),
+                KeyCombo::plain(Key::Char('q')),
+            ],
         }],
     },
 ];
@@ -531,13 +535,13 @@ pub const COMMAND_PALETTE_ROWS: &[ModeRow] = &[
         ],
     },
     ModeRow {
-        key_short: "Esc",
-        key: "Esc",
+        key_short: "Esc/q",
+        key: "Esc / q",
         desc_short: "Close",
         description: "Close",
         bindings: &[ExecBinding {
             action: Action::CloseCommandPalette,
-            combos: &[KeyCombo::plain(Key::Esc)],
+            combos: &[KeyCombo::plain(Key::Esc), KeyCombo::plain(Key::Char('q'))],
         }],
     },
 ];
@@ -588,12 +592,12 @@ pub const CONFIRM_DIALOG_KEYS: &[KeyBinding] = &[
         ],
     },
     KeyBinding {
-        key_short: "Esc",
-        key: "Esc",
+        key_short: "Esc/q",
+        key: "Esc / q",
         desc_short: "Cancel",
         description: "Cancel",
         action: Action::ConfirmDialogCancel,
-        combos: &[KeyCombo::plain(Key::Esc)],
+        combos: &[KeyCombo::plain(Key::Esc), KeyCombo::plain(Key::Char('q'))],
     },
 ];
 
@@ -771,7 +775,7 @@ pub const JSONB_DETAIL_ROWS: &[ModeRow] = &[
         ],
     },
     ModeRow {
-        key_short: "Esc",
+        key_short: "Esc/q",
         key: "Esc / q",
         desc_short: "Close",
         description: "Close JSONB detail",

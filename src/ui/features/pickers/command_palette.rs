@@ -18,7 +18,7 @@ impl CommandPalette {
             Constraint::Percentage(50),
             Constraint::Percentage(50),
             " Command Palette ",
-            " Enter Select │ Esc Close ",
+            " Enter Select │ Esc/q Close ",
             theme,
         );
 
