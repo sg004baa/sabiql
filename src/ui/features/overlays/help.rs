@@ -241,7 +241,7 @@ impl HelpOverlay {
     fn key_line(key: &str, desc: &str, theme: &ThemePalette) -> Line<'static> {
         Line::from(vec![
             Span::styled(
-                format!("  {key:<20}"),
+                format!("  {key:<20}  "),
                 Style::default()
                     .fg(theme.semantic.text.accent)
                     .add_modifier(Modifier::BOLD),

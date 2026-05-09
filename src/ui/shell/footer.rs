@@ -162,6 +162,7 @@ impl Footer {
                         list.push(GLOBAL_KEYS[idx::global::READ_ONLY].as_hint());
                     }
                     list.push(GLOBAL_KEYS[idx::global::FOCUS].as_hint());
+                    list.push(GLOBAL_KEYS[idx::global::PANE_SWITCH].as_hint());
                     if state.can_request_csv_export() {
                         list.push(GLOBAL_KEYS[idx::global::CSV_EXPORT].as_hint());
                     }
