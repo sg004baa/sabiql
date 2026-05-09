@@ -32,7 +32,7 @@ impl HelpOverlay {
             Constraint::Percentage(70),
             Constraint::Percentage(HELP_MODAL_HEIGHT_PERCENT),
             " Help ",
-            " ?/Esc Close ",
+            " ?/Esc/q Close ",
             theme,
         );
 

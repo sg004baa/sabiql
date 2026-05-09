@@ -21,6 +21,6 @@ test_project | test_db | - | no dsn | localhost:5432/test
 │           │   SET "email" = 'new@example.com'                    │           │
 │           │   WHERE "id" = '2';                                  │           │
 │           │                                                      │           │
-│           ╰ Enter: Confirm │ Esc: Cancel ────────────────────────╯           │
+│           ╰ Enter: Confirm │ Esc/q: Cancel ──────────────────────╯           │
 │                  ││                                                          │
 └──────────────────┘└──────────────────────────────────────────────────────────┘

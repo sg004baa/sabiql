@@ -19,7 +19,7 @@ test_project | test_db | - | no dsn | localhost:5432/test
 │           │   DELETE FROM "public"."users"                       │           │
 │           │   WHERE "id" = '3';                                  │           │
 │           │                                                      │           │
-│           ╰ Enter: Confirm │ Esc: Cancel ────────────────────────╯           │
+│           ╰ Enter: Confirm │ Esc/q: Cancel ──────────────────────╯           │
 │                  ││                                                          │
 │                  ││                                                          │
 │                  ││                                                          │

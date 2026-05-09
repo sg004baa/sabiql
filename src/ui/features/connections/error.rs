@@ -51,7 +51,7 @@ impl ConnectionError {
         };
         let height = Constraint::Length((FIXED_OVERHEAD + details_height).clamp(9, max_height));
 
-        let hint_text = " Esc to close ";
+        let hint_text = " Esc/q to close ";
         let (_, inner) = render_modal(
             frame,
             Constraint::Percentage(70),

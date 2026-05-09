@@ -47,7 +47,7 @@ impl JsonbDetail {
         let hint = if is_editing {
             " Esc:Normal "
         } else {
-            " y:Copy  /:Search  i:Insert  Esc:Close "
+            " y:Copy  /:Search  i:Insert  Esc/q:Close "
         };
 
         let (_area, inner) = render_modal(

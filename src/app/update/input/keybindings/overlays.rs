@@ -181,7 +181,7 @@ pub const HELP_ROWS: &[ModeRow] = &[
         ],
     },
     ModeRow {
-        key_short: "?/Esc",
+        key_short: "?/Esc/q",
         key: "? / Esc / q",
         desc_short: "Close",
         description: "Close help",
@@ -535,7 +535,7 @@ pub const COMMAND_PALETTE_ROWS: &[ModeRow] = &[
         ],
     },
     ModeRow {
-        key_short: "Esc",
+        key_short: "Esc/q",
         key: "Esc / q",
         desc_short: "Close",
         description: "Close",
@@ -592,7 +592,7 @@ pub const CONFIRM_DIALOG_KEYS: &[KeyBinding] = &[
         ],
     },
     KeyBinding {
-        key_short: "Esc",
+        key_short: "Esc/q",
         key: "Esc / q",
         desc_short: "Cancel",
         description: "Cancel",
@@ -775,7 +775,7 @@ pub const JSONB_DETAIL_ROWS: &[ModeRow] = &[
         ],
     },
     ModeRow {
-        key_short: "Esc",
+        key_short: "Esc/q",
         key: "Esc / q",
         desc_short: "Close",
         description: "Close JSONB detail",

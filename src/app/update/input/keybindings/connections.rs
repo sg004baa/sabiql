@@ -145,7 +145,7 @@ pub const CONNECTION_ERROR_ROWS: &[ModeRow] = &[
         ],
     },
     ModeRow {
-        key_short: "Esc",
+        key_short: "Esc/q",
         key: "Esc / q",
         desc_short: "Close",
         description: "Close",
@@ -242,7 +242,7 @@ pub const CONNECTION_SELECTOR_ROWS: &[ModeRow] = &[
         }],
     },
     ModeRow {
-        key_short: "Esc",
+        key_short: "Esc/q",
         key: "Esc / q",
         desc_short: "Close",
         description: "Close selector",
