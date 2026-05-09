@@ -1,4 +1,4 @@
-use crate::app::update::action::Action;
+use crate::update::action::{Action, ModalKind};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -6,6 +6,9 @@ pub enum Command {
     Help,
     Sql,
     Erd,
+    Settings,
+    Theme,
+    Palette,
     Write,
     Unknown(String),
 }
@@ -16,6 +19,9 @@ pub fn parse_command(input: &str) -> Command {
         "?" | "help" => Command::Help,
         "sql" => Command::Sql,
         "erd" => Command::Erd,
+        "settings" => Command::Settings,
+        "theme" => Command::Theme,
+        "palette" => Command::Palette,
         "w" | "write" => Command::Write,
         other => Command::Unknown(other.to_string()),
     }
@@ -24,9 +30,11 @@ pub fn parse_command(input: &str) -> Command {
 pub fn command_to_action(cmd: Command) -> Action {
     match cmd {
         Command::Quit => Action::Quit,
-        Command::Help => Action::OpenHelp,
-        Command::Sql => Action::OpenSqlModal,
-        Command::Erd => Action::OpenErTablePicker,
+        Command::Help => Action::ToggleModal(ModalKind::Help),
+        Command::Sql => Action::OpenModal(ModalKind::SqlModal),
+        Command::Erd => Action::OpenModal(ModalKind::ErTablePicker),
+        Command::Settings | Command::Theme => Action::OpenModal(ModalKind::Settings),
+        Command::Palette => Action::OpenModal(ModalKind::CommandPalette),
         Command::Write => Action::SubmitCellEditWrite,
         Command::Unknown(_) => Action::None,
     }
@@ -73,6 +81,27 @@ mod tests {
             assert_eq!(result, Command::Erd);
         }
 
+        #[test]
+        fn settings_returns_settings() {
+            let result = parse_command("settings");
+
+            assert_eq!(result, Command::Settings);
+        }
+
+        #[test]
+        fn theme_returns_theme() {
+            let result = parse_command("theme");
+
+            assert_eq!(result, Command::Theme);
+        }
+
+        #[test]
+        fn palette_returns_palette() {
+            let result = parse_command("palette");
+
+            assert_eq!(result, Command::Palette);
+        }
+
         #[rstest]
         #[case("w", Command::Write)]
         #[case("write", Command::Write)]
@@ -117,21 +146,48 @@ mod tests {
         fn help_returns_open_help_action() {
             let result = command_to_action(Command::Help);
 
-            assert!(matches!(result, Action::OpenHelp));
+            assert!(matches!(result, Action::ToggleModal(ModalKind::Help)));
         }
 
         #[test]
         fn sql_returns_open_sql_modal_action() {
             let result = command_to_action(Command::Sql);
 
-            assert!(matches!(result, Action::OpenSqlModal));
+            assert!(matches!(result, Action::OpenModal(ModalKind::SqlModal)));
         }
 
         #[test]
         fn erd_returns_open_er_table_picker_action() {
             let result = command_to_action(Command::Erd);
 
-            assert!(matches!(result, Action::OpenErTablePicker));
+            assert!(matches!(
+                result,
+                Action::OpenModal(ModalKind::ErTablePicker)
+            ));
+        }
+
+        #[test]
+        fn settings_returns_open_settings_action() {
+            let result = command_to_action(Command::Settings);
+
+            assert!(matches!(result, Action::OpenModal(ModalKind::Settings)));
+        }
+
+        #[test]
+        fn theme_returns_open_settings_action() {
+            let result = command_to_action(Command::Theme);
+
+            assert!(matches!(result, Action::OpenModal(ModalKind::Settings)));
+        }
+
+        #[test]
+        fn palette_returns_open_command_palette_action() {
+            let result = command_to_action(Command::Palette);
+
+            assert!(matches!(
+                result,
+                Action::OpenModal(ModalKind::CommandPalette)
+            ));
         }
 
         #[test]

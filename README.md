@@ -19,8 +19,7 @@ Destructive operations are guarded. Inline edits and row deletions always show a
 Built in Rust for minimal memory footprint and near-zero idle CPU. A full-featured alternative to GUI tools like DBeaver or DataGrip, without ever leaving the terminal.
 
 ## Features
-![hero-800](https://github.com/user-attachments/assets/b6b853a0-d7b4-486d-955c-aee74e7a2671)
-
+![hero_1000_20fps](https://github.com/user-attachments/assets/06e1900d-b044-4f29-a2a8-7d7bab5bd3a1)
 
 ### Core
 
@@ -45,7 +44,8 @@ Built in Rust for minimal memory footprint and near-zero idle CPU. A full-featur
 - **Fuzzy Search** (`/` or `Ctrl+P`) — Incremental table filtering
 - **Pane Focus** (`1`/`2`/`3` or `<`/`>`) — Jump to a pane directly, or cycle prev/next
 - **Focus Mode** (`f`) — Expand any pane to full screen
-- **Command Palette** (`Ctrl+K`) — Searchable command list
+- **Settings** (`Ctrl+K`) — Theme and appearance preferences
+- **Command Palette** (`:palette`) — Searchable command list
 
 ## Installation
 
@@ -76,12 +76,35 @@ curl -fsSL https://raw.githubusercontent.com/riii111/sabiql/main/install.sh | sh
 sabiql
 ```
 
-On first run, enter your connection details — saved to `~/.config/sabiql/connections.toml`. Press `?` for help.
+On first run, enter your connection details. They are saved to your platform config directory:
+
+- macOS: `~/Library/Application Support/sabiql/connections.toml`
+- Linux: `~/.config/sabiql/connections.toml`
+
+Press `?` for help.
+
+Open Settings with `Ctrl+K` to switch between Sabiql Dark and Light themes.
 
 ## Requirements
 
 - `psql` CLI (PostgreSQL client)
 - Graphviz (optional, for ER diagrams): `brew install graphviz`
+
+## Development
+
+With Nix:
+
+```bash
+direnv allow
+cargo nextest run --workspace
+nix build
+```
+
+Without direnv, enter the shell explicitly:
+
+```bash
+nix develop
+```
 
 ## Environment Variables
 
@@ -99,11 +122,11 @@ On first run, enter your connection details — saved to `~/.config/sabiql/conne
 - [x] CSV export & clipboard yank
 - [x] EXPLAIN workflow (plan tree view & comparison)
 - [x] JSON/JSONB support (tree view, editing, validation)
+- [x] Theme switching (Sabiql Dark / Light)
 - [ ] Neovim integration (`sabiql.nvim`)
 - [ ] SQLite support
 - [ ] Zero-config connection (env vars, `.pgpass`, URI auto-detect)
 - [ ] Google Cloud SQL / AlloyDB support
-- [ ] Theme switching (foreground palette only)
 - [x] MySQL support
 
 Have a feature request? [Open an issue](https://github.com/riii111/sabiql/issues/new) feedback is welcome!

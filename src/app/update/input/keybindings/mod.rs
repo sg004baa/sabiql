@@ -2,14 +2,14 @@ mod connections;
 mod editors;
 mod normal;
 mod overlays;
-pub mod types;
 
-use crate::app::update::action::Action;
+pub use crate::ports::inbound::{Key, KeyCombo, Modifiers};
+use crate::update::action::Action;
 pub use connections::*;
 pub use editors::*;
 pub use normal::*;
 pub use overlays::*;
-pub use types::{Key, KeyCombo, Modifiers};
+use unicode_width::UnicodeWidthStr;
 
 #[derive(Clone)]
 pub struct KeyBinding {
@@ -56,7 +56,7 @@ pub struct ModeBindings {
 
 impl ModeBindings {
     pub fn resolve(&self, combo: &KeyCombo) -> Option<Action> {
-        crate::app::update::input::keymap::resolve_mode(combo, self.rows)
+        crate::update::input::keymap::resolve_mode(combo, self.rows)
     }
 }
 
@@ -76,6 +76,9 @@ pub const QUERY_HISTORY_PICKER: ModeBindings = ModeBindings {
 pub const COMMAND_PALETTE: ModeBindings = ModeBindings {
     rows: COMMAND_PALETTE_ROWS,
 };
+pub const SETTINGS: ModeBindings = ModeBindings {
+    rows: SETTINGS_ROWS,
+};
 pub const CONNECTION_SELECTOR: ModeBindings = ModeBindings {
     rows: CONNECTION_SELECTOR_ROWS,
 };
@@ -93,6 +96,7 @@ pub const ALL_MODE_BINDINGS: &[(&str, &ModeBindings)] = &[
     ("ER_PICKER", &ER_PICKER),
     ("QUERY_HISTORY_PICKER", &QUERY_HISTORY_PICKER),
     ("COMMAND_PALETTE", &COMMAND_PALETTE),
+    ("SETTINGS", &SETTINGS),
     ("CONNECTION_SELECTOR", &CONNECTION_SELECTOR),
     ("JSONB_DETAIL", &JSONB_DETAIL),
     ("JSONB_EDIT", &JSONB_EDIT),
@@ -103,7 +107,7 @@ pub mod idx {
         pub const QUIT: usize = 0;
         pub const HELP: usize = 1;
         pub const TABLE_PICKER: usize = 2;
-        pub const PALETTE: usize = 3;
+        pub const SETTINGS: usize = 3;
         pub const COMMAND_LINE: usize = 4;
         pub const FOCUS: usize = 5;
         pub const EXIT_FOCUS: usize = 6;
@@ -242,12 +246,19 @@ pub mod idx {
         pub const ESC_CLOSE: usize = 2;
     }
 
+    pub mod settings {
+        pub const APPLY: usize = 0;
+        pub const SELECT: usize = 1;
+        pub const CANCEL: usize = 2;
+    }
+
     pub mod help {
         pub const SCROLL: usize = 0;
         pub const TOP_BOTTOM: usize = 1;
         pub const HALF_PAGE: usize = 2;
         pub const FULL_PAGE: usize = 3;
-        pub const CLOSE: usize = 4;
+        pub const H_SCROLL: usize = 4;
+        pub const CLOSE: usize = 5;
     }
 
     pub mod result_active {
@@ -320,13 +331,17 @@ pub mod idx {
 // Help Overlay Layout
 // =============================================================================
 
+pub const HELP_KEY_INDENT_WIDTH: usize = 2;
+pub const HELP_KEY_COLUMN_WIDTH: usize = 20;
+pub const HELP_KEY_DESC_GAP: usize = 2;
+
 // Must match the section order in `HelpOverlay::render()`.
 pub const fn help_content_line_count() -> usize {
     // Dedup pairs collapsed into one line by HelpOverlay::push_dedup:
     //   GLOBAL_KEYS: Focus/Exit Focus, ReadOnly/Exit ReadOnly (2 pairs)
     //   HISTORY_KEYS: Open/Exit (1 pair)
     const DEDUP_PAIRS: usize = 3;
-    const SECTION_COUNT: usize = 25;
+    const SECTION_COUNT: usize = 26;
     const SECTION_HEADERS: usize = SECTION_COUNT;
     const BLANK_SEPARATORS: usize = SECTION_COUNT - 1;
     SECTION_HEADERS
@@ -352,11 +367,160 @@ pub const fn help_content_line_count() -> usize {
         + QUERY_HISTORY_PICKER_ROWS.len()
         + TABLE_PICKER_ROWS.len()
         + COMMAND_PALETTE_ROWS.len()
+        + SETTINGS_ROWS.len()
         + HELP_ROWS.len()
         + CONFIRM_DIALOG_KEYS.len()
         + JSONB_DETAIL_ROWS.len()
         + JSONB_EDIT_ROWS.len()
         + JSONB_SEARCH_KEYS.len()
+}
+
+pub fn help_content_width() -> usize {
+    help_section_titles()
+        .map(|title| UnicodeWidthStr::width("▸ ") + UnicodeWidthStr::width(title))
+        .chain(help_row_entries().map(|(key, desc)| {
+            let key_width = UnicodeWidthStr::width(key);
+            HELP_KEY_INDENT_WIDTH
+                + if key_width > HELP_KEY_COLUMN_WIDTH {
+                    key_width + HELP_KEY_DESC_GAP
+                } else {
+                    HELP_KEY_COLUMN_WIDTH
+                }
+                + UnicodeWidthStr::width(desc)
+        }))
+        .max()
+        .unwrap_or(0)
+}
+
+fn help_section_titles() -> impl Iterator<Item = &'static str> {
+    [
+        "Global Keys",
+        "Navigation",
+        "Result History",
+        "Result Pane",
+        "Inspector Pane (DDL tab)",
+        "Cell Edit",
+        "SQL Editor (Normal)",
+        "SQL Editor (Insert)",
+        "SQL Editor (Plan)",
+        "SQL Editor (Compare)",
+        "SQL Editor (Confirm)",
+        "Overlays",
+        "Command Line",
+        "Connection Setup",
+        "Connection Error",
+        "Connection Selector",
+        "ER Diagram Picker",
+        "Query History Picker",
+        "Table Picker",
+        "Command Palette",
+        "Settings",
+        "Help Overlay",
+        "Confirm Dialog",
+        "JSONB Detail",
+        "JSONB Edit",
+        "JSONB Search",
+    ]
+    .into_iter()
+}
+
+fn help_row_entries() -> impl Iterator<Item = (&'static str, &'static str)> {
+    HELP_ROWS
+        .iter()
+        .map(|row| (row.key, row.description))
+        .chain(
+            GLOBAL_KEYS
+                .iter()
+                .map(|row| (row.key, row.description))
+                .chain(NAVIGATION_KEYS.iter().map(|row| (row.key, row.description)))
+                .chain(HISTORY_KEYS.iter().map(|row| (row.key, row.description)))
+                .chain(
+                    RESULT_ACTIVE_KEYS
+                        .iter()
+                        .map(|row| (row.key, row.description)),
+                )
+                .chain(
+                    INSPECTOR_DDL_KEYS
+                        .iter()
+                        .map(|row| (row.key, row.description)),
+                )
+                .chain(CELL_EDIT_KEYS.iter().map(|row| (row.key, row.description)))
+                .chain(
+                    SQL_MODAL_NORMAL_KEYS
+                        .iter()
+                        .map(|row| (row.key, row.description)),
+                )
+                .chain(SQL_MODAL_KEYS.iter().map(|row| (row.key, row.description)))
+                .chain(
+                    SQL_MODAL_PLAN_KEYS
+                        .iter()
+                        .map(|row| (row.key, row.description)),
+                )
+                .chain(
+                    SQL_MODAL_COMPARE_KEYS
+                        .iter()
+                        .map(|row| (row.key, row.description)),
+                )
+                .chain(
+                    SQL_MODAL_CONFIRMING_KEYS
+                        .iter()
+                        .map(|row| (row.key, row.description)),
+                )
+                .chain(OVERLAY_KEYS.iter().map(|row| (row.key, row.description)))
+                .chain(
+                    COMMAND_LINE_KEYS
+                        .iter()
+                        .map(|row| (row.key, row.description)),
+                )
+                .chain(
+                    CONNECTION_SETUP_KEYS
+                        .iter()
+                        .map(|row| (row.key, row.description)),
+                )
+                .chain(
+                    CONNECTION_ERROR_ROWS
+                        .iter()
+                        .map(|row| (row.key, row.description)),
+                )
+                .chain(
+                    CONNECTION_SELECTOR_ROWS
+                        .iter()
+                        .map(|row| (row.key, row.description)),
+                )
+                .chain(ER_PICKER_ROWS.iter().map(|row| (row.key, row.description)))
+                .chain(
+                    QUERY_HISTORY_PICKER_ROWS
+                        .iter()
+                        .map(|row| (row.key, row.description)),
+                )
+                .chain(
+                    TABLE_PICKER_ROWS
+                        .iter()
+                        .map(|row| (row.key, row.description)),
+                )
+                .chain(
+                    COMMAND_PALETTE_ROWS
+                        .iter()
+                        .map(|row| (row.key, row.description)),
+                )
+                .chain(SETTINGS_ROWS.iter().map(|row| (row.key, row.description)))
+                .chain(
+                    CONFIRM_DIALOG_KEYS
+                        .iter()
+                        .map(|row| (row.key, row.description)),
+                )
+                .chain(
+                    JSONB_DETAIL_ROWS
+                        .iter()
+                        .map(|row| (row.key, row.description)),
+                )
+                .chain(JSONB_EDIT_ROWS.iter().map(|row| (row.key, row.description)))
+                .chain(
+                    JSONB_SEARCH_KEYS
+                        .iter()
+                        .map(|row| (row.key, row.description)),
+                ),
+        )
 }
 
 pub fn is_quit(combo: &KeyCombo) -> bool {
@@ -371,6 +535,10 @@ pub fn is_command_line(combo: &KeyCombo) -> bool {
     GLOBAL_KEYS[idx::global::COMMAND_LINE]
         .combos
         .contains(combo)
+}
+
+pub fn is_settings(combo: &KeyCombo) -> bool {
+    GLOBAL_KEYS[idx::global::SETTINGS].combos.contains(combo)
 }
 
 pub fn is_focus_toggle(combo: &KeyCombo) -> bool {
@@ -392,7 +560,8 @@ pub fn is_open_er(combo: &KeyCombo) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::update::action::{ScrollAmount, ScrollDirection, ScrollTarget};
+    use crate::update::action::ModalKind;
+    use crate::update::action::{ScrollAmount, ScrollDirection, ScrollTarget};
 
     mod structure {
         use super::*;
@@ -403,7 +572,7 @@ mod tests {
             assert!(idx::global::QUIT < GLOBAL_KEYS.len());
             assert!(idx::global::HELP < GLOBAL_KEYS.len());
             assert!(idx::global::TABLE_PICKER < GLOBAL_KEYS.len());
-            assert!(idx::global::PALETTE < GLOBAL_KEYS.len());
+            assert!(idx::global::SETTINGS < GLOBAL_KEYS.len());
             assert!(idx::global::COMMAND_LINE < GLOBAL_KEYS.len());
             assert!(idx::global::FOCUS < GLOBAL_KEYS.len());
             assert!(idx::global::EXIT_FOCUS < GLOBAL_KEYS.len());
@@ -526,11 +695,17 @@ mod tests {
             assert!(idx::cmd_palette::NAVIGATE_JK < COMMAND_PALETTE_ROWS.len());
             assert!(idx::cmd_palette::ESC_CLOSE < COMMAND_PALETTE_ROWS.len());
 
+            // SETTINGS_ROWS
+            assert!(idx::settings::APPLY < SETTINGS_ROWS.len());
+            assert!(idx::settings::SELECT < SETTINGS_ROWS.len());
+            assert!(idx::settings::CANCEL < SETTINGS_ROWS.len());
+
             // HELP_ROWS
             assert!(idx::help::SCROLL < HELP_ROWS.len());
             assert!(idx::help::TOP_BOTTOM < HELP_ROWS.len());
             assert!(idx::help::HALF_PAGE < HELP_ROWS.len());
             assert!(idx::help::FULL_PAGE < HELP_ROWS.len());
+            assert!(idx::help::H_SCROLL < HELP_ROWS.len());
             assert!(idx::help::CLOSE < HELP_ROWS.len());
 
             // RESULT_ACTIVE_KEYS
@@ -614,6 +789,7 @@ mod tests {
                 QUERY_HISTORY_PICKER_ROWS.len(),
                 TABLE_PICKER_ROWS.len(),
                 COMMAND_PALETTE_ROWS.len(),
+                SETTINGS_ROWS.len(),
                 HELP_ROWS.len(),
                 CONFIRM_DIALOG_KEYS.len(),
                 JSONB_DETAIL_ROWS.len(),
@@ -631,7 +807,7 @@ mod tests {
 
     mod catalog_semantics {
         use super::*;
-        use crate::app::update::input::keymap;
+        use crate::update::input::keymap;
 
         mod action_mapping {
             use super::*;
@@ -639,25 +815,26 @@ mod tests {
 
             #[rstest]
             #[case(idx::global::QUIT, Action::Quit)]
-            #[case(idx::global::HELP, Action::OpenHelp)]
-            #[case(idx::global::TABLE_PICKER, Action::OpenTablePicker)]
-            #[case(idx::global::PALETTE, Action::OpenCommandPalette)]
+            #[case(idx::global::HELP, Action::ToggleModal(ModalKind::Help))]
+            #[case(idx::global::TABLE_PICKER, Action::OpenModal(ModalKind::TablePicker))]
+            #[case(idx::global::SETTINGS, Action::OpenModal(ModalKind::Settings))]
             #[case(idx::global::COMMAND_LINE, Action::EnterCommandLine)]
             #[case(idx::global::RELOAD, Action::ReloadMetadata)]
-            #[case(idx::global::SQL, Action::OpenSqlModal)]
-            #[case(idx::global::ER_DIAGRAM, Action::OpenErTablePicker)]
-            #[case(idx::global::CONNECTIONS, Action::OpenConnectionSelector)]
+            #[case(idx::global::SQL, Action::OpenModal(ModalKind::SqlModal))]
+            #[case(idx::global::ER_DIAGRAM, Action::OpenModal(ModalKind::ErTablePicker))]
+            #[case(
+                idx::global::CONNECTIONS,
+                Action::OpenModal(ModalKind::ConnectionSelector)
+            )]
             #[case(idx::global::CSV_EXPORT, Action::RequestCsvExport)]
             #[case(idx::global::READ_ONLY, Action::ToggleReadOnly)]
             #[case(idx::global::EXIT_READ_ONLY, Action::ToggleReadOnly)]
-            #[case(idx::global::QUERY_HISTORY, Action::OpenQueryHistoryPicker)]
+            #[case(
+                idx::global::QUERY_HISTORY,
+                Action::OpenModal(ModalKind::QueryHistoryPicker)
+            )]
             fn global_key_action_matches(#[case] i: usize, #[case] expected: Action) {
-                assert!(
-                    std::mem::discriminant(&GLOBAL_KEYS[i].action)
-                        == std::mem::discriminant(&expected),
-                    "GLOBAL_KEYS[{i}] has action {:?}, expected {expected:?}",
-                    GLOBAL_KEYS[i].action
-                );
+                assert_payload_free_action_eq(&GLOBAL_KEYS[i].action, &expected, "GLOBAL_KEYS", i);
             }
 
             #[test]
@@ -706,13 +883,13 @@ mod tests {
             #[case(idx::sql_modal_plan::YANK, Action::SqlModalYank)]
             #[case(idx::sql_modal_plan::TAB, Action::SqlModalNextTab)]
             #[case(idx::sql_modal_plan::BACKTAB, Action::SqlModalPrevTab)]
-            #[case(idx::sql_modal_plan::CLOSE, Action::CloseSqlModal)]
+            #[case(idx::sql_modal_plan::CLOSE, Action::CloseModal(ModalKind::SqlModal))]
             fn plan_key_action_matches(#[case] i: usize, #[case] expected: Action) {
-                assert!(
-                    std::mem::discriminant(&SQL_MODAL_PLAN_KEYS[i].action)
-                        == std::mem::discriminant(&expected),
-                    "SQL_MODAL_PLAN_KEYS[{i}] has action {:?}, expected {expected:?}",
-                    SQL_MODAL_PLAN_KEYS[i].action
+                assert_payload_free_action_eq(
+                    &SQL_MODAL_PLAN_KEYS[i].action,
+                    &expected,
+                    "SQL_MODAL_PLAN_KEYS",
+                    i,
                 );
             }
 
@@ -723,14 +900,35 @@ mod tests {
             #[case(idx::sql_modal_compare::YANK, Action::SqlModalYank)]
             #[case(idx::sql_modal_compare::TAB, Action::SqlModalNextTab)]
             #[case(idx::sql_modal_compare::BACKTAB, Action::SqlModalPrevTab)]
-            #[case(idx::sql_modal_compare::CLOSE, Action::CloseSqlModal)]
+            #[case(idx::sql_modal_compare::CLOSE, Action::CloseModal(ModalKind::SqlModal))]
             fn compare_key_action_matches(#[case] i: usize, #[case] expected: Action) {
-                assert!(
-                    std::mem::discriminant(&SQL_MODAL_COMPARE_KEYS[i].action)
-                        == std::mem::discriminant(&expected),
-                    "SQL_MODAL_COMPARE_KEYS[{i}] has action {:?}, expected {expected:?}",
-                    SQL_MODAL_COMPARE_KEYS[i].action
+                assert_payload_free_action_eq(
+                    &SQL_MODAL_COMPARE_KEYS[i].action,
+                    &expected,
+                    "SQL_MODAL_COMPARE_KEYS",
+                    i,
                 );
+            }
+
+            fn assert_payload_free_action_eq(
+                actual: &Action,
+                expected: &Action,
+                label: &str,
+                i: usize,
+            ) {
+                assert!(
+                    same_payload_free_action(actual, expected),
+                    "{label}[{i}] has action {actual:?}, expected {expected:?}",
+                );
+            }
+
+            fn same_payload_free_action(actual: &Action, expected: &Action) -> bool {
+                match (actual, expected) {
+                    (Action::OpenModal(a), Action::OpenModal(b))
+                    | (Action::CloseModal(a), Action::CloseModal(b))
+                    | (Action::ToggleModal(a), Action::ToggleModal(b)) => a == b,
+                    _ => std::mem::discriminant(actual) == std::mem::discriminant(expected),
+                }
             }
         }
 
@@ -939,11 +1137,7 @@ mod tests {
                 name: &str,
                 allowed_chars: &[char],
             ) {
-                let no_mods = Modifiers {
-                    ctrl: false,
-                    alt: false,
-                    shift: false,
-                };
+                let no_mods = Modifiers::empty();
                 for kb in bindings
                     .iter()
                     .filter(|kb| !matches!(kb.action, Action::None))
@@ -968,11 +1162,7 @@ mod tests {
                 name: &str,
                 allowed_chars: &[char],
             ) {
-                let no_mods = Modifiers {
-                    ctrl: false,
-                    alt: false,
-                    shift: false,
-                };
+                let no_mods = Modifiers::empty();
                 for row in rows {
                     for eb in row.bindings {
                         for combo in eb.combos {
@@ -1030,7 +1220,7 @@ mod tests {
 
             #[test]
             fn all_mode_bindings_count() {
-                assert_eq!(ALL_MODE_BINDINGS.len(), 9);
+                assert_eq!(ALL_MODE_BINDINGS.len(), 10);
             }
         }
     }

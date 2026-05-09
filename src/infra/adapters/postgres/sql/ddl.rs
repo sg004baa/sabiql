@@ -1,10 +1,10 @@
 use std::fmt::Write as _;
 
-use crate::app::ports::DdlGenerator;
+use crate::app::ports::outbound::DdlGenerator;
 use crate::domain::Table;
-use crate::infra::utils::{quote_ident, quote_literal};
 
 use super::super::PostgresAdapter;
+use super::{quote_ident, quote_literal};
 
 impl DdlGenerator for PostgresAdapter {
     fn generate_ddl(&self, table: &Table) -> String {
@@ -15,7 +15,7 @@ impl DdlGenerator for PostgresAdapter {
         );
 
         for (i, col) in table.columns.iter().enumerate() {
-            let nullable = if col.nullable { "" } else { " NOT NULL" };
+            let nullable = if col.is_nullable() { "" } else { " NOT NULL" };
             let default = col
                 .default
                 .as_ref()
@@ -77,18 +77,16 @@ impl DdlGenerator for PostgresAdapter {
 
 #[cfg(test)]
 mod tests {
-    use crate::app::ports::DdlGenerator;
-    use crate::domain::{Column, Table};
-    use crate::infra::adapters::postgres::PostgresAdapter;
+    use crate::adapters::postgres::PostgresAdapter;
+    use crate::app::ports::outbound::DdlGenerator;
+    use crate::domain::{Column, ColumnAttributes, Table};
 
     fn make_column(name: &str, data_type: &str, nullable: bool) -> Column {
         Column {
             name: name.to_string(),
             data_type: data_type.to_string(),
-            nullable,
-            is_primary_key: false,
             default: None,
-            is_unique: false,
+            attributes: ColumnAttributes::from_parts(nullable, false, false),
             comment: None,
             ordinal_position: 0,
         }

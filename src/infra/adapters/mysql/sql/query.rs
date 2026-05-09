@@ -1,4 +1,4 @@
-use crate::infra::utils::{quote_ident_mysql, quote_literal};
+use super::{quote_ident_mysql, quote_literal};
 
 use super::super::MySqlAdapter;
 
@@ -8,7 +8,7 @@ impl MySqlAdapter {
     const NON_SYSTEM_SCHEMAS_FILTER: &'static str =
         "TABLE_SCHEMA NOT IN ('mysql', 'information_schema', 'performance_schema', 'sys')";
 
-    pub(in crate::infra::adapters::mysql) fn tables_query() -> &'static str {
+    pub(in crate::adapters::mysql) fn tables_query() -> &'static str {
         r"
         SELECT JSON_ARRAYAGG(JSON_OBJECT(
             'schema', t.TABLE_SCHEMA,
@@ -23,7 +23,7 @@ impl MySqlAdapter {
         "
     }
 
-    pub(in crate::infra::adapters::mysql) fn tables_query_all() -> String {
+    pub(in crate::adapters::mysql) fn tables_query_all() -> String {
         format!(
             r"
         SELECT JSON_ARRAYAGG(JSON_OBJECT(
@@ -41,7 +41,7 @@ impl MySqlAdapter {
         )
     }
 
-    pub(in crate::infra::adapters::mysql) fn table_signatures_query() -> &'static str {
+    pub(in crate::adapters::mysql) fn table_signatures_query() -> &'static str {
         r"
         SELECT JSON_ARRAYAGG(JSON_OBJECT(
             'schema', t.TABLE_SCHEMA,
@@ -75,7 +75,7 @@ impl MySqlAdapter {
         "
     }
 
-    pub(in crate::infra::adapters::mysql) fn table_signatures_query_all() -> String {
+    pub(in crate::adapters::mysql) fn table_signatures_query_all() -> String {
         format!(
             r"
         SELECT JSON_ARRAYAGG(JSON_OBJECT(
@@ -112,7 +112,7 @@ impl MySqlAdapter {
         )
     }
 
-    pub(in crate::infra::adapters::mysql) fn schemas_query() -> &'static str {
+    pub(in crate::adapters::mysql) fn schemas_query() -> &'static str {
         r"
         SELECT JSON_ARRAYAGG(JSON_OBJECT('name', s.SCHEMA_NAME))
         FROM information_schema.SCHEMATA s
@@ -120,7 +120,7 @@ impl MySqlAdapter {
         "
     }
 
-    pub(in crate::infra::adapters::mysql) fn schemas_query_all() -> &'static str {
+    pub(in crate::adapters::mysql) fn schemas_query_all() -> &'static str {
         r"
         SELECT JSON_ARRAYAGG(JSON_OBJECT('name', s.SCHEMA_NAME))
         FROM information_schema.SCHEMATA s
@@ -129,7 +129,7 @@ impl MySqlAdapter {
         "
     }
 
-    pub(in crate::infra::adapters::mysql) fn columns_query(schema: &str, table: &str) -> String {
+    pub(in crate::adapters::mysql) fn columns_query(schema: &str, table: &str) -> String {
         format!(
             r"
             SELECT JSON_ARRAYAGG(j.col) FROM (
@@ -154,7 +154,7 @@ impl MySqlAdapter {
         )
     }
 
-    pub(in crate::infra::adapters::mysql) fn preview_pk_columns_query(
+    pub(in crate::adapters::mysql) fn preview_pk_columns_query(
         schema: &str,
         table: &str,
     ) -> String {
@@ -174,7 +174,7 @@ impl MySqlAdapter {
         )
     }
 
-    pub(in crate::infra::adapters::mysql) fn build_preview_query(
+    pub(in crate::adapters::mysql) fn build_preview_query(
         schema: &str,
         table: &str,
         order_columns: &[String],
@@ -202,7 +202,7 @@ impl MySqlAdapter {
         )
     }
 
-    pub(in crate::infra::adapters::mysql) fn indexes_query(schema: &str, table: &str) -> String {
+    pub(in crate::adapters::mysql) fn indexes_query(schema: &str, table: &str) -> String {
         format!(
             r"
             SELECT JSON_ARRAYAGG(JSON_OBJECT(
@@ -231,10 +231,7 @@ impl MySqlAdapter {
         )
     }
 
-    pub(in crate::infra::adapters::mysql) fn foreign_keys_query(
-        schema: &str,
-        table: &str,
-    ) -> String {
+    pub(in crate::adapters::mysql) fn foreign_keys_query(schema: &str, table: &str) -> String {
         format!(
             r"
             SELECT JSON_ARRAYAGG(JSON_OBJECT(
@@ -276,7 +273,7 @@ impl MySqlAdapter {
         )
     }
 
-    pub(in crate::infra::adapters::mysql) fn triggers_query(schema: &str, table: &str) -> String {
+    pub(in crate::adapters::mysql) fn triggers_query(schema: &str, table: &str) -> String {
         format!(
             r"
             SELECT JSON_ARRAYAGG(j.trigger_obj) FROM (
@@ -298,7 +295,7 @@ impl MySqlAdapter {
         )
     }
 
-    pub(in crate::infra::adapters::mysql) fn table_info_query(schema: &str, table: &str) -> String {
+    pub(in crate::adapters::mysql) fn table_info_query(schema: &str, table: &str) -> String {
         format!(
             r"
             SELECT JSON_OBJECT(
@@ -315,7 +312,7 @@ impl MySqlAdapter {
         )
     }
 
-    pub(in crate::infra::adapters::mysql) fn table_columns_and_fks_query(
+    pub(in crate::adapters::mysql) fn table_columns_and_fks_query(
         schema: &str,
         table: &str,
     ) -> String {
@@ -331,10 +328,7 @@ impl MySqlAdapter {
         )
     }
 
-    pub(in crate::infra::adapters::mysql) fn table_detail_query(
-        schema: &str,
-        table: &str,
-    ) -> String {
+    pub(in crate::adapters::mysql) fn table_detail_query(schema: &str, table: &str) -> String {
         format!(
             r"
             SELECT JSON_OBJECT(
@@ -356,7 +350,7 @@ impl MySqlAdapter {
 
 #[cfg(test)]
 mod tests {
-    use crate::infra::adapters::mysql::MySqlAdapter;
+    use crate::adapters::mysql::MySqlAdapter;
 
     mod preview_query {
         use super::*;

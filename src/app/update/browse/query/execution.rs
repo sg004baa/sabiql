@@ -1,15 +1,15 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::app::cmd::effect::Effect;
-use crate::app::model::app_state::AppState;
-use crate::app::model::browse::query_execution::{PREVIEW_PAGE_SIZE, PostDeleteRowSelection};
-use crate::app::model::shared::input_mode::InputMode;
-use crate::app::model::sql_editor::modal::{AdhocSuccessSnapshot, SqlModalStatus};
-use crate::app::services::AppServices;
-use crate::app::update::action::{Action, TableTarget};
-use crate::app::update::input::command::{command_to_action, parse_command};
+use crate::cmd::effect::Effect;
 use crate::domain::{QueryResult, QuerySource};
+use crate::model::app_state::AppState;
+use crate::model::browse::query_execution::{PREVIEW_PAGE_SIZE, PostDeleteRowSelection};
+use crate::model::shared::input_mode::InputMode;
+use crate::model::sql_editor::modal::AdhocSuccessSnapshot;
+use crate::services::AppServices;
+use crate::update::action::{Action, ModalKind, TableTarget};
+use crate::update::input::command::{command_to_action, parse_command};
 
 fn try_adhoc_refresh(state: &mut AppState, result: &QueryResult) -> Vec<Effect> {
     if result.source != QuerySource::Adhoc || result.is_error() {
@@ -81,9 +81,9 @@ pub fn reduce(
                     if result.is_error() {
                         state
                             .sql_modal
-                            .mark_adhoc_error(result.error.clone().unwrap_or_default());
+                            .finish_adhoc_error(result.error.clone().unwrap_or_default());
                     } else {
-                        state.sql_modal.mark_adhoc_success(AdhocSuccessSnapshot {
+                        state.sql_modal.finish_adhoc_success(AdhocSuccessSnapshot {
                             command_tag: result.command_tag.clone(),
                             row_count: result.row_count,
                             execution_time_ms: result.execution_time_ms,
@@ -140,20 +140,37 @@ pub fn reduce(
                 Some(vec![])
             }
         }
-        Action::QueryFailed(error, generation) => {
+        Action::QueryFailed {
+            error,
+            generation,
+            source,
+        } => {
             if *generation == 0 || *generation == state.session.selection_generation() {
                 state.query.mark_idle();
-                let is_adhoc = state.modal.active_mode() == InputMode::SqlModal;
-                if !is_adhoc {
+                if *source == QuerySource::Preview {
                     state.result_interaction.reset_view();
                     state
                         .query
                         .set_post_delete_selection(PostDeleteRowSelection::Keep);
                     state.query.clear_delete_refresh_target();
-                }
-                state.set_error(error.to_string());
-                if is_adhoc {
-                    state.sql_modal.mark_adhoc_error(error.to_string());
+                    let preview_query = if state.query.pagination.schema.is_empty() {
+                        state.query.pagination.table.clone()
+                    } else {
+                        format!(
+                            "{}.{}",
+                            state.query.pagination.schema, state.query.pagination.table
+                        )
+                    };
+                    state.query.set_current_result(Arc::new(QueryResult::error(
+                        preview_query,
+                        error.result_message(),
+                        0,
+                        QuerySource::Preview,
+                    )));
+                } else {
+                    let user_message = error.user_message();
+                    state.set_error(user_message.clone());
+                    state.sql_modal.finish_adhoc_error(user_message);
                 }
             }
             Some(vec![])
@@ -170,22 +187,30 @@ pub fn reduce(
                     state.should_quit = true;
                     vec![]
                 }
-                Action::OpenHelp => {
+                Action::ToggleModal(ModalKind::Help) => {
                     state.modal.set_mode(InputMode::Help);
                     vec![]
                 }
-                Action::OpenSqlModal => {
-                    state.modal.set_mode(InputMode::SqlModal);
-                    state.sql_modal.set_status(SqlModalStatus::Normal);
-                    if !state.sql_modal.is_prefetch_started() && state.session.metadata().is_some()
-                    {
-                        vec![Effect::DispatchActions(vec![Action::StartPrefetchAll])]
-                    } else {
-                        vec![]
-                    }
+                Action::OpenModal(ModalKind::SqlModal) => {
+                    vec![Effect::DispatchActions(vec![Action::OpenModal(
+                        ModalKind::SqlModal,
+                    )])]
                 }
-                Action::OpenErTablePicker => {
-                    vec![Effect::DispatchActions(vec![Action::OpenErTablePicker])]
+                Action::OpenModal(ModalKind::ErTablePicker) => {
+                    // Defer to modal reducer so metadata readiness checks stay in one place.
+                    vec![Effect::DispatchActions(vec![Action::OpenModal(
+                        ModalKind::ErTablePicker,
+                    )])]
+                }
+                Action::OpenModal(ModalKind::Settings) => {
+                    vec![Effect::DispatchActions(vec![Action::OpenModal(
+                        ModalKind::Settings,
+                    )])]
+                }
+                Action::OpenModal(ModalKind::CommandPalette) => {
+                    vec![Effect::DispatchActions(vec![Action::OpenModal(
+                        ModalKind::CommandPalette,
+                    )])]
                 }
                 Action::SubmitCellEditWrite => {
                     vec![Effect::DispatchActions(vec![Action::SubmitCellEditWrite])]
@@ -256,9 +281,9 @@ pub fn reduce(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::model::browse::query_execution::PaginationState;
-    use crate::app::update::browse::query::reduce_query;
-    use crate::app::update::browse::query::tests::*;
+    use crate::model::browse::query_execution::PaginationState;
+    use crate::update::browse::query::reduce_query;
+    use crate::update::browse::query::tests::*;
 
     mod command_line_submit {
         use super::*;
@@ -319,7 +344,63 @@ mod tests {
             assert_eq!(effects.len(), 1);
             match &effects[0] {
                 Effect::DispatchActions(actions) => {
-                    assert!(matches!(actions[0], Action::OpenErTablePicker));
+                    assert!(matches!(
+                        actions[0],
+                        Action::OpenModal(ModalKind::ErTablePicker)
+                    ));
+                }
+                other => panic!("expected DispatchActions, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn submit_settings_dispatches_open_settings() {
+            let mut state = create_test_state();
+            state.modal.push_mode(InputMode::CommandLine);
+            state.command_line_input.set_content("settings".to_string());
+
+            let effects = reduce_query(
+                &mut state,
+                &Action::CommandLineSubmit,
+                Instant::now(),
+                &AppServices::stub(),
+            )
+            .unwrap();
+
+            assert_eq!(state.input_mode(), InputMode::Normal);
+            assert!(state.command_line_input.content().is_empty());
+            assert_eq!(effects.len(), 1);
+            match &effects[0] {
+                Effect::DispatchActions(actions) => {
+                    assert!(matches!(actions[0], Action::OpenModal(ModalKind::Settings)));
+                }
+                other => panic!("expected DispatchActions, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn submit_palette_dispatches_open_command_palette() {
+            let mut state = create_test_state();
+            state.modal.push_mode(InputMode::CommandLine);
+            state.command_line_input.set_content("palette".to_string());
+
+            let effects = reduce_query(
+                &mut state,
+                &Action::CommandLineSubmit,
+                Instant::now(),
+                &AppServices::stub(),
+            )
+            .unwrap();
+
+            assert_eq!(state.input_mode(), InputMode::Normal);
+            assert!(state.command_line_input.content().is_empty());
+            assert_eq!(effects.len(), 1);
+            match &effects[0] {
+                Effect::DispatchActions(actions) => {
+                    assert!(matches!(
+                        actions[0],
+                        Action::OpenModal(ModalKind::CommandPalette)
+                    ));
                 }
                 other => panic!("expected DispatchActions, got {other:?}"),
             }
@@ -589,8 +670,8 @@ mod tests {
 
     mod query_failed {
         use super::*;
-        use crate::app::model::shared::ui_state::ResultNavMode;
-        use crate::app::ports::DbOperationError;
+        use crate::model::shared::ui_state::ResultNavMode;
+        use crate::ports::outbound::DbOperationError;
 
         #[test]
         fn resets_result_selection_and_offsets() {
@@ -602,7 +683,11 @@ mod tests {
 
             reduce_query(
                 &mut state,
-                &Action::QueryFailed(DbOperationError::QueryFailed("error".to_string()), 1),
+                &Action::QueryFailed {
+                    error: DbOperationError::QueryFailed("error".to_string()),
+                    generation: 1,
+                    source: QuerySource::Preview,
+                },
                 Instant::now(),
                 &AppServices::stub(),
             );
@@ -613,6 +698,64 @@ mod tests {
             );
             assert_eq!(state.result_interaction.scroll_offset, 0);
             assert_eq!(state.result_interaction.horizontal_offset, 0);
+        }
+
+        #[test]
+        fn preview_failure_sets_error_result() {
+            let mut state = state_with_table("public", "users");
+            state.session.set_selection_generation(1);
+
+            reduce_query(
+                &mut state,
+                &Action::QueryFailed {
+                    error: DbOperationError::PermissionDenied("forbidden".to_string()),
+                    generation: 1,
+                    source: QuerySource::Preview,
+                },
+                Instant::now(),
+                &AppServices::stub(),
+            );
+
+            let result = state.query.current_result().expect("result");
+            assert!(result.is_error());
+            assert_eq!(result.source, QuerySource::Preview);
+            assert_eq!(result.query, "public.users");
+            assert!(
+                result
+                    .error
+                    .as_deref()
+                    .is_some_and(|message| message.contains("Permission denied"))
+            );
+            assert!(state.messages.last_error.is_none());
+        }
+
+        #[test]
+        fn preview_failure_does_not_become_adhoc_error_when_sql_modal_is_open() {
+            let mut state = state_with_table("public", "users");
+            state.session.set_selection_generation(1);
+            state.modal.set_mode(InputMode::SqlModal);
+            state
+                .sql_modal
+                .finish_adhoc_error("previous adhoc error".to_string());
+
+            reduce_query(
+                &mut state,
+                &Action::QueryFailed {
+                    error: DbOperationError::PermissionDenied("forbidden".to_string()),
+                    generation: 1,
+                    source: QuerySource::Preview,
+                },
+                Instant::now(),
+                &AppServices::stub(),
+            );
+
+            assert_eq!(
+                state.sql_modal.last_adhoc_error(),
+                Some("previous adhoc error")
+            );
+            let result = state.query.current_result().expect("result");
+            assert_eq!(result.source, QuerySource::Preview);
+            assert!(result.is_error());
         }
     }
 
@@ -819,8 +962,8 @@ mod tests {
 
     mod adhoc_refresh_integration {
         use super::*;
-        use crate::app::update::browse::metadata::reduce_metadata;
         use crate::domain::{CommandTag, DatabaseMetadata, TableSummary};
+        use crate::update::browse::metadata::reduce_metadata;
 
         fn make_metadata(tables: Vec<(&str, &str)>) -> Arc<DatabaseMetadata> {
             Arc::new(DatabaseMetadata {
@@ -971,7 +1114,7 @@ mod tests {
             );
             assert_eq!(
                 *state.sql_modal.status(),
-                crate::app::model::sql_editor::modal::SqlModalStatus::Success
+                crate::model::sql_editor::modal::SqlModalStatus::Success
             );
         }
 

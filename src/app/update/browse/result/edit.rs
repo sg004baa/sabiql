@@ -1,12 +1,14 @@
 use std::time::Instant;
 
-use crate::app::cmd::effect::Effect;
-use crate::app::model::app_state::AppState;
-use crate::app::model::shared::input_mode::InputMode;
-use crate::app::policy::write::write_update::build_pk_pairs;
-use crate::app::update::action::{Action, InputTarget};
+use crate::cmd::effect::Effect;
+#[cfg(test)]
+use crate::domain::ColumnAttributes;
+use crate::model::app_state::AppState;
+use crate::model::shared::input_mode::InputMode;
+use crate::policy::write::write_update::build_pk_pairs;
+use crate::update::action::{Action, InputTarget, ModalKind};
 
-use crate::app::update::helpers::{EditGuardrailError, editable_preview_base};
+use crate::update::helpers::{EditGuardrailError, editable_preview_base};
 
 fn is_jsonb_cell(state: &AppState) -> bool {
     let Some(col_idx) = state.result_interaction.selection().cell() else {
@@ -74,7 +76,9 @@ pub fn reduce(state: &mut AppState, action: &Action, now: Instant) -> Option<Vec
 
             // JSONB columns open the dedicated detail modal instead of inline edit
             if is_jsonb_cell(state) {
-                return Some(vec![Effect::DispatchActions(vec![Action::OpenJsonbDetail])]);
+                return Some(vec![Effect::DispatchActions(vec![Action::OpenModal(
+                    ModalKind::JsonbDetail,
+                )])]);
             }
 
             match editable_cell_context(state) {
@@ -149,8 +153,8 @@ pub fn reduce(state: &mut AppState, action: &Action, now: Instant) -> Option<Vec
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::update::action::CursorMove;
     use crate::domain::{QueryResult, QuerySource, Table};
+    use crate::update::action::CursorMove;
     use std::sync::Arc;
 
     mod cell_edit_entry_guardrails {
@@ -313,20 +317,16 @@ mod tests {
                 Column {
                     name: "id".to_string(),
                     data_type: "integer".to_string(),
-                    nullable: false,
                     default: None,
-                    is_primary_key: true,
-                    is_unique: true,
+                    attributes: ColumnAttributes::PRIMARY_KEY | ColumnAttributes::UNIQUE,
                     comment: None,
                     ordinal_position: 1,
                 },
                 Column {
                     name: "name".to_string(),
                     data_type: "jsonb".to_string(),
-                    nullable: true,
                     default: None,
-                    is_primary_key: false,
-                    is_unique: false,
+                    attributes: ColumnAttributes::NULLABLE,
                     comment: None,
                     ordinal_position: 2,
                 },
@@ -344,7 +344,7 @@ mod tests {
             assert_eq!(effects.len(), 1);
             assert!(matches!(
                 &effects[0],
-                Effect::DispatchActions(actions) if matches!(actions.as_slice(), [Action::OpenJsonbDetail])
+                Effect::DispatchActions(actions) if matches!(actions.as_slice(), [Action::OpenModal(ModalKind::JsonbDetail)])
             ));
         }
     }

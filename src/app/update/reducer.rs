@@ -7,17 +7,17 @@
 use std::time::Instant;
 
 use super::{
-    reduce_connection, reduce_er, reduce_explain, reduce_metadata, reduce_modal, reduce_navigation,
-    reduce_query, reduce_result, reduce_sql_modal,
+    reduce_connection, reduce_er, reduce_explain_with_services, reduce_metadata, reduce_modal,
+    reduce_navigation, reduce_query, reduce_result, reduce_sql_modal,
 };
-use crate::app::cmd::effect::Effect;
-use crate::app::model::app_state::AppState;
-use crate::app::model::shared::focused_pane::FocusedPane;
-use crate::app::model::shared::input_mode::InputMode;
-use crate::app::model::shared::key_sequence::KeySequenceState;
-use crate::app::services::AppServices;
-use crate::app::update::action::{Action, TableTarget};
+use crate::cmd::effect::Effect;
 use crate::domain::TableSummary;
+use crate::model::app_state::AppState;
+use crate::model::shared::focused_pane::FocusedPane;
+use crate::model::shared::input_mode::InputMode;
+use crate::model::shared::key_sequence::KeySequenceState;
+use crate::services::AppServices;
+use crate::update::action::{Action, TableTarget};
 
 pub fn reduce(
     state: &mut AppState,
@@ -43,19 +43,16 @@ fn reduce_inner(
     now: Instant,
     services: &AppServices,
 ) -> Vec<Effect> {
-    state.result_interaction.clear_operator_pending(
-        matches!(action, Action::ResultDeleteOperatorPending),
-        matches!(action, Action::ResultRowYankOperatorPending),
-    );
+    state.result_interaction.clear_operator_pending();
 
     // reduce_result must precede reduce_query: passthrough actions (e.g. ResultNextPage)
     // reset view state here and return None, relying on reduce_query for the actual page change.
-    if let Some(effects) = reduce_connection(state, &action, now)
+    if let Some(effects) = reduce_connection(state, &action, now, services)
         .or_else(|| reduce_modal(state, &action, now))
         .or_else(|| reduce_result(state, &action, services, now))
         .or_else(|| reduce_navigation(state, &action, services, now))
-        .or_else(|| reduce_sql_modal(state, &action, now))
-        .or_else(|| reduce_explain(state, &action, now))
+        .or_else(|| reduce_sql_modal(state, &action, now, services))
+        .or_else(|| reduce_explain_with_services(state, &action, now, services))
         .or_else(|| reduce_metadata(state, &action, now))
         .or_else(|| reduce_er(state, &action, now))
         .or_else(|| reduce_query(state, &action, now, services))
@@ -76,8 +73,10 @@ fn reduce_inner(
             state.should_quit = true;
             vec![]
         }
-        Action::Resize(_w, h) => {
+        Action::Resize(w, h) => {
+            state.ui.terminal_width = w;
             state.ui.terminal_height = h;
+            state.ui.clamp_help_offsets();
             vec![]
         }
         Action::Render => {
@@ -112,7 +111,7 @@ fn reduce_inner(
                     return select_table(state, &table);
                 }
             } else if state.modal.active_mode() == InputMode::CommandPalette {
-                use crate::app::update::input::palette::palette_action_for_index;
+                use crate::update::input::palette::palette_action_for_index;
 
                 let cmd_action = palette_action_for_index(state.ui.table_picker.selected());
                 state.modal.set_mode(InputMode::Normal);
@@ -182,10 +181,11 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::app::ports::DbOperationError;
-    use crate::app::ports::connection_store::ConnectionStoreError;
-    use crate::app::update::action::{ConnectionSaveError, ConnectionTarget};
-    use crate::app::update::action::{InputTarget, SelectMotion};
+    use crate::ports::outbound::DbOperationError;
+    use crate::ports::outbound::connection_store::ConnectionStoreError;
+    use crate::update::action::ModalKind;
+    use crate::update::action::{ConnectionSaveError, ConnectionTarget};
+    use crate::update::action::{InputTarget, SelectMotion};
 
     fn create_test_state() -> AppState {
         AppState::new("test_project".to_string())
@@ -218,8 +218,12 @@ mod tests {
         }
 
         #[test]
-        fn resize_updates_terminal_height() {
+        fn resize_updates_terminal_size_and_clamps_help_offsets() {
             let mut state = create_test_state();
+            state.ui.terminal_width = 20;
+            state.ui.terminal_height = 10;
+            state.ui.help_scroll_offset = usize::MAX;
+            state.ui.help_horizontal_offset = usize::MAX;
             let now = Instant::now();
 
             let effects = reduce(
@@ -229,7 +233,13 @@ mod tests {
                 &AppServices::stub(),
             );
 
+            assert_eq!(state.ui.terminal_width, 100);
             assert_eq!(state.ui.terminal_height, 50);
+            assert_eq!(state.ui.help_scroll_offset, state.ui.help_max_scroll());
+            assert_eq!(
+                state.ui.help_horizontal_offset,
+                state.ui.help_max_horizontal_scroll()
+            );
             assert!(effects.is_empty());
         }
 
@@ -263,7 +273,7 @@ mod tests {
 
     mod scroll_actions {
         use super::*;
-        use crate::app::update::action::{ScrollAmount, ScrollDirection, ScrollTarget};
+        use crate::update::action::{ScrollAmount, ScrollDirection, ScrollTarget};
         use rstest::rstest;
 
         #[test]
@@ -473,7 +483,7 @@ mod tests {
                 &AppServices::stub(),
             );
 
-            assert_eq!(state.ui.help_scroll_offset, 19);
+            assert_eq!(state.ui.help_scroll_offset, 18);
             assert!(effects.is_empty());
         }
 
@@ -520,6 +530,65 @@ mod tests {
 
             assert_eq!(state.ui.help_scroll_offset, 0);
         }
+
+        #[test]
+        fn help_horizontal_scroll_saturates_at_bounds() {
+            let mut state = create_test_state();
+            state.ui.terminal_width = 40;
+            state.ui.help_horizontal_offset = state.ui.help_max_horizontal_scroll();
+            let now = Instant::now();
+
+            reduce(
+                &mut state,
+                Action::Scroll {
+                    target: ScrollTarget::Help,
+                    direction: ScrollDirection::Right,
+                    amount: ScrollAmount::Line,
+                },
+                now,
+                &AppServices::stub(),
+            );
+
+            assert_eq!(
+                state.ui.help_horizontal_offset,
+                state.ui.help_max_horizontal_scroll()
+            );
+
+            reduce(
+                &mut state,
+                Action::Scroll {
+                    target: ScrollTarget::Help,
+                    direction: ScrollDirection::Left,
+                    amount: ScrollAmount::Line,
+                },
+                now,
+                &AppServices::stub(),
+            );
+
+            assert_eq!(
+                state.ui.help_horizontal_offset,
+                state.ui.help_max_horizontal_scroll().saturating_sub(1)
+            );
+        }
+
+        #[test]
+        fn help_close_resets_vertical_and_horizontal_offsets() {
+            let mut state = create_test_state();
+            state.modal.set_mode(InputMode::Help);
+            state.ui.help_scroll_offset = 3;
+            state.ui.help_horizontal_offset = 4;
+            let now = Instant::now();
+
+            reduce(
+                &mut state,
+                Action::CloseModal(ModalKind::Help),
+                now,
+                &AppServices::stub(),
+            );
+
+            assert_eq!(state.ui.help_scroll_offset, 0);
+            assert_eq!(state.ui.help_horizontal_offset, 0);
+        }
     }
 
     mod modal_toggles {
@@ -528,22 +597,18 @@ mod tests {
         #[test]
         fn open_table_picker_sets_mode_and_clears_filter() {
             let mut state = create_test_state();
-            state
-                .ui
-                .table_picker
-                .filter_input
-                .set_content("test".to_string());
+            state.ui.table_picker.insert_filter_str("test");
             let now = Instant::now();
 
             let effects = reduce(
                 &mut state,
-                Action::OpenTablePicker,
+                Action::OpenModal(ModalKind::TablePicker),
                 now,
                 &AppServices::stub(),
             );
 
             assert_eq!(state.input_mode(), InputMode::TablePicker);
-            assert!(state.ui.table_picker.filter_input.content().is_empty());
+            assert!(state.ui.table_picker.filter_input().content().is_empty());
             assert_eq!(state.ui.table_picker.selected(), 0);
             assert!(effects.is_empty());
         }
@@ -556,7 +621,7 @@ mod tests {
 
             let effects = reduce(
                 &mut state,
-                Action::CloseTablePicker,
+                Action::CloseModal(ModalKind::TablePicker),
                 now,
                 &AppServices::stub(),
             );
@@ -571,12 +636,22 @@ mod tests {
             let now = Instant::now();
 
             // First open
-            let effects = reduce(&mut state, Action::OpenHelp, now, &AppServices::stub());
+            let effects = reduce(
+                &mut state,
+                Action::ToggleModal(ModalKind::Help),
+                now,
+                &AppServices::stub(),
+            );
             assert_eq!(state.input_mode(), InputMode::Help);
             assert!(effects.is_empty());
 
             // Toggle back to normal
-            let effects = reduce(&mut state, Action::OpenHelp, now, &AppServices::stub());
+            let effects = reduce(
+                &mut state,
+                Action::ToggleModal(ModalKind::Help),
+                now,
+                &AppServices::stub(),
+            );
             assert_eq!(state.input_mode(), InputMode::Normal);
             assert!(effects.is_empty());
         }
@@ -588,7 +663,12 @@ mod tests {
             state.ui.help_scroll_offset = 12;
             let now = Instant::now();
 
-            let effects = reduce(&mut state, Action::CloseHelp, now, &AppServices::stub());
+            let effects = reduce(
+                &mut state,
+                Action::CloseModal(ModalKind::Help),
+                now,
+                &AppServices::stub(),
+            );
 
             assert_eq!(state.input_mode(), InputMode::Normal);
             assert_eq!(state.ui.help_scroll_offset, 0);
@@ -598,7 +678,8 @@ mod tests {
 
     mod sql_modal_debounce {
         use super::*;
-        use crate::app::model::shared::text_input::TextInputLike;
+        use crate::model::shared::text_input::TextInputLike;
+        use crate::model::sql_editor::modal::SqlModalStatus;
         use std::time::Duration;
 
         #[test]
@@ -620,7 +701,7 @@ mod tests {
             assert_eq!(state.sql_modal.editor.content(), "a");
             assert_eq!(state.sql_modal.editor.cursor(), 1);
             assert!(effects.is_empty());
-            assert!(state.sql_modal.completion_debounce.is_some());
+            assert!(state.sql_modal.completion_debounce().is_some());
         }
 
         #[test]
@@ -641,7 +722,7 @@ mod tests {
             assert_eq!(state.sql_modal.editor.content(), "a");
             assert_eq!(state.sql_modal.editor.cursor(), 1);
             assert!(effects.is_empty());
-            assert!(state.sql_modal.completion_debounce.is_some());
+            assert!(state.sql_modal.completion_debounce().is_some());
         }
 
         #[test]
@@ -660,13 +741,39 @@ mod tests {
             );
 
             let expected = now + Duration::from_millis(100);
-            assert_eq!(state.sql_modal.completion_debounce, Some(expected));
+            assert_eq!(state.sql_modal.completion_debounce(), Some(expected));
+        }
+
+        #[test]
+        fn text_input_preserves_visible_completion_popup() {
+            let mut state = create_test_state();
+            state.modal.set_mode(InputMode::SqlModal);
+            state.sql_modal.set_status_for_test(SqlModalStatus::Editing);
+            state.sql_modal.completion_mut_for_test().visible = true;
+            let now = Instant::now();
+
+            reduce(
+                &mut state,
+                Action::TextInput {
+                    target: InputTarget::SqlModal,
+                    ch: 'x',
+                },
+                now,
+                &AppServices::stub(),
+            );
+
+            assert!(state.sql_modal.completion().visible);
+            assert_eq!(
+                state.sql_modal.completion_debounce(),
+                Some(now + Duration::from_millis(100))
+            );
         }
     }
 
     mod completion_ui {
         use super::*;
-        use crate::app::model::sql_editor::completion::{CompletionCandidate, CompletionKind};
+        use crate::model::shared::text_input::TextInputLike;
+        use crate::model::sql_editor::completion::{CompletionCandidate, CompletionKind};
 
         fn make_candidate(text: &str) -> CompletionCandidate {
             CompletionCandidate {
@@ -679,8 +786,9 @@ mod tests {
         #[test]
         fn completion_next_wraps_around() {
             let mut state = create_test_state();
-            state.sql_modal.completion.candidates = vec![make_candidate("a"), make_candidate("b")];
-            state.sql_modal.completion.selected_index = 1;
+            state.sql_modal.completion_mut_for_test().candidates =
+                vec![make_candidate("a"), make_candidate("b")];
+            state.sql_modal.completion_mut_for_test().selected_index = 1;
             let now = Instant::now();
 
             let effects = reduce(
@@ -690,15 +798,16 @@ mod tests {
                 &AppServices::stub(),
             );
 
-            assert_eq!(state.sql_modal.completion.selected_index, 0);
+            assert_eq!(state.sql_modal.completion().selected_index, 0);
             assert!(effects.is_empty());
         }
 
         #[test]
         fn completion_prev_wraps_around() {
             let mut state = create_test_state();
-            state.sql_modal.completion.candidates = vec![make_candidate("a"), make_candidate("b")];
-            state.sql_modal.completion.selected_index = 0;
+            state.sql_modal.completion_mut_for_test().candidates =
+                vec![make_candidate("a"), make_candidate("b")];
+            state.sql_modal.completion_mut_for_test().selected_index = 0;
             let now = Instant::now();
 
             let effects = reduce(
@@ -708,15 +817,41 @@ mod tests {
                 &AppServices::stub(),
             );
 
-            assert_eq!(state.sql_modal.completion.selected_index, 1);
+            assert_eq!(state.sql_modal.completion().selected_index, 1);
+            assert!(effects.is_empty());
+        }
+
+        #[test]
+        fn completion_accept_dismisses_when_cursor_precedes_trigger() {
+            let mut state = create_test_state();
+            state.modal.set_mode(InputMode::SqlModal);
+            state
+                .sql_modal
+                .editor
+                .set_content_with_cursor("SELECT ".to_string(), 0);
+            state
+                .sql_modal
+                .apply_completion_update(&[make_candidate("users")], 7, true);
+            let now = Instant::now();
+
+            let effects = reduce(
+                &mut state,
+                Action::CompletionAccept,
+                now,
+                &AppServices::stub(),
+            );
+
+            assert_eq!(state.sql_modal.editor.content(), "SELECT ");
+            assert_eq!(state.sql_modal.editor.cursor(), 0);
+            assert!(!state.sql_modal.completion().visible);
             assert!(effects.is_empty());
         }
     }
 
     mod response_handlers {
         use super::*;
-        use crate::app::model::connection::error::ConnectionErrorInfo;
         use crate::domain::{DatabaseMetadata, MetadataState, TableSummary};
+        use crate::model::connection::error::ConnectionErrorInfo;
 
         #[test]
         fn metadata_loaded_with_empty_tables_selects_none() {
@@ -814,8 +949,8 @@ mod tests {
 
     mod connection_error_actions {
         use super::*;
-        use crate::app::model::connection::error::{ConnectionErrorInfo, ConnectionErrorKind};
         use crate::domain::MetadataState;
+        use crate::model::connection::error::{ConnectionErrorInfo, ConnectionErrorKind};
 
         fn state_with_error() -> AppState {
             let mut state = create_test_state();
@@ -1187,8 +1322,8 @@ mod tests {
 
     mod er_diagram {
         use super::*;
-        use crate::app::model::er_state::ErStatus;
         use crate::domain::DatabaseMetadata;
+        use crate::model::er_state::ErStatus;
 
         #[test]
         fn er_open_while_rendering_returns_no_effects() {
@@ -1373,9 +1508,9 @@ mod tests {
     }
 
     mod connection_setup_validation {
-        use crate::app::model::connection::setup::{ConnectionField, ConnectionSetupState};
-        use crate::app::model::shared::text_input::TextInputState;
-        use crate::app::update::helpers::{validate_all, validate_field};
+        use crate::model::connection::setup::{ConnectionField, ConnectionSetupState};
+        use crate::model::shared::text_input::TextInputState;
+        use crate::update::helpers::{validate_all, validate_field};
         use rstest::rstest;
 
         fn setup_state() -> ConnectionSetupState {
@@ -1542,9 +1677,9 @@ mod tests {
 
             let effects = reduce(
                 &mut state,
-                Action::ConnectionSaveFailed(ConnectionSaveError::Store(
-                    ConnectionStoreError::IoError("Write error".to_string()),
-                )),
+                Action::ConnectionSaveFailed(ConnectionSaveError::Store(ConnectionStoreError::Io(
+                    Arc::new(std::io::Error::other("Write error")),
+                ))),
                 now,
                 &AppServices::stub(),
             );
@@ -1570,7 +1705,7 @@ mod tests {
             assert_eq!(state.input_mode(), InputMode::ConfirmDialog);
             assert!(matches!(
                 state.confirm_dialog.intent(),
-                Some(&crate::app::model::shared::confirm_dialog::ConfirmIntent::QuitNoConnection)
+                Some(&crate::model::shared::confirm_dialog::ConfirmIntent::QuitNoConnection)
             ));
             assert!(effects.is_empty());
         }
@@ -1597,7 +1732,7 @@ mod tests {
 
     mod confirm_dialog_transitions {
         use super::*;
-        use crate::app::model::shared::confirm_dialog::ConfirmIntent;
+        use crate::model::shared::confirm_dialog::ConfirmIntent;
 
         #[test]
         fn confirm_quit_no_connection_sets_should_quit() {
@@ -1642,7 +1777,7 @@ mod tests {
 
         #[test]
         fn confirm_delete_write_then_success_preserves_delete_context() {
-            use crate::app::policy::write::write_guardrails::{
+            use crate::policy::write::write_guardrails::{
                 GuardrailDecision, RiskLevel, TargetSummary, WriteOperation, WritePreview,
             };
 
@@ -1715,7 +1850,7 @@ mod tests {
 
         #[test]
         fn confirm_delete_write_then_failure_returns_to_normal() {
-            use crate::app::policy::write::write_guardrails::{
+            use crate::policy::write::write_guardrails::{
                 GuardrailDecision, RiskLevel, TargetSummary, WriteOperation, WritePreview,
             };
 
@@ -1773,8 +1908,8 @@ mod tests {
 
     mod connection_state_tests {
         use super::*;
-        use crate::app::model::connection::state::ConnectionState;
         use crate::domain::{ConnectionId, DatabaseMetadata, MetadataState};
+        use crate::model::connection::state::ConnectionState;
 
         #[test]
         fn try_connect_with_dsn_starts_connecting() {
@@ -2070,7 +2205,7 @@ mod tests {
 
         #[test]
         fn switch_connection_restores_from_cache() {
-            use crate::app::model::shared::inspector_tab::InspectorTab;
+            use crate::model::shared::inspector_tab::InspectorTab;
 
             let mut state = create_test_state();
             let conn_a = ConnectionId::new();
@@ -2082,7 +2217,7 @@ mod tests {
                 .set_connection_state(ConnectionState::Connected);
             state.ui.explorer_selected = 3;
 
-            let cached = crate::app::model::connection::cache::ConnectionCache {
+            let cached = crate::model::connection::cache::ConnectionCache {
                 explorer_selected: 10,
                 inspector_tab: InspectorTab::Indexes,
                 metadata: Some(Arc::new(DatabaseMetadata {
@@ -2140,11 +2275,7 @@ mod tests {
         #[test]
         fn open_clears_selections_and_filter() {
             let mut state = state_with_metadata();
-            state
-                .ui
-                .er_picker
-                .filter_input
-                .set_content("old".to_string());
+            state.ui.er_picker.insert_filter_str("old");
             state
                 .ui
                 .er_selected_tables
@@ -2153,13 +2284,13 @@ mod tests {
 
             let effects = reduce(
                 &mut state,
-                Action::OpenErTablePicker,
+                Action::OpenModal(ModalKind::ErTablePicker),
                 now,
                 &AppServices::stub(),
             );
 
             assert_eq!(state.input_mode(), InputMode::ErTablePicker);
-            assert!(state.ui.er_picker.filter_input.content().is_empty());
+            assert!(state.ui.er_picker.filter_input().content().is_empty());
             assert!(state.ui.er_selected_tables.is_empty());
             assert!(effects.is_empty());
         }
@@ -2171,7 +2302,7 @@ mod tests {
 
             let effects = reduce(
                 &mut state,
-                Action::OpenErTablePicker,
+                Action::OpenModal(ModalKind::ErTablePicker),
                 now,
                 &AppServices::stub(),
             );
@@ -2199,7 +2330,7 @@ mod tests {
         fn has_open_er_dispatch(effects: &[Effect]) -> bool {
             effects.iter().any(|e| {
                 matches!(e, Effect::DispatchActions(actions)
-                    if actions.iter().any(|a| matches!(a, Action::OpenErTablePicker)))
+                    if actions.iter().any(|a| matches!(a, Action::OpenModal(ModalKind::ErTablePicker))))
             })
         }
 
@@ -2260,22 +2391,18 @@ mod tests {
             let mut state = state_with_metadata();
             state.modal.set_mode(InputMode::ErTablePicker);
 
-            state
-                .ui
-                .er_picker
-                .filter_input
-                .set_content("test".to_string());
+            state.ui.er_picker.insert_filter_str("test");
             let now = Instant::now();
 
             let effects = reduce(
                 &mut state,
-                Action::CloseErTablePicker,
+                Action::CloseModal(ModalKind::ErTablePicker),
                 now,
                 &AppServices::stub(),
             );
 
             assert_eq!(state.input_mode(), InputMode::Normal);
-            assert!(state.ui.er_picker.filter_input.content().is_empty());
+            assert!(state.ui.er_picker.filter_input().content().is_empty());
             assert!(effects.is_empty());
         }
 
@@ -2345,7 +2472,7 @@ mod tests {
 
         #[test]
         fn prefetch_complete_dispatches_er_generate() {
-            use crate::app::model::er_state::ErStatus;
+            use crate::model::er_state::ErStatus;
 
             let mut state = state_with_metadata();
             state.sql_modal.begin_prefetch();
@@ -2377,7 +2504,7 @@ mod tests {
 
         #[test]
         fn prefetch_complete_with_failures_does_not_auto_open() {
-            use crate::app::model::er_state::ErStatus;
+            use crate::model::er_state::ErStatus;
 
             let mut state = state_with_metadata();
             state.sql_modal.begin_prefetch();
@@ -2415,8 +2542,8 @@ mod tests {
 
     mod pagination_integration {
         use super::*;
-        use crate::app::model::browse::query_execution::PREVIEW_PAGE_SIZE;
         use crate::domain::{DatabaseMetadata, QueryResult, QuerySource, TableSummary};
+        use crate::model::browse::query_execution::PREVIEW_PAGE_SIZE;
         use std::sync::Arc;
 
         fn state_after_confirm_and_complete() -> (AppState, Instant) {
@@ -2538,7 +2665,7 @@ mod tests {
 
     mod command_palette {
         use super::*;
-        use crate::app::update::input::palette::palette_commands;
+        use crate::update::input::palette::palette_commands;
         use rstest::rstest;
 
         fn state_in_palette_mode() -> AppState {
@@ -2556,17 +2683,24 @@ mod tests {
                 .expect("action must exist in palette")
         }
 
+        fn same_palette_action(left: &Action, right: &Action) -> bool {
+            match (left, right) {
+                (Action::OpenModal(a), Action::OpenModal(b))
+                | (Action::CloseModal(a), Action::CloseModal(b))
+                | (Action::ToggleModal(a), Action::ToggleModal(b)) => a == b,
+                _ => std::mem::discriminant(left) == std::mem::discriminant(right),
+            }
+        }
+
         #[rstest]
-        #[case(Action::OpenHelp, InputMode::Help)]
-        #[case(Action::OpenTablePicker, InputMode::TablePicker)]
-        #[case(Action::OpenSqlModal, InputMode::SqlModal)]
+        #[case(Action::ToggleModal(ModalKind::Help), InputMode::Help)]
+        #[case(Action::OpenModal(ModalKind::TablePicker), InputMode::TablePicker)]
+        #[case(Action::OpenModal(ModalKind::SqlModal), InputMode::SqlModal)]
         fn confirm_selection_applies_sub_action(
             #[case] target_action: Action,
             #[case] expected_mode: InputMode,
         ) {
-            let entry_index = palette_index_of(|a| {
-                std::mem::discriminant(a) == std::mem::discriminant(&target_action)
-            });
+            let entry_index = palette_index_of(|a| same_palette_action(a, &target_action));
 
             let mut state = state_in_palette_mode();
             state.ui.table_picker.set_selection(entry_index);
@@ -2606,7 +2740,8 @@ mod tests {
 
         #[test]
         fn confirm_selection_open_connection_selector_closes_palette() {
-            let entry_index = palette_index_of(|a| matches!(a, Action::OpenConnectionSelector));
+            let entry_index =
+                palette_index_of(|a| matches!(a, Action::OpenModal(ModalKind::ConnectionSelector)));
 
             let mut state = state_in_palette_mode();
             state.ui.table_picker.set_selection(entry_index);
@@ -2633,7 +2768,7 @@ mod tests {
         #[test]
         fn yank_pending_reset_on_non_yank_action() {
             let mut state = create_test_state();
-            state.result_interaction.yank_op_pending = true;
+            state.result_interaction.start_yank_operator();
             let now = Instant::now();
 
             reduce(
@@ -2643,7 +2778,7 @@ mod tests {
                 &AppServices::stub(),
             );
 
-            assert!(!state.result_interaction.yank_op_pending);
+            assert!(!state.result_interaction.is_yank_operator_pending());
         }
 
         #[test]
@@ -2659,8 +2794,8 @@ mod tests {
                 now,
                 &AppServices::stub(),
             );
-            assert!(state.result_interaction.yank_op_pending);
-            assert!(!state.result_interaction.delete_op_pending);
+            assert!(state.result_interaction.is_yank_operator_pending());
+            assert!(!state.result_interaction.is_delete_operator_pending());
 
             reduce(
                 &mut state,
@@ -2668,8 +2803,34 @@ mod tests {
                 now,
                 &AppServices::stub(),
             );
-            assert!(!state.result_interaction.yank_op_pending);
-            assert!(state.result_interaction.delete_op_pending);
+            assert!(!state.result_interaction.is_yank_operator_pending());
+            assert!(state.result_interaction.is_delete_operator_pending());
+        }
+
+        #[test]
+        fn d_then_y_cancels_delete_starts_yank() {
+            let mut state = create_test_state();
+            state.ui.focused_pane = FocusedPane::Result;
+            state.result_interaction.activate_cell(0, 0);
+            let now = Instant::now();
+
+            reduce(
+                &mut state,
+                Action::ResultDeleteOperatorPending,
+                now,
+                &AppServices::stub(),
+            );
+            assert!(state.result_interaction.is_delete_operator_pending());
+            assert!(!state.result_interaction.is_yank_operator_pending());
+
+            reduce(
+                &mut state,
+                Action::ResultRowYankOperatorPending,
+                now,
+                &AppServices::stub(),
+            );
+            assert!(!state.result_interaction.is_delete_operator_pending());
+            assert!(state.result_interaction.is_yank_operator_pending());
         }
     }
 }

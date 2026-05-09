@@ -1,5 +1,5 @@
-use crate::app::ports::SqlDialect;
-use crate::infra::utils::{quote_ident_mysql, quote_literal};
+use super::{quote_ident_mysql, quote_literal};
+use crate::app::ports::outbound::SqlDialect;
 
 use super::super::MySqlAdapter;
 
@@ -12,6 +12,14 @@ fn sql_literal_or_null(value: &str) -> String {
 }
 
 impl SqlDialect for MySqlAdapter {
+    fn build_explain_sql(&self, query: &str) -> Option<String> {
+        Some(format!("EXPLAIN {query}"))
+    }
+
+    fn build_explain_analyze_sql(&self, query: &str) -> Option<String> {
+        Some(format!("EXPLAIN ANALYZE {query}"))
+    }
+
     fn build_update_sql(
         &self,
         schema: &str,
@@ -89,8 +97,8 @@ impl SqlDialect for MySqlAdapter {
 
 #[cfg(test)]
 mod tests {
-    use crate::app::ports::SqlDialect;
-    use crate::infra::adapters::mysql::MySqlAdapter;
+    use crate::adapters::mysql::MySqlAdapter;
+    use crate::app::ports::outbound::SqlDialect;
 
     mod sql_dialect_update {
         use super::*;

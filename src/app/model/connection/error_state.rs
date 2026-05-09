@@ -68,7 +68,7 @@ impl ConnectionErrorState {
     pub fn masked_details(&self) -> Option<&str> {
         self.error_info
             .as_ref()
-            .map(|info| info.masked_details.as_str())
+            .map(ConnectionErrorInfo::masked_details)
     }
 
     pub fn detail_line_count(&self) -> usize {
@@ -79,7 +79,7 @@ impl ConnectionErrorState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::model::connection::error::ConnectionErrorKind;
+    use crate::model::connection::error::ConnectionErrorKind;
 
     fn sample_error() -> ConnectionErrorInfo {
         ConnectionErrorInfo::with_kind(ConnectionErrorKind::Timeout, "connection timed out")

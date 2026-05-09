@@ -6,9 +6,11 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wra
 
 use crate::app::model::app_state::AppState;
 use crate::app::model::sql_editor::query_history::GroupedEntry;
-use crate::domain::query_history::QueryResultStatus;
-use crate::ui::primitives::molecules::render_modal;
-use crate::ui::theme::{StatusTone, ThemePalette};
+use crate::domain::query_history::{Iso8601Timestamp, QueryResultStatus};
+use crate::features::pickers::table_picker::filter_visible_width;
+use crate::primitives::atoms::text_cursor_spans;
+use crate::primitives::molecules::render_modal;
+use crate::theme::{StatusTone, ThemePalette};
 
 const TIMESTAMP_WIDTH: usize = 18;
 const STATUS_WIDTH: usize = 2;
@@ -21,7 +23,9 @@ const MONTH_ABBR: [&str; 12] = [
     "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ];
 
-fn format_short_timestamp(iso: &str) -> String {
+fn format_short_timestamp(iso: impl AsRef<str>) -> String {
+    let iso = iso.as_ref();
+
     // "2026-03-17T00:48:52Z" -> "Mar 17 00:48 UTC"
     if iso.len() < 16 {
         return iso.to_string();
@@ -63,25 +67,33 @@ fn compute_preview_height(inner_height: u16) -> u16 {
     desired.min(max_preview)
 }
 
-struct PreviewData {
-    query: String,
+struct PreviewData<'a> {
+    query: &'a str,
     result_status: QueryResultStatus,
     affected_rows: Option<u64>,
-    executed_at: String,
+    executed_at: &'a Iso8601Timestamp,
 }
 
 pub struct QueryHistoryPicker;
 
+pub struct QueryHistoryPickerRenderMetrics {
+    pub pane_height: u16,
+    pub filter_visible_width: usize,
+}
+
 impl QueryHistoryPicker {
-    pub fn render(frame: &mut Frame, state: &AppState, theme: &ThemePalette) -> u16 {
-        let filter_is_empty = state.query_history_picker.filter_input.content().is_empty();
-        let filter_content = state
+    pub fn render(
+        frame: &mut Frame,
+        state: &AppState,
+        theme: &ThemePalette,
+    ) -> QueryHistoryPickerRenderMetrics {
+        let filter_is_empty = state
             .query_history_picker
-            .filter_input
+            .filter_input()
             .content()
-            .to_string();
-        let scroll_offset = state.query_history_picker.scroll_offset;
-        let raw_selected = state.query_history_picker.selected;
+            .is_empty();
+        let scroll_offset = state.query_history_picker.scroll_offset();
+        let raw_selected = state.query_history_picker.selected();
 
         let grouped = state.query_history_picker.grouped_filtered_entries();
         let grouped_count = grouped.len();
@@ -129,26 +141,29 @@ impl QueryHistoryPicker {
             (filter_area, list_area, None)
         };
         let (filter_area, list_area, preview_area) = areas;
+        let raw_width = filter_area.width.saturating_sub(4) as usize;
 
-        let filter_line = if filter_content.is_empty() {
+        let input = state.query_history_picker.filter_input();
+        let visible_width = filter_visible_width(raw_width, input.cursor(), input.char_count());
+        let filter_line = if input.content().is_empty() {
             Line::from(Span::styled(
                 "  type to filter",
                 Style::default().fg(theme.semantic.text.placeholder),
             ))
         } else {
-            Line::from(vec![
-                Span::styled("  > ", Style::default().fg(theme.component.modal.title)),
-                Span::styled(
-                    filter_content,
-                    Style::default().fg(theme.semantic.text.primary),
-                ),
-                Span::styled(
-                    "\u{2588}",
-                    Style::default()
-                        .fg(theme.semantic.cursor.fg)
-                        .add_modifier(Modifier::SLOW_BLINK),
-                ),
-            ])
+            let cursor_spans = text_cursor_spans(
+                input.content(),
+                input.cursor(),
+                input.viewport_offset(),
+                visible_width,
+                theme,
+            );
+            let mut spans = vec![Span::styled(
+                "  > ",
+                Style::default().fg(theme.component.modal.title),
+            )];
+            spans.extend(cursor_spans);
+            Line::from(spans)
         };
         frame.render_widget(Paragraph::new(filter_line), filter_area);
 
@@ -167,17 +182,20 @@ impl QueryHistoryPicker {
             if let Some(pa) = preview_area {
                 render_empty_preview(frame, pa, theme);
             }
-            return list_area.height;
+            return QueryHistoryPickerRenderMetrics {
+                pane_height: list_area.height,
+                filter_visible_width: visible_width,
+            };
         }
 
         let available_width = list_area.width as usize;
         let query_max = available_width.saturating_sub(STATUS_WIDTH + TIMESTAMP_WIDTH + 4);
 
         let preview_data = grouped.get(selected_idx).map(|ge| PreviewData {
-            query: ge.entry.query.clone(),
+            query: ge.entry.query.as_str(),
             result_status: ge.entry.result_status,
             affected_rows: ge.entry.affected_rows,
-            executed_at: ge.entry.executed_at.as_str().to_string(),
+            executed_at: &ge.entry.executed_at,
         });
 
         let items: Vec<ListItem> = grouped
@@ -186,7 +204,6 @@ impl QueryHistoryPicker {
             .map(|(i, ge)| build_list_item(ge, i, selected_idx, query_max, theme))
             .collect();
 
-        drop(grouped);
         if let Some(pa) = preview_area {
             if let Some(ref pd) = preview_data {
                 render_preview(frame, pa, pd, theme);
@@ -194,6 +211,7 @@ impl QueryHistoryPicker {
                 render_empty_preview(frame, pa, theme);
             }
         }
+        drop(grouped);
 
         let list = List::new(items)
             .highlight_style(theme.picker_selected_style())
@@ -203,7 +221,10 @@ impl QueryHistoryPicker {
             .with_selected(Some(selected_idx))
             .with_offset(scroll_offset);
         frame.render_stateful_widget(list, list_area, &mut list_state);
-        list_area.height
+        QueryHistoryPickerRenderMetrics {
+            pane_height: list_area.height,
+            filter_visible_width: visible_width,
+        }
     }
 }
 
@@ -223,7 +244,7 @@ fn build_list_item(
         query_display
     };
 
-    let ts_short = format_short_timestamp(ge.entry.executed_at.as_str());
+    let ts_short = format_short_timestamp(&ge.entry.executed_at);
 
     let mut spans = vec![status_span(ge.entry.result_status, theme)];
 
@@ -318,7 +339,7 @@ fn render_preview(
         ));
     }
     meta_spans.push(Span::styled(
-        format!("  \u{2502} {}", format_short_timestamp(&pd.executed_at)),
+        format!("  \u{2502} {}", format_short_timestamp(pd.executed_at)),
         Style::default().fg(theme.semantic.text.dim),
     ));
     lines.push(Line::from(meta_spans));

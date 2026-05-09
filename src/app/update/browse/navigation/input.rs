@@ -1,32 +1,18 @@
-use crate::app::cmd::effect::Effect;
-use crate::app::model::app_state::AppState;
-use crate::app::model::shared::input_mode::InputMode;
-use crate::app::update::action::{Action, InputTarget, ListMotion, ListTarget};
-use crate::app::update::input::palette::palette_command_count;
+use crate::cmd::effect::Effect;
+use crate::model::app_state::AppState;
+use crate::model::shared::input_mode::InputMode;
+use crate::update::action::{Action, InputTarget, ListMotion, ListTarget};
+use crate::update::input::palette::palette_command_count;
 
 pub fn reduce(state: &mut AppState, action: &Action) -> Option<Vec<Effect>> {
     match action {
         Action::Paste(text) => match state.modal.active_mode() {
             InputMode::TablePicker => {
-                let clean: String = text.chars().filter(|c| *c != '\n' && *c != '\r').collect();
-                state.ui.table_picker.filter_input.insert_str(&clean);
-                state
-                    .ui
-                    .table_picker
-                    .filter_input
-                    .update_viewport(state.ui.table_picker.filter_visible_width);
-                state.ui.table_picker.reset();
+                state.ui.table_picker.insert_filter_str(text);
                 Some(vec![])
             }
             InputMode::ErTablePicker => {
-                let clean: String = text.chars().filter(|c| *c != '\n' && *c != '\r').collect();
-                state.ui.er_picker.filter_input.insert_str(&clean);
-                state
-                    .ui
-                    .er_picker
-                    .filter_input
-                    .update_viewport(state.ui.er_picker.filter_visible_width);
-                state.ui.er_picker.reset();
+                state.ui.er_picker.insert_filter_str(text);
                 Some(vec![])
             }
             InputMode::CommandLine => {
@@ -46,10 +32,7 @@ pub fn reduce(state: &mut AppState, action: &Action) -> Option<Vec<Effect>> {
                 Some(vec![])
             }
             InputMode::QueryHistoryPicker => {
-                let clean: String = text.chars().filter(|c| *c != '\n' && *c != '\r').collect();
-                state.query_history_picker.filter_input.insert_str(&clean);
-                state.query_history_picker.selected = 0;
-                state.query_history_picker.scroll_offset = 0;
+                state.query_history_picker.insert_filter_str(text);
                 Some(vec![])
             }
             _ => None,
@@ -59,37 +42,20 @@ pub fn reduce(state: &mut AppState, action: &Action) -> Option<Vec<Effect>> {
             target: InputTarget::Filter,
             ch: c,
         } => {
-            state.ui.table_picker.filter_input.insert_char(*c);
-            state
-                .ui
-                .table_picker
-                .filter_input
-                .update_viewport(state.ui.table_picker.filter_visible_width);
-            state.ui.table_picker.reset();
+            state.ui.table_picker.insert_filter_char(*c);
             Some(vec![])
         }
         Action::TextBackspace {
             target: InputTarget::Filter,
         } => {
-            state.ui.table_picker.filter_input.backspace();
-            state
-                .ui
-                .table_picker
-                .filter_input
-                .update_viewport(state.ui.table_picker.filter_visible_width);
-            state.ui.table_picker.reset();
+            state.ui.table_picker.backspace_filter();
             Some(vec![])
         }
         Action::TextMoveCursor {
             target: InputTarget::Filter,
             direction: movement,
         } => {
-            state.ui.table_picker.filter_input.move_cursor(*movement);
-            state
-                .ui
-                .table_picker
-                .filter_input
-                .update_viewport(state.ui.table_picker.filter_visible_width);
+            state.ui.table_picker.move_filter_cursor(*movement);
             Some(vec![])
         }
 
@@ -202,8 +168,8 @@ pub fn reduce(state: &mut AppState, action: &Action) -> Option<Vec<Effect>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::services::AppServices;
-    use crate::app::update::browse::navigation::reduce_navigation;
+    use crate::services::AppServices;
+    use crate::update::browse::navigation::reduce_navigation;
     use std::time::Instant;
 
     mod paste {
@@ -222,7 +188,7 @@ mod tests {
             );
 
             assert!(effects.is_some());
-            assert_eq!(state.ui.table_picker.filter_input.content(), "hello");
+            assert_eq!(state.ui.table_picker.filter_input().content(), "hello");
         }
 
         #[test]
@@ -237,7 +203,7 @@ mod tests {
                 Instant::now(),
             );
 
-            assert_eq!(state.ui.table_picker.filter_input.content(), "hello");
+            assert_eq!(state.ui.table_picker.filter_input().content(), "hello");
         }
 
         #[test]
@@ -314,7 +280,7 @@ mod tests {
             );
 
             assert!(effects.is_some());
-            assert_eq!(state.ui.er_picker.filter_input.content(), "public.users");
+            assert_eq!(state.ui.er_picker.filter_input().content(), "public.users");
             assert_eq!(state.ui.er_picker.selected(), 0);
         }
 
@@ -330,14 +296,14 @@ mod tests {
                 Instant::now(),
             );
 
-            assert_eq!(state.ui.er_picker.filter_input.content(), "public.users");
+            assert_eq!(state.ui.er_picker.filter_input().content(), "public.users");
         }
 
         #[test]
         fn query_history_picker_appends_to_filter() {
             let mut state = AppState::new("test".to_string());
             state.modal.set_mode(InputMode::QueryHistoryPicker);
-            state.query_history_picker.selected = 3;
+            state.query_history_picker.set_selection_for_test(3);
 
             let effects = reduce_navigation(
                 &mut state,
@@ -347,8 +313,8 @@ mod tests {
             );
 
             assert!(effects.is_some());
-            assert_eq!(state.query_history_picker.filter_input.content(), "users");
-            assert_eq!(state.query_history_picker.selected, 0);
+            assert_eq!(state.query_history_picker.filter_input().content(), "users");
+            assert_eq!(state.query_history_picker.selected(), 0);
         }
 
         #[test]
@@ -363,7 +329,7 @@ mod tests {
                 Instant::now(),
             );
 
-            assert_eq!(state.query_history_picker.filter_input.content(), "users");
+            assert_eq!(state.query_history_picker.filter_input().content(), "users");
         }
     }
 

@@ -1,8 +1,10 @@
 use std::time::Instant;
 
-use crate::app::cmd::effect::Effect;
-use crate::app::model::app_state::AppState;
-use crate::app::update::action::Action;
+use crate::cmd::effect::Effect;
+#[cfg(test)]
+use crate::domain::ColumnAttributes;
+use crate::model::app_state::AppState;
+use crate::update::action::Action;
 
 use super::scroll::{result_col_count, result_row_count};
 
@@ -55,7 +57,7 @@ pub fn reduce(state: &mut AppState, action: &Action, now: Instant) -> Option<Vec
             Some(vec![])
         }
         Action::ResultDeleteOperatorPending => {
-            state.result_interaction.delete_op_pending = true;
+            state.result_interaction.start_delete_operator();
             Some(vec![])
         }
         Action::StageRowForDelete => {
@@ -128,10 +130,8 @@ mod tests {
                 columns: vec![Column {
                     name: "id".to_string(),
                     data_type: "integer".to_string(),
-                    nullable: false,
                     default: None,
-                    is_primary_key: true,
-                    is_unique: true,
+                    attributes: ColumnAttributes::PRIMARY_KEY | ColumnAttributes::UNIQUE,
                     comment: None,
                     ordinal_position: 1,
                 }],

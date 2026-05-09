@@ -1,12 +1,12 @@
-use crate::app::ports::DbOperationError;
+use crate::app::ports::outbound::DbOperationError;
 use crate::domain::{
-    Column, FkAction, ForeignKey, Index, IndexType, RlsCommand, RlsInfo, RlsPolicy, Schema,
-    TableSignature, TableSummary, Trigger, TriggerEvent, TriggerTiming,
+    Column, ColumnAttributes, FkAction, ForeignKey, Index, IndexAttributes, IndexType, RlsCommand,
+    RlsInfo, RlsPolicy, Schema, TableSignature, TableSummary, Trigger, TriggerEvent, TriggerTiming,
 };
 
 use super::super::super::PostgresAdapter;
 
-pub(in crate::infra::adapters::postgres) type TableDetailCombined = (
+pub(in crate::adapters::postgres) type TableDetailCombined = (
     Vec<Column>,
     Vec<Index>,
     Vec<ForeignKey>,
@@ -14,6 +14,24 @@ pub(in crate::infra::adapters::postgres) type TableDetailCombined = (
     Vec<Trigger>,
     TableInfo,
 );
+
+#[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
+enum MetadataParseError {
+    #[error("foreign key action parse failed: {0}")]
+    ForeignKeyAction(String),
+    #[error("RLS command parse failed: {0}")]
+    RlsCommand(String),
+    #[error("trigger timing parse failed: {0}")]
+    TriggerTiming(String),
+    #[error("trigger event parse failed: {0}")]
+    TriggerEvent(String),
+}
+
+impl From<MetadataParseError> for DbOperationError {
+    fn from(error: MetadataParseError) -> Self {
+        Self::MetadataParseFailed(error.to_string())
+    }
+}
 
 fn non_empty_json(raw: &str) -> Option<&str> {
     let trimmed = raw.trim();
@@ -24,14 +42,14 @@ fn non_empty_json(raw: &str) -> Option<&str> {
     }
 }
 
-pub(in crate::infra::adapters::postgres) struct TableInfo {
+pub(in crate::adapters::postgres) struct TableInfo {
     pub owner: Option<String>,
     pub comment: Option<String>,
     pub row_count_estimate: Option<i64>,
 }
 
 impl PostgresAdapter {
-    pub(in crate::infra::adapters::postgres) fn parse_table_info(
+    pub(in crate::adapters::postgres) fn parse_table_info(
         json: &str,
     ) -> Result<TableInfo, DbOperationError> {
         let Some(trimmed) = non_empty_json(json) else {
@@ -49,8 +67,7 @@ impl PostgresAdapter {
             row_count_estimate: Option<i64>,
         }
 
-        let raw: RawTableInfo = serde_json::from_str(trimmed)
-            .map_err(|e| DbOperationError::InvalidJson(e.to_string()))?;
+        let raw: RawTableInfo = serde_json::from_str(trimmed)?;
 
         // PostgreSQL returns reltuples = -1 when VACUUM/ANALYZE has never run
         let row_count = raw.row_count_estimate.filter(|&n| n >= 0);
@@ -62,7 +79,7 @@ impl PostgresAdapter {
         })
     }
 
-    pub(in crate::infra::adapters::postgres) fn parse_tables(
+    pub(in crate::adapters::postgres) fn parse_tables(
         json: &str,
     ) -> Result<Vec<TableSummary>, DbOperationError> {
         let Some(trimmed) = non_empty_json(json) else {
@@ -77,8 +94,7 @@ impl PostgresAdapter {
             has_rls: bool,
         }
 
-        let raw: Vec<RawTable> = serde_json::from_str(trimmed)
-            .map_err(|e| DbOperationError::InvalidJson(e.to_string()))?;
+        let raw: Vec<RawTable> = serde_json::from_str(trimmed)?;
 
         Ok(raw
             .into_iter()
@@ -86,7 +102,7 @@ impl PostgresAdapter {
             .collect())
     }
 
-    pub(in crate::infra::adapters::postgres) fn parse_table_signatures(
+    pub(in crate::adapters::postgres) fn parse_table_signatures(
         json: &str,
     ) -> Result<Vec<TableSignature>, DbOperationError> {
         let Some(trimmed) = non_empty_json(json) else {
@@ -100,8 +116,7 @@ impl PostgresAdapter {
             signature: String,
         }
 
-        let raw: Vec<RawTableSignature> = serde_json::from_str(trimmed)
-            .map_err(|e| DbOperationError::InvalidJson(e.to_string()))?;
+        let raw: Vec<RawTableSignature> = serde_json::from_str(trimmed)?;
 
         Ok(raw
             .into_iter()
@@ -113,7 +128,7 @@ impl PostgresAdapter {
             .collect())
     }
 
-    pub(in crate::infra::adapters::postgres) fn parse_schemas(
+    pub(in crate::adapters::postgres) fn parse_schemas(
         json: &str,
     ) -> Result<Vec<Schema>, DbOperationError> {
         let Some(trimmed) = non_empty_json(json) else {
@@ -125,13 +140,12 @@ impl PostgresAdapter {
             name: String,
         }
 
-        let raw: Vec<RawSchema> = serde_json::from_str(trimmed)
-            .map_err(|e| DbOperationError::InvalidJson(e.to_string()))?;
+        let raw: Vec<RawSchema> = serde_json::from_str(trimmed)?;
 
         Ok(raw.into_iter().map(|s| Schema::new(s.name)).collect())
     }
 
-    pub(in crate::infra::adapters::postgres) fn parse_columns(
+    pub(in crate::adapters::postgres) fn parse_columns(
         json: &str,
     ) -> Result<Vec<Column>, DbOperationError> {
         let Some(trimmed) = non_empty_json(json) else {
@@ -150,25 +164,22 @@ impl PostgresAdapter {
             ordinal_position: i32,
         }
 
-        let raw: Vec<RawColumn> = serde_json::from_str(trimmed)
-            .map_err(|e| DbOperationError::InvalidJson(e.to_string()))?;
+        let raw: Vec<RawColumn> = serde_json::from_str(trimmed)?;
 
         Ok(raw
             .into_iter()
             .map(|c| Column {
                 name: c.name,
                 data_type: c.data_type,
-                nullable: c.nullable,
                 default: c.default,
-                is_primary_key: c.is_primary_key,
-                is_unique: c.is_unique,
+                attributes: ColumnAttributes::from_parts(c.nullable, c.is_primary_key, c.is_unique),
                 comment: c.comment,
                 ordinal_position: c.ordinal_position,
             })
             .collect())
     }
 
-    pub(in crate::infra::adapters::postgres) fn parse_indexes(
+    pub(in crate::adapters::postgres) fn parse_indexes(
         json: &str,
     ) -> Result<Vec<Index>, DbOperationError> {
         let Some(trimmed) = non_empty_json(json) else {
@@ -185,30 +196,24 @@ impl PostgresAdapter {
             definition: Option<String>,
         }
 
-        let raw: Vec<RawIndex> = serde_json::from_str(trimmed)
-            .map_err(|e| DbOperationError::InvalidJson(e.to_string()))?;
+        let raw: Vec<RawIndex> = serde_json::from_str(trimmed)?;
 
         Ok(raw
             .into_iter()
             .map(|i| Index {
                 name: i.name,
                 columns: i.columns,
-                is_unique: i.is_unique,
-                is_primary: i.is_primary,
-                index_type: match i.index_type.as_str() {
-                    "btree" => IndexType::BTree,
-                    "hash" => IndexType::Hash,
-                    "gist" => IndexType::Gist,
-                    "gin" => IndexType::Gin,
-                    "brin" => IndexType::Brin,
-                    other => IndexType::Other(other.to_string()),
+                attributes: IndexAttributes::from_parts(i.is_unique, i.is_primary),
+                index_type: match i.index_type.parse::<IndexType>() {
+                    Ok(index_type) => index_type,
+                    Err(never) => match never {},
                 },
                 definition: i.definition,
             })
             .collect())
     }
 
-    pub(in crate::infra::adapters::postgres) fn parse_foreign_keys(
+    pub(in crate::adapters::postgres) fn parse_foreign_keys(
         json: &str,
     ) -> Result<Vec<ForeignKey>, DbOperationError> {
         let Some(trimmed) = non_empty_json(json) else {
@@ -228,36 +233,35 @@ impl PostgresAdapter {
             on_update: String,
         }
 
-        fn parse_fk_action(code: &str) -> FkAction {
-            match code {
-                "r" => FkAction::Restrict,
-                "c" => FkAction::Cascade,
-                "n" => FkAction::SetNull,
-                "d" => FkAction::SetDefault,
-                _ => FkAction::NoAction,
-            }
-        }
+        let raw: Vec<RawForeignKey> = serde_json::from_str(trimmed)?;
 
-        let raw: Vec<RawForeignKey> = serde_json::from_str(trimmed)
-            .map_err(|e| DbOperationError::InvalidJson(e.to_string()))?;
-
-        Ok(raw
-            .into_iter()
-            .map(|fk| ForeignKey {
-                name: fk.name,
-                from_schema: fk.from_schema,
-                from_table: fk.from_table,
-                from_columns: fk.from_columns,
-                to_schema: fk.to_schema,
-                to_table: fk.to_table,
-                to_columns: fk.to_columns,
-                on_delete: parse_fk_action(&fk.on_delete),
-                on_update: parse_fk_action(&fk.on_update),
+        raw.into_iter()
+            .map(|fk| {
+                let on_delete = fk
+                    .on_delete
+                    .parse::<FkAction>()
+                    .map_err(|error| MetadataParseError::ForeignKeyAction(error.to_string()))?;
+                let on_update = fk
+                    .on_update
+                    .parse::<FkAction>()
+                    .map_err(|error| MetadataParseError::ForeignKeyAction(error.to_string()))?;
+                Ok(ForeignKey {
+                    name: fk.name,
+                    from_schema: fk.from_schema,
+                    from_table: fk.from_table,
+                    from_columns: fk.from_columns,
+                    to_schema: fk.to_schema,
+                    to_table: fk.to_table,
+                    to_columns: fk.to_columns,
+                    on_delete,
+                    on_update,
+                })
             })
-            .collect())
+            .collect::<Result<Vec<_>, MetadataParseError>>()
+            .map_err(DbOperationError::from)
     }
 
-    pub(in crate::infra::adapters::postgres) fn parse_rls(
+    pub(in crate::adapters::postgres) fn parse_rls(
         json: &str,
     ) -> Result<Option<RlsInfo>, DbOperationError> {
         let Some(trimmed) = non_empty_json(json) else {
@@ -281,27 +285,27 @@ impl PostgresAdapter {
             with_check: Option<String>,
         }
 
-        let raw: RawRls = serde_json::from_str(trimmed)
-            .map_err(|e| DbOperationError::InvalidJson(e.to_string()))?;
+        let raw: RawRls = serde_json::from_str(trimmed)?;
 
         let policies = raw
             .policies
             .into_iter()
-            .map(|p| RlsPolicy {
-                name: p.name,
-                permissive: p.permissive,
-                roles: p.roles.unwrap_or_default(),
-                cmd: match p.cmd.as_str() {
-                    "r" => RlsCommand::Select,
-                    "a" => RlsCommand::Insert,
-                    "w" => RlsCommand::Update,
-                    "d" => RlsCommand::Delete,
-                    _ => RlsCommand::All,
-                },
-                qual: p.qual,
-                with_check: p.with_check,
+            .map(|p| {
+                let cmd = p
+                    .cmd
+                    .parse::<RlsCommand>()
+                    .map_err(|error| MetadataParseError::RlsCommand(error.to_string()))?;
+                Ok(RlsPolicy {
+                    name: p.name,
+                    permissive: p.permissive,
+                    roles: p.roles.unwrap_or_default(),
+                    cmd,
+                    qual: p.qual,
+                    with_check: p.with_check,
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, MetadataParseError>>()
+            .map_err(DbOperationError::from)?;
 
         Ok(Some(RlsInfo {
             enabled: raw.enabled,
@@ -310,7 +314,7 @@ impl PostgresAdapter {
         }))
     }
 
-    pub(in crate::infra::adapters::postgres) fn parse_triggers(
+    pub(in crate::adapters::postgres) fn parse_triggers(
         json: &str,
     ) -> Result<Vec<Trigger>, DbOperationError> {
         let Some(trimmed) = non_empty_json(json) else {
@@ -326,41 +330,41 @@ impl PostgresAdapter {
             security_definer: bool,
         }
 
-        let raw: Vec<RawTrigger> = serde_json::from_str(trimmed)
-            .map_err(|e| DbOperationError::InvalidJson(e.to_string()))?;
+        let raw: Vec<RawTrigger> = serde_json::from_str(trimmed)?;
 
-        Ok(raw
-            .into_iter()
-            .map(|t| Trigger {
-                name: t.name,
-                timing: match t.timing.as_str() {
-                    "BEFORE" => TriggerTiming::Before,
-                    "INSTEAD OF" => TriggerTiming::InsteadOf,
-                    _ => TriggerTiming::After,
-                },
-                events: t
+        raw.into_iter()
+            .map(|t| {
+                let timing = t
+                    .timing
+                    .parse::<TriggerTiming>()
+                    .map_err(|error| MetadataParseError::TriggerTiming(error.to_string()))?;
+                let events = t
                     .events
-                    .iter()
-                    .filter_map(|e| match e.as_str() {
-                        "INSERT" => Some(TriggerEvent::Insert),
-                        "UPDATE" => Some(TriggerEvent::Update),
-                        "DELETE" => Some(TriggerEvent::Delete),
-                        "TRUNCATE" => Some(TriggerEvent::Truncate),
-                        _ => None,
+                    .into_iter()
+                    .map(|event| {
+                        event
+                            .parse::<TriggerEvent>()
+                            .map_err(|error| MetadataParseError::TriggerEvent(error.to_string()))
                     })
-                    .collect(),
-                function_name: t.function_name,
-                security_definer: t.security_definer,
+                    .collect::<Result<Vec<_>, MetadataParseError>>()?;
+                Ok(Trigger {
+                    name: t.name,
+                    timing,
+                    events,
+                    function_name: t.function_name,
+                    security_definer: t.security_definer,
+                })
             })
-            .collect())
+            .collect::<Result<Vec<_>, MetadataParseError>>()
+            .map_err(DbOperationError::from)
     }
 
-    pub(in crate::infra::adapters::postgres) fn parse_table_detail_combined(
+    pub(in crate::adapters::postgres) fn parse_table_detail_combined(
         json: &str,
     ) -> Result<TableDetailCombined, DbOperationError> {
         let Some(trimmed) = non_empty_json(json) else {
-            return Err(DbOperationError::InvalidJson(
-                "table_detail_combined: empty response".to_string(),
+            return Err(DbOperationError::EmptyResponse(
+                "table_detail_combined".to_string(),
             ));
         };
 
@@ -375,8 +379,7 @@ impl PostgresAdapter {
             table_info: serde_json::Value,
         }
 
-        let combined: CombinedDetail = serde_json::from_str(trimmed)
-            .map_err(|e| DbOperationError::InvalidJson(e.to_string()))?;
+        let combined: CombinedDetail = serde_json::from_str(trimmed)?;
 
         let columns = Self::parse_columns(&combined.columns.to_string())?;
         let indexes = Self::parse_indexes(&combined.indexes.to_string())?;
@@ -388,12 +391,12 @@ impl PostgresAdapter {
         Ok((columns, indexes, foreign_keys, rls, triggers, table_info))
     }
 
-    pub(in crate::infra::adapters::postgres) fn parse_table_columns_and_fks(
+    pub(in crate::adapters::postgres) fn parse_table_columns_and_fks(
         json: &str,
     ) -> Result<(Vec<Column>, Vec<ForeignKey>), DbOperationError> {
         let Some(trimmed) = non_empty_json(json) else {
-            return Err(DbOperationError::InvalidJson(
-                "table_columns_and_fks: empty response".to_string(),
+            return Err(DbOperationError::EmptyResponse(
+                "table_columns_and_fks".to_string(),
             ));
         };
 
@@ -404,8 +407,7 @@ impl PostgresAdapter {
             foreign_keys: serde_json::Value,
         }
 
-        let light: LightDetail = serde_json::from_str(trimmed)
-            .map_err(|e| DbOperationError::InvalidJson(e.to_string()))?;
+        let light: LightDetail = serde_json::from_str(trimmed)?;
 
         let columns = Self::parse_columns(&light.columns.to_string())?;
         let foreign_keys = Self::parse_foreign_keys(&light.foreign_keys.to_string())?;
@@ -416,8 +418,8 @@ impl PostgresAdapter {
 
 #[cfg(test)]
 mod tests {
-    use crate::app::ports::DbOperationError;
-    use crate::infra::adapters::postgres::PostgresAdapter;
+    use crate::adapters::postgres::PostgresAdapter;
+    use crate::app::ports::outbound::DbOperationError;
 
     mod table_signature_parsing {
         use super::*;
@@ -553,7 +555,6 @@ mod tests {
         #[case("a", RlsCommand::Insert)]
         #[case("w", RlsCommand::Update)]
         #[case("d", RlsCommand::Delete)]
-        #[case("x", RlsCommand::All)] // unknown defaults to All
         fn cmd_code_maps_to_rls_command(#[case] cmd: &str, #[case] expected: RlsCommand) {
             let json = format!(
                 r#"{{"enabled": true, "force": false, "policies": [{{
@@ -566,6 +567,29 @@ mod tests {
             let rls = result.unwrap();
 
             assert_eq!(rls.policies[0].cmd, expected);
+        }
+
+        #[test]
+        fn unknown_command_returns_metadata_parse_error() {
+            let json = r#"{
+                "enabled": true,
+                "force": false,
+                "policies": [{
+                    "name": "test",
+                    "permissive": true,
+                    "roles": null,
+                    "cmd": "x",
+                    "qual": null,
+                    "with_check": null
+                }]
+            }"#;
+
+            let result = PostgresAdapter::parse_rls(json);
+
+            assert!(matches!(
+                result,
+                Err(DbOperationError::MetadataParseFailed(_))
+            ));
         }
 
         #[test]
@@ -593,6 +617,7 @@ mod tests {
 
     mod json_parse_errors {
         use super::*;
+        use crate::domain::IndexType;
 
         #[test]
         fn parse_tables_with_malformed_json_returns_error() {
@@ -619,6 +644,25 @@ mod tests {
                 r#"[{"name": "idx_test", "columns": "id", "unique": false, "primary": false}]"#;
             let result = PostgresAdapter::parse_indexes(json);
             assert!(matches!(result, Err(DbOperationError::InvalidJson(_))));
+        }
+
+        #[test]
+        fn parse_indexes_with_unknown_access_method_preserves_other() {
+            let json = r#"[{
+                "name": "idx_custom",
+                "columns": ["id"],
+                "is_unique": false,
+                "is_primary": false,
+                "index_type": "ivfflat",
+                "definition": null
+            }]"#;
+
+            let result = PostgresAdapter::parse_indexes(json).unwrap();
+
+            assert_eq!(
+                result[0].index_type,
+                IndexType::Other("ivfflat".to_string())
+            );
         }
 
         #[test]
@@ -740,7 +784,6 @@ mod tests {
         #[case("BEFORE", TriggerTiming::Before)]
         #[case("AFTER", TriggerTiming::After)]
         #[case("INSTEAD OF", TriggerTiming::InsteadOf)]
-        #[case("UNKNOWN", TriggerTiming::After)] // unknown defaults to After
         fn timing_code_maps_to_trigger_timing(
             #[case] timing: &str,
             #[case] expected: TriggerTiming,
@@ -754,6 +797,24 @@ mod tests {
 
             let result = PostgresAdapter::parse_triggers(&json).unwrap();
             assert_eq!(result[0].timing, expected);
+        }
+
+        #[test]
+        fn unknown_timing_returns_metadata_parse_error() {
+            let json = r#"[{
+                "name": "test",
+                "timing": "UNKNOWN",
+                "events": ["INSERT"],
+                "function_name": "func",
+                "security_definer": false
+            }]"#;
+
+            let result = PostgresAdapter::parse_triggers(json);
+
+            assert!(matches!(
+                result,
+                Err(DbOperationError::MetadataParseFailed(_))
+            ));
         }
 
         #[test]
@@ -803,6 +864,24 @@ mod tests {
 
             let result = PostgresAdapter::parse_triggers(json).unwrap();
             assert!(!result[0].security_definer);
+        }
+
+        #[test]
+        fn unknown_event_returns_metadata_parse_error() {
+            let json = r#"[{
+                "name": "test",
+                "timing": "AFTER",
+                "events": ["INSERT", "MERGE"],
+                "function_name": "func",
+                "security_definer": false
+            }]"#;
+
+            let result = PostgresAdapter::parse_triggers(json);
+
+            assert!(matches!(
+                result,
+                Err(DbOperationError::MetadataParseFailed(_))
+            ));
         }
     }
 
@@ -916,7 +995,6 @@ mod tests {
         #[case("c", FkAction::Cascade)]
         #[case("n", FkAction::SetNull)]
         #[case("d", FkAction::SetDefault)]
-        #[case("x", FkAction::NoAction)]
         fn fk_code_maps_to_fk_action(#[case] action_code: &str, #[case] expected: FkAction) {
             let json = format!(
                 r#"[{{
@@ -934,6 +1012,28 @@ mod tests {
 
             let result = PostgresAdapter::parse_foreign_keys(&json).unwrap();
             assert_eq!(result[0].on_delete, expected);
+        }
+
+        #[test]
+        fn unknown_action_returns_metadata_parse_error() {
+            let json = r#"[{
+                "name": "test_fk",
+                "from_schema": "public",
+                "from_table": "t1",
+                "from_columns": ["id"],
+                "to_schema": "public",
+                "to_table": "t2",
+                "to_columns": ["id"],
+                "on_delete": "x",
+                "on_update": "a"
+            }]"#;
+
+            let result = PostgresAdapter::parse_foreign_keys(json);
+
+            assert!(matches!(
+                result,
+                Err(DbOperationError::MetadataParseFailed(_))
+            ));
         }
 
         #[test]
@@ -1126,13 +1226,13 @@ mod tests {
         #[test]
         fn empty_input_returns_error_for_combined_detail() {
             let result = PostgresAdapter::parse_table_detail_combined("");
-            assert!(matches!(result, Err(DbOperationError::InvalidJson(_))));
+            assert!(matches!(result, Err(DbOperationError::EmptyResponse(_))));
         }
 
         #[test]
         fn null_input_returns_error_for_combined_detail() {
             let result = PostgresAdapter::parse_table_detail_combined("null");
-            assert!(matches!(result, Err(DbOperationError::InvalidJson(_))));
+            assert!(matches!(result, Err(DbOperationError::EmptyResponse(_))));
         }
     }
 
@@ -1185,13 +1285,13 @@ mod tests {
         #[test]
         fn empty_input_returns_error_for_columns_and_fks() {
             let result = PostgresAdapter::parse_table_columns_and_fks("");
-            assert!(matches!(result, Err(DbOperationError::InvalidJson(_))));
+            assert!(matches!(result, Err(DbOperationError::EmptyResponse(_))));
         }
 
         #[test]
         fn null_input_returns_error_for_columns_and_fks() {
             let result = PostgresAdapter::parse_table_columns_and_fks("null");
-            assert!(matches!(result, Err(DbOperationError::InvalidJson(_))));
+            assert!(matches!(result, Err(DbOperationError::EmptyResponse(_))));
         }
     }
 }

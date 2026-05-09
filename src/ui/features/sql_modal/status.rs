@@ -6,8 +6,8 @@ use ratatui::widgets::Paragraph;
 
 use crate::app::model::app_state::AppState;
 use crate::app::model::sql_editor::modal::{HIGH_RISK_INPUT_VISIBLE_WIDTH, SqlModalStatus};
-use crate::ui::primitives::atoms::{spinner_char, text_cursor_spans};
-use crate::ui::theme::ThemePalette;
+use crate::primitives::atoms::{spinner_char, text_cursor_spans};
+use crate::theme::ThemePalette;
 
 pub(super) fn render_status(frame: &mut Frame, area: Rect, state: &AppState, theme: &ThemePalette) {
     if let SqlModalStatus::ConfirmingHigh {
@@ -16,7 +16,7 @@ pub(super) fn render_status(frame: &mut Frame, area: Rect, state: &AppState, the
         target_name,
     } = state.sql_modal.status()
     {
-        render_confirming_high_status(frame, area, decision, input, target_name.as_ref(), theme);
+        render_confirming_high_status(frame, area, decision, input, target_name.as_deref(), theme);
         return;
     }
 
@@ -130,7 +130,7 @@ fn render_confirming_high_status(
     area: Rect,
     decision: &crate::app::policy::write::write_guardrails::AdhocRiskDecision,
     input: &crate::app::model::shared::text_input::TextInputState,
-    target_name: Option<&String>,
+    target_name: Option<&str>,
     theme: &ThemePalette,
 ) {
     let error_style = Style::default().fg(theme.semantic.status.error);

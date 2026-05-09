@@ -4,10 +4,10 @@ mod write;
 
 use std::time::Instant;
 
-use crate::app::cmd::effect::Effect;
-use crate::app::model::app_state::AppState;
-use crate::app::services::AppServices;
-use crate::app::update::action::Action;
+use crate::cmd::effect::Effect;
+use crate::model::app_state::AppState;
+use crate::services::AppServices;
+use crate::update::action::Action;
 
 pub fn reduce_query(
     state: &mut AppState,
@@ -25,11 +25,11 @@ pub(super) mod tests {
     use std::sync::Arc;
     use std::time::Instant;
 
-    use crate::app::model::app_state::AppState;
     use crate::domain::{
-        Column, CommandTag, Index, IndexType, QueryResult, QuerySource, Table, Trigger,
-        TriggerEvent, TriggerTiming,
+        Column, ColumnAttributes, CommandTag, Index, IndexAttributes, IndexType, QueryResult,
+        QuerySource, Table, Trigger, TriggerEvent, TriggerTiming,
     };
+    use crate::model::app_state::AppState;
 
     pub fn create_test_state() -> AppState {
         let mut state = AppState::new("test_project".to_string());
@@ -89,20 +89,16 @@ pub(super) mod tests {
                 Column {
                     name: "id".to_string(),
                     data_type: "int".to_string(),
-                    nullable: false,
                     default: None,
-                    is_primary_key: true,
-                    is_unique: true,
+                    attributes: ColumnAttributes::PRIMARY_KEY | ColumnAttributes::UNIQUE,
                     comment: None,
                     ordinal_position: 1,
                 },
                 Column {
                     name: "name".to_string(),
                     data_type: "text".to_string(),
-                    nullable: true,
                     default: None,
-                    is_primary_key: false,
-                    is_unique: false,
+                    attributes: ColumnAttributes::NULLABLE,
                     comment: None,
                     ordinal_position: 2,
                 },
@@ -112,8 +108,7 @@ pub(super) mod tests {
             indexes: vec![Index {
                 name: "users_pkey".to_string(),
                 columns: vec!["id".to_string()],
-                is_unique: true,
-                is_primary: true,
+                attributes: IndexAttributes::UNIQUE | IndexAttributes::PRIMARY,
                 index_type: IndexType::BTree,
                 definition: None,
             }],
@@ -135,10 +130,8 @@ pub(super) mod tests {
         detail.columns.push(Column {
             name: "metadata".to_string(),
             data_type: "jsonb".to_string(),
-            nullable: true,
             default: None,
-            is_primary_key: false,
-            is_unique: false,
+            attributes: ColumnAttributes::NULLABLE,
             comment: None,
             ordinal_position: 3,
         });

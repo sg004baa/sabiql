@@ -1,6 +1,9 @@
 use async_trait::async_trait;
 
-use crate::app::ports::{DbOperationError, MetadataProvider, QueryExecutor};
+use crate::app::ports::outbound::{
+    DatabaseCapabilities, DatabaseCapabilityProvider, DbOperationError, InspectorFeature,
+    MetadataProvider, QueryExecutor,
+};
 use crate::domain::{
     Column, DatabaseMetadata, QueryResult, QuerySource, Table, TableSignature, WriteExecutionResult,
 };
@@ -25,7 +28,7 @@ impl MySqlAdapter {
     fn extract_primary_key(columns: &[Column]) -> Option<Vec<String>> {
         let pk_cols: Vec<String> = columns
             .iter()
-            .filter(|c| c.is_primary_key)
+            .filter(|c| c.is_primary_key())
             .map(|c| c.name.clone())
             .collect();
         if pk_cols.is_empty() {
@@ -33,6 +36,22 @@ impl MySqlAdapter {
         } else {
             Some(pk_cols)
         }
+    }
+}
+
+impl DatabaseCapabilityProvider for MySqlAdapter {
+    fn capabilities(&self) -> DatabaseCapabilities {
+        DatabaseCapabilities::new(
+            true,
+            vec![
+                InspectorFeature::Info,
+                InspectorFeature::Columns,
+                InspectorFeature::Indexes,
+                InspectorFeature::ForeignKeys,
+                InspectorFeature::Triggers,
+                InspectorFeature::Ddl,
+            ],
+        )
     }
 }
 

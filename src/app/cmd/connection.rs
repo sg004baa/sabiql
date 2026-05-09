@@ -3,16 +3,16 @@ use std::sync::Arc;
 use color_eyre::eyre::Result;
 use tokio::sync::mpsc;
 
-use crate::app::cmd::cache::TtlCache;
-use crate::app::cmd::effect::Effect;
-use crate::app::model::app_state::AppState;
-use crate::app::ports::{
-    ConnectionStore, ConnectionStoreError, DsnBuilder, MetadataProvider, ServiceFileError,
-    ServiceFileReader,
-};
-use crate::app::update::action::{Action, ConnectionTarget, ConnectionsLoadedPayload};
+use crate::cmd::cache::TtlCache;
+use crate::cmd::effect::Effect;
 use crate::domain::DatabaseMetadata;
 use crate::domain::connection::ConnectionProfile;
+use crate::model::app_state::AppState;
+use crate::ports::outbound::{
+    ConnectionStore, ConnectionStoreError, DsnBuilder, MetadataProvider, PgServiceEntryReader,
+    ServiceFileError,
+};
+use crate::update::action::{Action, ConnectionTarget, ConnectionsLoadedPayload};
 
 pub(crate) async fn run(
     effect: Effect,
@@ -21,7 +21,7 @@ pub(crate) async fn run(
     metadata_provider: &Arc<dyn MetadataProvider>,
     metadata_cache: &TtlCache<String, Arc<DatabaseMetadata>>,
     connection_store: &Arc<dyn ConnectionStore>,
-    service_file_reader: &Arc<dyn ServiceFileReader>,
+    pg_service_entry_reader: Option<&Arc<dyn PgServiceEntryReader>>,
     state: &AppState,
 ) -> Result<()> {
     match effect {
@@ -139,7 +139,7 @@ pub(crate) async fn run(
 
         Effect::LoadConnections => {
             let store = Arc::clone(connection_store);
-            let reader = Arc::clone(service_file_reader);
+            let reader = pg_service_entry_reader.cloned();
             let tx = action_tx.clone();
 
             tokio::task::spawn_blocking(move || {
@@ -148,10 +148,10 @@ pub(crate) async fn run(
                     Err(e) => (vec![], Some(e.to_string())),
                 };
                 let (services, service_file_path, service_load_warning) =
-                    match reader.read_services() {
-                        Ok((s, p)) => (s, Some(p), None),
-                        Err(ServiceFileError::NotFound(_)) => (vec![], None, None),
-                        Err(e) => (vec![], None, Some(e.to_string())),
+                    match reader.as_ref().map(|reader| reader.read_services()) {
+                        Some(Ok((s, p))) => (s, Some(p), None),
+                        Some(Err(ServiceFileError::NotFound(_))) | None => (vec![], None, None),
+                        Some(Err(e)) => (vec![], None, Some(e.to_string())),
                     };
 
                 tx.blocking_send(Action::ConnectionsLoaded(ConnectionsLoadedPayload {
@@ -219,19 +219,20 @@ mod tests {
 
     use tokio::sync::mpsc;
 
-    use crate::app::cmd::cache::TtlCache;
-    use crate::app::cmd::completion_engine::CompletionEngine;
-    use crate::app::cmd::effect::Effect;
-    use crate::app::cmd::test_support::*;
-    use crate::app::model::app_state::AppState;
-    use crate::app::ports::connection_store::MockConnectionStore;
-    use crate::app::ports::metadata::MockMetadataProvider;
-    use crate::app::ports::query_executor::MockQueryExecutor;
-    use crate::app::ports::{ConnectionStoreError, DsnBuilder, RenderOutput, Renderer};
-    use crate::app::services::AppServices;
-    use crate::app::update::action::{Action, ConnectionTarget, ConnectionsLoadedPayload};
+    use crate::cmd::cache::TtlCache;
+    use crate::cmd::completion_engine::CompletionEngine;
+    use crate::cmd::effect::Effect;
+    use crate::cmd::test_support::*;
     use crate::domain::connection::{ConnectionId, ConnectionProfile, DatabaseType, SslMode};
-    use color_eyre::eyre::Result;
+    use crate::model::app_state::AppState;
+    use crate::ports::outbound::connection_store::MockConnectionStore;
+    use crate::ports::outbound::metadata::MockMetadataProvider;
+    use crate::ports::outbound::query_executor::MockQueryExecutor;
+    use crate::ports::outbound::{
+        ConnectionStoreError, DsnBuilder, RenderOutput, RenderResult, Renderer,
+    };
+    use crate::services::AppServices;
+    use crate::update::action::{Action, ConnectionTarget, ConnectionsLoadedPayload};
 
     struct NoopRenderer;
     impl Renderer for NoopRenderer {
@@ -240,7 +241,7 @@ mod tests {
             _state: &AppState,
             _services: &AppServices,
             _now: Instant,
-        ) -> Result<RenderOutput> {
+        ) -> RenderResult<RenderOutput> {
             Ok(RenderOutput::default())
         }
     }
@@ -336,14 +337,16 @@ mod tests {
 
     mod load_connections {
         use super::*;
+        use crate::cmd::runner::EffectRunner;
 
         #[tokio::test]
         async fn error_returns_empty_connections_list() {
             let mut mock_store = MockConnectionStore::new();
             mock_store.expect_load_all().once().returning(|| {
-                Err(ConnectionStoreError::ReadError(
-                    "file not found".to_string(),
-                ))
+                Err(ConnectionStoreError::Io(Arc::new(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "file not found",
+                ))))
             });
 
             let cache = TtlCache::new(300);
@@ -380,11 +383,67 @@ mod tests {
                 "expected ConnectionsLoaded with empty profiles, got {action:?}"
             );
         }
+
+        #[tokio::test]
+        async fn missing_pg_service_reader_skips_service_loading() {
+            let mut mock_store = MockConnectionStore::new();
+            mock_store.expect_load_all().once().returning(|| Ok(vec![]));
+
+            let cache = TtlCache::new(300);
+            let (tx, mut rx) = mpsc::channel(8);
+            let runner = EffectRunner::builder()
+                .metadata_provider(Arc::new(MockMetadataProvider::new()))
+                .query_executor(Arc::new(MockQueryExecutor::new()))
+                .dsn_builder(Arc::new(NoopDsnBuilder))
+                .er_exporter(Arc::new(NoopErExporter))
+                .config_writer(Arc::new(NoopConfigWriter))
+                .er_log_writer(Arc::new(NoopErLogWriter))
+                .connection_store(Arc::new(mock_store))
+                .clipboard(Arc::new(NoopClipboardWriter))
+                .folder_opener(Arc::new(NoopFolderOpener))
+                .query_history_store(Arc::new(NoopQueryHistoryStore))
+                .settings_store(Arc::new(NoopSettingsStore))
+                .metadata_cache(cache)
+                .action_tx(tx)
+                .build();
+
+            let state = &mut AppState::new("test".to_string());
+            let ce = RefCell::new(CompletionEngine::new());
+            let mut renderer = NoopRenderer;
+
+            runner
+                .run(
+                    vec![Effect::LoadConnections],
+                    &mut renderer,
+                    state,
+                    &ce,
+                    &AppServices::stub(),
+                )
+                .await
+                .unwrap();
+
+            let action = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
+                .await
+                .expect("action timeout")
+                .expect("channel closed");
+            assert!(
+                matches!(
+                    action,
+                    Action::ConnectionsLoaded(ConnectionsLoadedPayload {
+                        ref services,
+                        service_file_path: None,
+                        service_load_warning: None,
+                        ..
+                    }) if services.is_empty()
+                ),
+                "expected ConnectionsLoaded without services, got {action:?}"
+            );
+        }
     }
 
     mod switch_connection {
         use super::*;
-        use crate::app::cmd::runner::EffectRunner;
+        use crate::cmd::runner::EffectRunner;
 
         struct FakeDsnBuilder;
         impl DsnBuilder for FakeDsnBuilder {

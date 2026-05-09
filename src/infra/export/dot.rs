@@ -2,7 +2,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::app::ports::{
+use crate::app::ports::outbound::{
     ErDiagramExporter, ErExportResult, GraphvizError, GraphvizRunner, ViewerError, ViewerLauncher,
 };
 use crate::domain::ErTableInfo;
@@ -43,40 +43,29 @@ impl ViewerLauncher for SystemViewerLauncher {
                     .arg("-a")
                     .arg(&browser)
                     .arg(path)
-                    .spawn()
-                    .map_err(ViewerError::LaunchFailed)?;
+                    .spawn()?;
             }
             #[cfg(not(target_os = "macos"))]
             {
-                Command::new(&browser)
-                    .arg(path)
-                    .spawn()
-                    .map_err(ViewerError::LaunchFailed)?;
+                Command::new(&browser).arg(path).spawn()?;
             }
             return Ok(());
         }
 
         #[cfg(target_os = "macos")]
         {
-            Command::new("open")
-                .arg(path)
-                .spawn()
-                .map_err(ViewerError::LaunchFailed)?;
+            Command::new("open").arg(path).spawn()?;
         }
         #[cfg(any(target_os = "freebsd", target_os = "linux"))]
         {
-            Command::new("xdg-open")
-                .arg(path)
-                .spawn()
-                .map_err(ViewerError::LaunchFailed)?;
+            Command::new("xdg-open").arg(path).spawn()?;
         }
         #[cfg(target_os = "windows")]
         {
             Command::new("cmd")
                 .args(["/C", "start"])
                 .arg(path)
-                .spawn()
-                .map_err(ViewerError::LaunchFailed)?;
+                .spawn()?;
         }
         Ok(())
     }
@@ -227,7 +216,7 @@ impl<G: GraphvizRunner + 'static, V: ViewerLauncher + 'static> ErDiagramExporter
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::ErFkInfo;
+    use crate::domain::er::ErFkInfo;
 
     fn make_test_tables() -> Vec<ErTableInfo> {
         vec![

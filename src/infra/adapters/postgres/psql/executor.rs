@@ -5,11 +5,12 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tokio::time::timeout;
 
-use crate::app::ports::DbOperationError;
+use crate::app::ports::outbound::DbOperationError;
 use crate::domain::{QueryResult, QuerySource, WriteExecutionResult};
 
 use super::super::PostgresAdapter;
-use super::parser::split_sql_statements;
+use super::error::classify_query_error;
+use super::parser::{ParseCommandTagError, split_sql_statements};
 
 fn csv_field_count(line: &str) -> usize {
     let mut count = 1;
@@ -140,7 +141,7 @@ impl PostgresAdapter {
         if read_only {
             Self::apply_read_only_pgoptions(&mut cmd);
         }
-        cmd.arg(dsn).arg("-X").arg("-v").arg("ON_ERROR_STOP=1");
+        Self::apply_psql_base_args(&mut cmd, dsn);
 
         for arg in extra_args {
             cmd.arg(arg);
@@ -157,6 +158,17 @@ impl PostgresAdapter {
             Err(_) => Self::PGOPTIONS_READ_ONLY.to_string(),
         };
         cmd.env("PGOPTIONS", merged);
+    }
+
+    fn apply_psql_base_args(cmd: &mut Command, dsn: &str) {
+        cmd.arg(dsn)
+            .arg("-X")
+            .arg("-v")
+            .arg("ON_ERROR_STOP=1")
+            .arg("-v")
+            .arg("VERBOSITY=verbose")
+            .arg("-v")
+            .arg("SHOW_CONTEXT=never");
     }
 
     async fn collect_output(
@@ -209,7 +221,7 @@ impl PostgresAdapter {
         })
     }
 
-    pub(in crate::infra::adapters::postgres) async fn execute_query(
+    pub(in crate::adapters::postgres) async fn execute_query(
         &self,
         dsn: &str,
         query: &str,
@@ -217,13 +229,13 @@ impl PostgresAdapter {
         let output = self.run_psql(dsn, &["-t", "-A"], query, false).await?;
 
         if !output.status.success() {
-            return Err(DbOperationError::QueryFailed(output.stderr));
+            return Err(Self::classify_psql_error(&output.stderr));
         }
 
         Ok(output.stdout)
     }
 
-    pub(in crate::infra::adapters::postgres) async fn execute_query_raw(
+    pub(in crate::adapters::postgres) async fn execute_query_raw(
         &self,
         dsn: &str,
         query: &str,
@@ -237,12 +249,7 @@ impl PostgresAdapter {
         let elapsed = start.elapsed().as_millis() as u64;
 
         if !output.status.success() {
-            return Ok(QueryResult::error(
-                query.to_string(),
-                output.stderr.trim().to_string(),
-                elapsed,
-                source,
-            ));
+            return Err(Self::classify_psql_error(&output.stderr));
         }
 
         if output.stdout.trim().is_empty() {
@@ -269,17 +276,11 @@ impl PostgresAdapter {
             .has_headers(true)
             .from_reader(csv_block.as_bytes());
 
-        let columns: Vec<String> = reader
-            .headers()
-            .map_err(|e| DbOperationError::QueryFailed(format!("CSV parse error: {e}")))?
-            .iter()
-            .map(ToString::to_string)
-            .collect();
+        let columns: Vec<String> = reader.headers()?.iter().map(ToString::to_string).collect();
 
         let mut rows = Vec::new();
         for result in reader.records() {
-            let record = result
-                .map_err(|e| DbOperationError::QueryFailed(format!("CSV parse error: {e}")))?;
+            let record = result?;
             let row: Vec<String> = record.iter().map(ToString::to_string).collect();
             rows.push(row);
         }
@@ -293,7 +294,7 @@ impl PostgresAdapter {
         ))
     }
 
-    pub(in crate::infra::adapters::postgres) async fn execute_write_raw(
+    pub(in crate::adapters::postgres) async fn execute_write_raw(
         &self,
         dsn: &str,
         query: &str,
@@ -306,14 +307,14 @@ impl PostgresAdapter {
         let elapsed = start.elapsed().as_millis() as u64;
 
         if !output.status.success() {
-            return Err(DbOperationError::QueryFailed(
-                output.stderr.trim().to_string(),
-            ));
+            return Err(Self::classify_psql_error(&output.stderr));
         }
 
-        let affected_rows = Self::parse_affected_rows(&output.stdout).ok_or_else(|| {
-            DbOperationError::QueryFailed("Failed to parse affected row count".to_string())
-        })?;
+        let affected_rows = Self::parse_affected_rows_with_source(&output.stdout).map_err(
+            |error: ParseCommandTagError| {
+                DbOperationError::CommandTagParseFailed(error.to_string())
+            },
+        )?;
 
         Ok(WriteExecutionResult {
             affected_rows,
@@ -321,7 +322,7 @@ impl PostgresAdapter {
         })
     }
 
-    pub(in crate::infra::adapters::postgres) async fn count_rows(
+    pub(in crate::adapters::postgres) async fn count_rows(
         &self,
         dsn: &str,
         query: &str,
@@ -329,14 +330,14 @@ impl PostgresAdapter {
     ) -> Result<usize, DbOperationError> {
         let output = self.run_psql(dsn, &["-t", "-A"], query, read_only).await?;
         if !output.status.success() {
-            return Err(DbOperationError::QueryFailed(output.stderr));
+            return Err(Self::classify_psql_error(&output.stderr));
         }
         output.stdout.trim().parse::<usize>().map_err(|e| {
             DbOperationError::QueryFailed(format!("Failed to parse COUNT result: {e}"))
         })
     }
 
-    pub(in crate::infra::adapters::postgres) async fn export_csv_to_file(
+    pub(in crate::adapters::postgres) async fn export_csv_to_file(
         &self,
         dsn: &str,
         query: &str,
@@ -347,13 +348,8 @@ impl PostgresAdapter {
         if read_only {
             Self::apply_read_only_pgoptions(&mut cmd);
         }
-        cmd.arg(dsn)
-            .arg("-X")
-            .arg("-v")
-            .arg("ON_ERROR_STOP=1")
-            .arg("--csv")
-            .arg("-c")
-            .arg(query);
+        Self::apply_psql_base_args(&mut cmd, dsn);
+        cmd.arg("--csv").arg("-c").arg(query);
 
         let mut child = cmd
             .stdout(Stdio::piped())
@@ -409,7 +405,7 @@ impl PostgresAdapter {
         let (status, stderr, newline_count) = result;
         if !status.success() {
             let _ = tokio::fs::remove_file(path).await;
-            return Err(DbOperationError::QueryFailed(stderr.trim().to_string()));
+            return Err(Self::classify_psql_error(&stderr));
         }
 
         // Subtract 1 for the CSV header line
@@ -417,7 +413,7 @@ impl PostgresAdapter {
         Ok(row_count)
     }
 
-    pub(in crate::infra::adapters::postgres) async fn fetch_preview_order_columns(
+    pub(in crate::adapters::postgres) async fn fetch_preview_order_columns(
         &self,
         dsn: &str,
         schema: &str,
@@ -430,19 +426,31 @@ impl PostgresAdapter {
             return Ok(vec![]);
         }
 
-        serde_json::from_str(trimmed).map_err(|e| DbOperationError::InvalidJson(e.to_string()))
+        serde_json::from_str(trimmed).map_err(Into::into)
     }
 
-    pub(in crate::infra::adapters::postgres) fn parse_affected_rows(stdout: &str) -> Option<usize> {
-        Self::extract_command_tag(stdout)
-            .and_then(|tag| tag.affected_rows())
+    fn parse_affected_rows_with_source(stdout: &str) -> Result<usize, ParseCommandTagError> {
+        let tag = Self::parse_command_tag(stdout)?;
+        tag.affected_rows()
             .map(|n| n as usize)
+            .ok_or_else(|| ParseCommandTagError::Invalid {
+                input: format!("{tag:?}"),
+            })
+    }
+
+    #[cfg(test)]
+    pub(in crate::adapters::postgres) fn parse_affected_rows(stdout: &str) -> Option<usize> {
+        Self::parse_affected_rows_with_source(stdout).ok()
+    }
+
+    fn classify_psql_error(stderr: &str) -> DbOperationError {
+        classify_query_error(stderr)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::infra::adapters::postgres::PostgresAdapter;
+    use crate::adapters::postgres::PostgresAdapter;
 
     mod extract_last_csv_block {
         use super::super::extract_last_csv_block;
@@ -751,8 +759,8 @@ mod tests {
     }
 
     mod execute_query_raw_command_tag {
+        use crate::adapters::postgres::PostgresAdapter;
         use crate::domain::CommandTag;
-        use crate::infra::adapters::postgres::PostgresAdapter;
 
         fn dml_stdout_returns_command_tag(
             stdout: &str,
@@ -814,8 +822,9 @@ mod tests {
         #[test]
         fn select_tag_captured_for_ctas() {
             let tag = PostgresAdapter::parse_command_tag("SELECT 5");
-            assert_eq!(tag, Some(CommandTag::Select(5)));
+            assert_eq!(tag, Ok(CommandTag::Select(5)));
             let passes = tag
+                .ok()
                 .as_ref()
                 .is_some_and(|t| t.is_data_modifying() || matches!(t, CommandTag::Select(_)));
             assert!(passes);
@@ -828,6 +837,7 @@ mod tests {
             for input in cases {
                 let tag = PostgresAdapter::parse_command_tag(input);
                 let passes = tag
+                    .ok()
                     .as_ref()
                     .is_some_and(|t| t.is_data_modifying() || matches!(t, CommandTag::Select(_)));
                 assert!(

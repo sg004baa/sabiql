@@ -1,14 +1,14 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::app::cmd::effect::Effect;
-use crate::app::model::app_state::AppState;
-use crate::app::model::browse::query_execution::PREVIEW_PAGE_SIZE;
-use crate::app::model::connection::error::ConnectionErrorInfo;
-use crate::app::model::er_state::ErStatus;
-use crate::app::model::shared::input_mode::InputMode;
-use crate::app::model::sql_editor::modal::FailedPrefetchEntry;
-use crate::app::update::action::{Action, TableTarget};
+use crate::cmd::effect::Effect;
+use crate::model::app_state::AppState;
+use crate::model::browse::query_execution::PREVIEW_PAGE_SIZE;
+use crate::model::connection::error::ConnectionErrorInfo;
+use crate::model::er_state::ErStatus;
+use crate::model::shared::input_mode::InputMode;
+use crate::model::sql_editor::modal::FailedPrefetchEntry;
+use crate::update::action::{Action, ModalKind, TableTarget};
 
 const BASE_BACKOFF_SECS: u64 = 1;
 const MAX_BACKOFF_SECS: u64 = 4;
@@ -117,7 +117,9 @@ pub fn reduce_metadata(state: &mut AppState, action: &Action, now: Instant) -> O
 
             if state.ui.pending_er_picker && state.modal.active_mode() == InputMode::Normal {
                 state.ui.pending_er_picker = false;
-                effects.push(Effect::DispatchActions(vec![Action::OpenErTablePicker]));
+                effects.push(Effect::DispatchActions(vec![Action::OpenModal(
+                    ModalKind::ErTablePicker,
+                )]));
             } else {
                 state.ui.pending_er_picker = false;
             }
@@ -125,10 +127,10 @@ pub fn reduce_metadata(state: &mut AppState, action: &Action, now: Instant) -> O
             Some(effects)
         }
         Action::MetadataFailed(error) => {
-            let error_info = ConnectionErrorInfo::new(error.to_string());
+            let error_info = ConnectionErrorInfo::from_db_operation_error(error);
             state.connection_error.set_error(error_info);
             let was_connected = state.session.connection_state().is_connected();
-            state.session.mark_connection_failed(error.to_string());
+            state.session.mark_connection_failed(error.masked_details());
             if !was_connected {
                 state.modal.replace_mode(InputMode::ConnectionError);
             }
@@ -145,7 +147,7 @@ pub fn reduce_metadata(state: &mut AppState, action: &Action, now: Instant) -> O
         }
         Action::TableDetailFailed(error, generation) => {
             if *generation == state.session.selection_generation() {
-                state.set_error(error.to_string());
+                state.set_error(error.user_message());
             }
             Some(vec![])
         }
@@ -406,13 +408,13 @@ pub fn reduce_metadata(state: &mut AppState, action: &Action, now: Instant) -> O
                 qualified_name.clone(),
                 FailedPrefetchEntry {
                     failed_at: now,
-                    error: error.to_string(),
+                    error: error.user_message(),
                     retry_count: prev_count + 1,
                 },
             );
             state
                 .er_preparation
-                .on_table_failed(&qualified_name, error.to_string());
+                .on_table_failed(&qualified_name, error.user_message());
 
             let mut effects = Vec::new();
 
@@ -452,8 +454,8 @@ pub fn reduce_metadata(state: &mut AppState, action: &Action, now: Instant) -> O
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::model::app_state::AppState;
-    use crate::app::model::sql_editor::modal::FailedPrefetchEntry;
+    use crate::model::app_state::AppState;
+    use crate::model::sql_editor::modal::FailedPrefetchEntry;
     use std::time::{Duration, Instant};
 
     fn state_with_dsn(dsn: &str) -> AppState {
@@ -464,7 +466,7 @@ mod tests {
 
     mod prefetch_table_detail {
         use super::*;
-        use crate::app::model::er_state::ErStatus;
+        use crate::model::er_state::ErStatus;
 
         #[test]
         fn backoff_table_requeued_at_tail_with_process_effect() {
@@ -651,7 +653,7 @@ mod tests {
 
     mod table_detail_cache_failed {
         use super::*;
-        use crate::app::ports::DbOperationError;
+        use crate::ports::outbound::DbOperationError;
 
         #[test]
         fn increments_retry_count() {
@@ -684,7 +686,10 @@ mod tests {
                 .get(&qualified)
                 .unwrap();
             assert_eq!(entry.retry_count, 2);
-            assert_eq!(entry.error, "Query failed: new error");
+            assert_eq!(
+                entry.error,
+                "Query failed: new error. Review the database error details and SQL."
+            );
         }
 
         #[test]
@@ -957,7 +962,7 @@ mod tests {
 
     mod completion_check {
         use super::*;
-        use crate::app::model::er_state::ErStatus;
+        use crate::model::er_state::ErStatus;
 
         #[test]
         fn complete_not_fk_expanded_dispatches_expand() {
@@ -993,7 +998,7 @@ mod tests {
 
     mod fk_neighbors_discovered {
         use super::*;
-        use crate::app::model::er_state::ErStatus;
+        use crate::model::er_state::ErStatus;
 
         #[test]
         fn empty_neighbors_dispatches_generate() {

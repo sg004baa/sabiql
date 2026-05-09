@@ -4,21 +4,22 @@ use std::time::Instant;
 
 use tokio::sync::mpsc;
 
-use crate::app::cmd::cache::TtlCache;
-use crate::app::cmd::runner::{EffectRunner, EffectRunnerBuilder};
-use crate::app::ports::{
-    ClipboardError, ClipboardWriter, ConfigWriter, ConnectionStore, DsnBuilder, ErDiagramExporter,
-    ErExportResult, ErLogWriter, FolderOpenError, FolderOpener, MetadataProvider, QueryExecutor,
-    QueryHistoryError, QueryHistoryStore, ServiceFileError, ServiceFileReader,
-};
-use crate::app::update::action::Action;
+use crate::cmd::cache::TtlCache;
+use crate::cmd::runner::{EffectRunner, EffectRunnerBuilder};
 use crate::domain::connection::{ConnectionProfile, ServiceEntry};
 use crate::domain::query_history::QueryHistoryEntry;
 use crate::domain::{ConnectionId, DatabaseMetadata, ErTableInfo, QueryResult, QuerySource};
+use crate::ports::outbound::{
+    ClipboardError, ClipboardWriter, ConfigWriter, ConfigWriterError, ConnectionStore, DsnBuilder,
+    ErDiagramExporter, ErExportResult, ErLogWriter, FolderOpenError, FolderOpener,
+    MetadataProvider, PgServiceEntryReader, QueryExecutor, QueryHistoryError, QueryHistoryStore,
+    ServiceFileError, SettingsStore, SettingsStoreError,
+};
+use crate::update::action::Action;
 
 pub struct NoopConfigWriter;
 impl ConfigWriter for NoopConfigWriter {
-    fn get_cache_dir(&self, _project_name: &str) -> color_eyre::eyre::Result<PathBuf> {
+    fn get_cache_dir(&self, _project_name: &str) -> Result<PathBuf, ConfigWriterError> {
         Ok(PathBuf::from("/tmp"))
     }
 }
@@ -53,8 +54,8 @@ impl DsnBuilder for NoopDsnBuilder {
     }
 }
 
-pub struct NoopServiceFileReader;
-impl ServiceFileReader for NoopServiceFileReader {
+pub struct NoopPgServiceEntryReader;
+impl PgServiceEntryReader for NoopPgServiceEntryReader {
     fn read_services(&self) -> Result<(Vec<ServiceEntry>, PathBuf), ServiceFileError> {
         Ok((vec![], PathBuf::new()))
     }
@@ -95,6 +96,20 @@ impl QueryHistoryStore for NoopQueryHistoryStore {
     }
 }
 
+pub struct NoopSettingsStore;
+impl SettingsStore for NoopSettingsStore {
+    fn load(&self) -> Result<crate::ports::outbound::AppSettings, SettingsStoreError> {
+        Ok(crate::ports::outbound::AppSettings::default())
+    }
+
+    fn save(
+        &self,
+        _settings: crate::ports::outbound::AppSettings,
+    ) -> Result<(), SettingsStoreError> {
+        Ok(())
+    }
+}
+
 pub fn make_runner(
     metadata_provider: Arc<dyn MetadataProvider>,
     query_executor: Arc<dyn QueryExecutor>,
@@ -127,12 +142,13 @@ pub fn make_runner_builder(
         .config_writer(Arc::new(NoopConfigWriter))
         .er_log_writer(Arc::new(NoopErLogWriter))
         .connection_store(connection_store)
-        .service_file_reader(Arc::new(NoopServiceFileReader))
         .clipboard(Arc::new(NoopClipboardWriter))
         .folder_opener(Arc::new(NoopFolderOpener))
         .query_history_store(Arc::new(NoopQueryHistoryStore))
+        .settings_store(Arc::new(NoopSettingsStore))
         .metadata_cache(cache)
         .action_tx(action_tx)
+        .pg_service_entry_reader(Arc::new(NoopPgServiceEntryReader))
 }
 
 pub fn sample_metadata() -> DatabaseMetadata {
