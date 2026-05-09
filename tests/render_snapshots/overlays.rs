@@ -353,7 +353,9 @@ fn sql_modal_confirming_high_no_target() {
 #[test]
 fn help_overlay() {
     let (mut state, _now) = connected_state();
-    let mut terminal = create_test_terminal();
+    // Wider terminal so the help modal has enough room to align all
+    // descriptions to a single column without forcing wraps.
+    let mut terminal = create_test_terminal_sized(120, 32);
 
     state.modal.set_mode(InputMode::Help);
 

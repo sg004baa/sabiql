@@ -2,26 +2,34 @@
 source: tests/render_snapshots/overlays.rs
 expression: output
 ---
-test_project | test_db | - | no dsn | localhost:5432/test                       
-┌ [1] Explorer ────┐[Info] [Cols] [Idx] [FK] [RLS] [Trig] [DDL]                 
-│> public.us╭ Help ────────────────────────────────────────────────╮───────────┐
-│  public.po│▸ Global Keys                                        ▲│           │
-│  public.co│  q                     Quit application             ┃│           │
-│           │  ?                     Toggle help                  ││           │
-│           │  /, Ctrl+P             Open Table Picker            ││           │
-│           │  Ctrl+K                Open Command Palette         ││           │
-│           │  :                     Enter command line           ││           │
-│           │  f                     Toggle Focus                 ││           │
-│           │  1/2/3, < / >          Switch or cycle pane focus   ││           │
-│           │  Tab/⇧Tab              Inspector prev/next tab      ││───────────┘
-│           │  r                     Reload metadata              ││───────────┐
-│           │  s                     Open SQL Editor              ││           │
-│           │  e                     Open ER Diagram              ││           │
-│           │  c                     Open Connection Selector     ││           │
-│           │  Ctrl+E                Export result to CSV         ││           │
-│           │  Ctrl+R                Toggle Read-Only             ││           │
-│           │  Ctrl+O                Open Query History           ││           │
-│           │                                                     ││           │
-│           │▸ Navigation                                         ▼│           │
-└───────────╰ ?/Esc Close ─────────────────────────────────────────╯───────────┘
+test_project | test_db | - | no dsn | localhost:5432/test                                                               
+┌ [1] Explorer ──────────────┐[Info] [Cols] [Idx] [FK] [RLS] [Trig] [DDL]                                               
+│> public.users              │┌ [2] Inspector ─────────────────────────────────────────────────────────────────────────┐
+│  public.posts   ╭ Help ────────────────────────────────────────────────────────────────────────────╮                 │
+│  public.comments│▸ Global Keys                                                                    ▲│                 │
+│                 │  q                                    Quit application                          ┃│                 │
+│                 │  ?                                    Toggle help                               ┃│                 │
+│                 │  /, Ctrl+P                            Open Table Picker                         ┃│                 │
+│                 │  Ctrl+K                               Open Command Palette                      ││                 │
+│                 │  :                                    Enter command line                        ││                 │
+│                 │  f                                    Toggle Focus                              ││                 │
+│                 │  1/2/3, < / >                         Switch or cycle pane focus                ││                 │
+│                 │  Tab/⇧Tab                             Inspector prev/next tab                   ││                 │
+│                 │  r                                    Reload metadata                           ││                 │
+│                 │  s                                    Open SQL Editor                           ││                 │
+│                 │  e                                    Open ER Diagram                           ││─────────────────┘
+│                 │  c                                    Open Connection Selector                  ││─────────────────┐
+│                 │  Ctrl+E                               Export result to CSV                      ││                 │
+│                 │  Ctrl+R                               Toggle Read-Only                          ││                 │
+│                 │  Ctrl+O                               Open Query History                        ││                 │
+│                 │                                                                                 ││                 │
+│                 │▸ Navigation                                                                     ││                 │
+│                 │  j / ↓                                Move down / scroll                        ││                 │
+│                 │  k / ↑                                Move up / scroll                          ││                 │
+│                 │  g / Home                             First item / top                          ││                 │
+│                 │  G / End                              Last item / bottom                        ││                 │
+│                 │  H                                    First visible item                        ││                 │
+│                 │  M                                    Middle of visible items                   ▼│                 │
+│                 ╰ ?/Esc Close ─────────────────────────────────────────────────────────────────────╯                 │
+└────────────────────────────┘└────────────────────────────────────────────────────────────────────────────────────────┘
 ?/Esc:Close

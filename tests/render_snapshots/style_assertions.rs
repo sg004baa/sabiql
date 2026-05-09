@@ -335,15 +335,19 @@ fn header_status_uses_success_warning_and_error_colors() {
 #[test]
 fn help_overlay_uses_section_header_and_scrollbar_colors() {
     let (mut state, now) = connected_state();
-    let mut terminal = create_test_terminal();
+    // Help modal aligns descriptions to the longest key, which needs more
+    // width than the default 80 cols to render without forcing wraps that
+    // push section markers off-screen.
+    let mut terminal = create_test_terminal_sized(120, 32);
 
     state.modal.set_mode(InputMode::Help);
     state.ui.help_scroll_offset = 1;
 
     let buffer = render_and_get_buffer_at(&mut terminal, &mut state, now);
+    let area = buffer.area();
 
-    let has_section_header = (0..TEST_HEIGHT)
-        .flat_map(|y| (0..TEST_WIDTH).map(move |x| (x, y)))
+    let has_section_header = (0..area.height)
+        .flat_map(|y| (0..area.width).map(move |x| (x, y)))
         .any(|(x, y)| {
             buffer.cell((x, y)).is_some_and(|cell| {
                 cell.symbol() == "▸" && cell.fg == DEFAULT_THEME.component.navigation.section_header
@@ -354,8 +358,8 @@ fn help_overlay_uses_section_header_and_scrollbar_colors() {
         "Expected help overlay section markers to use section_header color"
     );
 
-    let has_active_scrollbar = (0..TEST_HEIGHT)
-        .flat_map(|y| (0..TEST_WIDTH).map(move |x| (x, y)))
+    let has_active_scrollbar = (0..area.height)
+        .flat_map(|y| (0..area.width).map(move |x| (x, y)))
         .any(|(x, y)| {
             buffer.cell((x, y)).is_some_and(|cell| {
                 matches!(cell.symbol(), "▲" | "▼" | "┃")
@@ -367,8 +371,8 @@ fn help_overlay_uses_section_header_and_scrollbar_colors() {
         "Expected help overlay active scrollbar parts to use scrollbar_active color"
     );
 
-    let has_inactive_scrollbar = (0..TEST_HEIGHT)
-        .flat_map(|y| (0..TEST_WIDTH).map(move |x| (x, y)))
+    let has_inactive_scrollbar = (0..area.height)
+        .flat_map(|y| (0..area.width).map(move |x| (x, y)))
         .any(|(x, y)| {
             buffer.cell((x, y)).is_some_and(|cell| {
                 cell.symbol() == "│"
@@ -384,16 +388,17 @@ fn help_overlay_uses_section_header_and_scrollbar_colors() {
 #[test]
 fn test_contrast_theme_applies_help_overlay_navigation_colors() {
     let (mut state, now) = connected_state();
-    let mut terminal = create_test_terminal();
+    let mut terminal = create_test_terminal_sized(120, 32);
 
     state.ui.set_theme(ThemeId::TestContrast);
     state.modal.set_mode(InputMode::Help);
     state.ui.help_scroll_offset = 1;
 
     let buffer = render_and_get_buffer_at(&mut terminal, &mut state, now);
+    let area = buffer.area();
 
-    let has_section_header = (0..TEST_HEIGHT)
-        .flat_map(|y| (0..TEST_WIDTH).map(move |x| (x, y)))
+    let has_section_header = (0..area.height)
+        .flat_map(|y| (0..area.width).map(move |x| (x, y)))
         .any(|(x, y)| {
             buffer.cell((x, y)).is_some_and(|cell| {
                 cell.symbol() == "▸"
@@ -405,8 +410,8 @@ fn test_contrast_theme_applies_help_overlay_navigation_colors() {
         "Expected help overlay to resolve section_header from TEST_CONTRAST_THEME"
     );
 
-    let has_active_scrollbar = (0..TEST_HEIGHT)
-        .flat_map(|y| (0..TEST_WIDTH).map(move |x| (x, y)))
+    let has_active_scrollbar = (0..area.height)
+        .flat_map(|y| (0..area.width).map(move |x| (x, y)))
         .any(|(x, y)| {
             buffer.cell((x, y)).is_some_and(|cell| {
                 matches!(cell.symbol(), "▲" | "▼" | "┃")
