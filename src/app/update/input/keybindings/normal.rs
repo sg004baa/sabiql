@@ -69,7 +69,7 @@ pub const GLOBAL_KEYS: &[KeyBinding] = &[
         combos: &[KeyCombo::plain(Key::Char('f'))],
     },
     KeyBinding {
-        key_short: "1/2/3 </>",
+        key_short: "</>",
         key: "1/2/3, < / >",
         desc_short: "Pane",
         description: "Switch or cycle pane focus",
