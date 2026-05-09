@@ -1,6 +1,6 @@
 use super::KeyBinding;
-use super::types::{Key, KeyCombo};
-use crate::app::update::action::Action;
+use super::{Key, KeyCombo};
+use crate::update::action::{Action, ModalKind};
 
 // =============================================================================
 // SQL Modal (Normal mode — default when opened)
@@ -8,12 +8,12 @@ use crate::app::update::action::Action;
 
 pub const SQL_MODAL_NORMAL_KEYS: &[KeyBinding] = &[
     KeyBinding {
-        key_short: "^Enter",
-        key: "Ctrl+Enter",
+        key_short: "⌥Enter/F5",
+        key: "Alt+Enter / F5",
         desc_short: "Run",
         description: "Execute query",
         action: Action::SqlModalSubmit,
-        combos: &[KeyCombo::ctrl(Key::Enter)],
+        combos: &[KeyCombo::alt(Key::Enter), KeyCombo::plain(Key::F(5))],
     },
     KeyBinding {
         key_short: "y",
@@ -68,7 +68,7 @@ pub const SQL_MODAL_NORMAL_KEYS: &[KeyBinding] = &[
         key: "Esc / q",
         desc_short: "Close",
         description: "Close editor",
-        action: Action::CloseSqlModal,
+        action: Action::CloseModal(ModalKind::SqlModal),
         combos: &[KeyCombo::plain(Key::Esc), KeyCombo::plain(Key::Char('q'))],
     },
     KeyBinding {
@@ -84,7 +84,7 @@ pub const SQL_MODAL_NORMAL_KEYS: &[KeyBinding] = &[
         key: "Ctrl+O",
         desc_short: "History",
         description: "Open Query History",
-        action: Action::OpenQueryHistoryPicker,
+        action: Action::OpenModal(ModalKind::QueryHistoryPicker),
         combos: &[KeyCombo::ctrl(Key::Char('o'))],
     },
 ];
@@ -147,7 +147,7 @@ pub const SQL_MODAL_PLAN_KEYS: &[KeyBinding] = &[
         key: "Esc / q",
         desc_short: "Close",
         description: "Close editor",
-        action: Action::CloseSqlModal,
+        action: Action::CloseModal(ModalKind::SqlModal),
         combos: &[KeyCombo::plain(Key::Esc), KeyCombo::plain(Key::Char('q'))],
     },
 ];
@@ -218,7 +218,7 @@ pub const SQL_MODAL_COMPARE_KEYS: &[KeyBinding] = &[
         key: "Esc / q",
         desc_short: "Close",
         description: "Close editor",
-        action: Action::CloseSqlModal,
+        action: Action::CloseModal(ModalKind::SqlModal),
         combos: &[KeyCombo::plain(Key::Esc), KeyCombo::plain(Key::Char('q'))],
     },
 ];
@@ -229,12 +229,12 @@ pub const SQL_MODAL_COMPARE_KEYS: &[KeyBinding] = &[
 
 pub const SQL_MODAL_KEYS: &[KeyBinding] = &[
     KeyBinding {
-        key_short: "^Enter",
-        key: "Ctrl+Enter",
+        key_short: "⌥Enter/F5",
+        key: "Alt+Enter / F5",
         desc_short: "Run",
         description: "Execute query",
         action: Action::SqlModalSubmit,
-        combos: &[KeyCombo::ctrl(Key::Enter)],
+        combos: &[KeyCombo::alt(Key::Enter), KeyCombo::plain(Key::F(5))],
     },
     KeyBinding {
         key_short: "Esc",
@@ -289,7 +289,7 @@ pub const SQL_MODAL_KEYS: &[KeyBinding] = &[
         key: "Ctrl+O",
         desc_short: "History",
         description: "Open Query History",
-        action: Action::OpenQueryHistoryPicker,
+        action: Action::OpenModal(ModalKind::QueryHistoryPicker),
         combos: &[KeyCombo::ctrl(Key::Char('o'))],
     },
 ];
@@ -322,7 +322,7 @@ pub const COMMAND_LINE_KEYS: &[KeyBinding] = &[
         key: ":help",
         desc_short: "Help",
         description: "Show help",
-        action: Action::OpenHelp,
+        action: Action::ToggleModal(ModalKind::Help),
         combos: &[],
     },
     KeyBinding {
@@ -330,7 +330,7 @@ pub const COMMAND_LINE_KEYS: &[KeyBinding] = &[
         key: ":sql",
         desc_short: "SQL",
         description: "Open SQL Editor",
-        action: Action::OpenSqlModal,
+        action: Action::OpenModal(ModalKind::SqlModal),
         combos: &[],
     },
     KeyBinding {
@@ -338,7 +338,31 @@ pub const COMMAND_LINE_KEYS: &[KeyBinding] = &[
         key: ":erd",
         desc_short: "ER Diagram",
         description: "Open ER Diagram",
-        action: Action::OpenErTablePicker,
+        action: Action::OpenModal(ModalKind::ErTablePicker),
+        combos: &[],
+    },
+    KeyBinding {
+        key_short: ":settings",
+        key: ":settings",
+        desc_short: "Settings",
+        description: "Open Settings",
+        action: Action::OpenModal(ModalKind::Settings),
+        combos: &[],
+    },
+    KeyBinding {
+        key_short: ":theme",
+        key: ":theme",
+        desc_short: "Theme",
+        description: "Open Theme Settings",
+        action: Action::OpenModal(ModalKind::Settings),
+        combos: &[],
+    },
+    KeyBinding {
+        key_short: ":palette",
+        key: ":palette",
+        desc_short: "Palette",
+        description: "Open Command Palette",
+        action: Action::OpenModal(ModalKind::CommandPalette),
         combos: &[],
     },
     KeyBinding {

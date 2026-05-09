@@ -1,12 +1,12 @@
-use crate::app::ports::DbOperationError;
+use crate::app::ports::outbound::DbOperationError;
 use crate::domain::{
-    Column, FkAction, ForeignKey, Index, IndexType, Schema, TableSignature, TableSummary, Trigger,
-    TriggerEvent, TriggerTiming,
+    Column, ColumnAttributes, FkAction, ForeignKey, Index, IndexAttributes, IndexType, Schema,
+    TableSignature, TableSummary, Trigger, TriggerEvent, TriggerTiming,
 };
 
 use super::super::super::MySqlAdapter;
 
-pub(in crate::infra::adapters::mysql) type TableDetailCombined = (
+pub(in crate::adapters::mysql) type TableDetailCombined = (
     Vec<Column>,
     Vec<Index>,
     Vec<ForeignKey>,
@@ -23,7 +23,7 @@ fn non_empty_json(raw: &str) -> Option<&str> {
     }
 }
 
-pub(in crate::infra::adapters::mysql) struct TableInfo {
+pub(in crate::adapters::mysql) struct TableInfo {
     pub owner: Option<String>,
     pub comment: Option<String>,
     pub row_count_estimate: Option<i64>,
@@ -40,7 +40,7 @@ fn parse_fk_action(rule: &str) -> FkAction {
 }
 
 impl MySqlAdapter {
-    pub(in crate::infra::adapters::mysql) fn parse_table_info(
+    pub(in crate::adapters::mysql) fn parse_table_info(
         json: &str,
     ) -> Result<TableInfo, DbOperationError> {
         let Some(trimmed) = non_empty_json(json) else {
@@ -59,7 +59,7 @@ impl MySqlAdapter {
         }
 
         let raw: RawTableInfo = serde_json::from_str(trimmed)
-            .map_err(|e| DbOperationError::InvalidJson(e.to_string()))?;
+            .map_err(|e| DbOperationError::InvalidJson(std::sync::Arc::new(e)))?;
 
         Ok(TableInfo {
             owner: raw.owner,
@@ -68,7 +68,7 @@ impl MySqlAdapter {
         })
     }
 
-    pub(in crate::infra::adapters::mysql) fn parse_tables(
+    pub(in crate::adapters::mysql) fn parse_tables(
         json: &str,
     ) -> Result<Vec<TableSummary>, DbOperationError> {
         let Some(trimmed) = non_empty_json(json) else {
@@ -84,7 +84,7 @@ impl MySqlAdapter {
         }
 
         let raw: Vec<RawTable> = serde_json::from_str(trimmed)
-            .map_err(|e| DbOperationError::InvalidJson(e.to_string()))?;
+            .map_err(|e| DbOperationError::InvalidJson(std::sync::Arc::new(e)))?;
 
         Ok(raw
             .into_iter()
@@ -92,7 +92,7 @@ impl MySqlAdapter {
             .collect())
     }
 
-    pub(in crate::infra::adapters::mysql) fn parse_table_signatures(
+    pub(in crate::adapters::mysql) fn parse_table_signatures(
         json: &str,
     ) -> Result<Vec<TableSignature>, DbOperationError> {
         let Some(trimmed) = non_empty_json(json) else {
@@ -107,7 +107,7 @@ impl MySqlAdapter {
         }
 
         let raw: Vec<RawTableSignature> = serde_json::from_str(trimmed)
-            .map_err(|e| DbOperationError::InvalidJson(e.to_string()))?;
+            .map_err(|e| DbOperationError::InvalidJson(std::sync::Arc::new(e)))?;
 
         Ok(raw
             .into_iter()
@@ -119,7 +119,7 @@ impl MySqlAdapter {
             .collect())
     }
 
-    pub(in crate::infra::adapters::mysql) fn parse_schemas(
+    pub(in crate::adapters::mysql) fn parse_schemas(
         json: &str,
     ) -> Result<Vec<Schema>, DbOperationError> {
         let Some(trimmed) = non_empty_json(json) else {
@@ -132,12 +132,12 @@ impl MySqlAdapter {
         }
 
         let raw: Vec<RawSchema> = serde_json::from_str(trimmed)
-            .map_err(|e| DbOperationError::InvalidJson(e.to_string()))?;
+            .map_err(|e| DbOperationError::InvalidJson(std::sync::Arc::new(e)))?;
 
         Ok(raw.into_iter().map(|s| Schema::new(s.name)).collect())
     }
 
-    pub(in crate::infra::adapters::mysql) fn parse_columns(
+    pub(in crate::adapters::mysql) fn parse_columns(
         json: &str,
     ) -> Result<Vec<Column>, DbOperationError> {
         let Some(trimmed) = non_empty_json(json) else {
@@ -157,24 +157,22 @@ impl MySqlAdapter {
         }
 
         let raw: Vec<RawColumn> = serde_json::from_str(trimmed)
-            .map_err(|e| DbOperationError::InvalidJson(e.to_string()))?;
+            .map_err(|e| DbOperationError::InvalidJson(std::sync::Arc::new(e)))?;
 
         Ok(raw
             .into_iter()
             .map(|c| Column {
                 name: c.name,
                 data_type: c.data_type,
-                nullable: c.nullable,
                 default: c.default,
-                is_primary_key: c.is_primary_key,
-                is_unique: c.is_unique,
+                attributes: ColumnAttributes::from_parts(c.nullable, c.is_primary_key, c.is_unique),
                 comment: c.comment,
                 ordinal_position: c.ordinal_position,
             })
             .collect())
     }
 
-    pub(in crate::infra::adapters::mysql) fn parse_indexes(
+    pub(in crate::adapters::mysql) fn parse_indexes(
         json: &str,
     ) -> Result<Vec<Index>, DbOperationError> {
         let Some(trimmed) = non_empty_json(json) else {
@@ -192,15 +190,14 @@ impl MySqlAdapter {
         }
 
         let raw: Vec<RawIndex> = serde_json::from_str(trimmed)
-            .map_err(|e| DbOperationError::InvalidJson(e.to_string()))?;
+            .map_err(|e| DbOperationError::InvalidJson(std::sync::Arc::new(e)))?;
 
         Ok(raw
             .into_iter()
             .map(|i| Index {
                 name: i.name,
                 columns: i.columns,
-                is_unique: i.is_unique,
-                is_primary: i.is_primary,
+                attributes: IndexAttributes::from_parts(i.is_unique, i.is_primary),
                 index_type: match i.index_type.as_str() {
                     "BTREE" => IndexType::BTree,
                     "HASH" => IndexType::Hash,
@@ -213,7 +210,7 @@ impl MySqlAdapter {
             .collect())
     }
 
-    pub(in crate::infra::adapters::mysql) fn parse_foreign_keys(
+    pub(in crate::adapters::mysql) fn parse_foreign_keys(
         json: &str,
     ) -> Result<Vec<ForeignKey>, DbOperationError> {
         let Some(trimmed) = non_empty_json(json) else {
@@ -234,7 +231,7 @@ impl MySqlAdapter {
         }
 
         let raw: Vec<RawForeignKey> = serde_json::from_str(trimmed)
-            .map_err(|e| DbOperationError::InvalidJson(e.to_string()))?;
+            .map_err(|e| DbOperationError::InvalidJson(std::sync::Arc::new(e)))?;
 
         Ok(raw
             .into_iter()
@@ -252,7 +249,7 @@ impl MySqlAdapter {
             .collect())
     }
 
-    pub(in crate::infra::adapters::mysql) fn parse_triggers(
+    pub(in crate::adapters::mysql) fn parse_triggers(
         json: &str,
     ) -> Result<Vec<Trigger>, DbOperationError> {
         let Some(trimmed) = non_empty_json(json) else {
@@ -269,7 +266,7 @@ impl MySqlAdapter {
         }
 
         let raw: Vec<RawTrigger> = serde_json::from_str(trimmed)
-            .map_err(|e| DbOperationError::InvalidJson(e.to_string()))?;
+            .map_err(|e| DbOperationError::InvalidJson(std::sync::Arc::new(e)))?;
 
         Ok(raw
             .into_iter()
@@ -295,11 +292,11 @@ impl MySqlAdapter {
             .collect())
     }
 
-    pub(in crate::infra::adapters::mysql) fn parse_table_detail_combined(
+    pub(in crate::adapters::mysql) fn parse_table_detail_combined(
         json: &str,
     ) -> Result<TableDetailCombined, DbOperationError> {
         let Some(trimmed) = non_empty_json(json) else {
-            return Err(DbOperationError::InvalidJson(
+            return Err(DbOperationError::EmptyResponse(
                 "table_detail_combined: empty response".to_string(),
             ));
         };
@@ -315,7 +312,7 @@ impl MySqlAdapter {
         }
 
         let combined: CombinedDetail = serde_json::from_str(trimmed)
-            .map_err(|e| DbOperationError::InvalidJson(e.to_string()))?;
+            .map_err(|e| DbOperationError::InvalidJson(std::sync::Arc::new(e)))?;
 
         let columns = Self::parse_columns(&combined.columns.to_string())?;
         let indexes = Self::parse_indexes(&combined.indexes.to_string())?;
@@ -326,11 +323,11 @@ impl MySqlAdapter {
         Ok((columns, indexes, foreign_keys, triggers, table_info))
     }
 
-    pub(in crate::infra::adapters::mysql) fn parse_table_columns_and_fks(
+    pub(in crate::adapters::mysql) fn parse_table_columns_and_fks(
         json: &str,
     ) -> Result<(Vec<Column>, Vec<ForeignKey>), DbOperationError> {
         let Some(trimmed) = non_empty_json(json) else {
-            return Err(DbOperationError::InvalidJson(
+            return Err(DbOperationError::EmptyResponse(
                 "table_columns_and_fks: empty response".to_string(),
             ));
         };
@@ -343,7 +340,7 @@ impl MySqlAdapter {
         }
 
         let light: LightDetail = serde_json::from_str(trimmed)
-            .map_err(|e| DbOperationError::InvalidJson(e.to_string()))?;
+            .map_err(|e| DbOperationError::InvalidJson(std::sync::Arc::new(e)))?;
 
         let columns = Self::parse_columns(&light.columns.to_string())?;
         let foreign_keys = Self::parse_foreign_keys(&light.foreign_keys.to_string())?;
@@ -354,8 +351,8 @@ impl MySqlAdapter {
 
 #[cfg(test)]
 mod tests {
-    use crate::app::ports::DbOperationError;
-    use crate::infra::adapters::mysql::MySqlAdapter;
+    use crate::adapters::mysql::MySqlAdapter;
+    use crate::app::ports::outbound::DbOperationError;
 
     mod table_parsing {
         use super::*;
@@ -415,8 +412,8 @@ mod tests {
             assert_eq!(result.len(), 1);
             assert_eq!(result[0].name, "id");
             assert_eq!(result[0].data_type, "int");
-            assert!(!result[0].nullable);
-            assert!(result[0].is_primary_key);
+            assert!(!result[0].is_nullable());
+            assert!(result[0].is_primary_key());
         }
 
         #[test]
@@ -495,7 +492,7 @@ mod tests {
             let result = MySqlAdapter::parse_indexes(json).unwrap();
 
             assert_eq!(result[0].index_type, IndexType::BTree);
-            assert!(result[0].is_primary);
+            assert!(result[0].is_primary());
         }
 
         #[test]
@@ -608,13 +605,13 @@ mod tests {
         #[test]
         fn empty_input_returns_error() {
             let result = MySqlAdapter::parse_table_detail_combined("");
-            assert!(matches!(result, Err(DbOperationError::InvalidJson(_))));
+            assert!(matches!(result, Err(DbOperationError::EmptyResponse(_))));
         }
 
         #[test]
         fn null_input_returns_error() {
             let result = MySqlAdapter::parse_table_detail_combined("null");
-            assert!(matches!(result, Err(DbOperationError::InvalidJson(_))));
+            assert!(matches!(result, Err(DbOperationError::EmptyResponse(_))));
         }
     }
 
@@ -634,7 +631,7 @@ mod tests {
         #[test]
         fn empty_input_returns_error() {
             let result = MySqlAdapter::parse_table_columns_and_fks("");
-            assert!(matches!(result, Err(DbOperationError::InvalidJson(_))));
+            assert!(matches!(result, Err(DbOperationError::EmptyResponse(_))));
         }
     }
 }

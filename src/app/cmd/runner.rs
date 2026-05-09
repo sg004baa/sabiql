@@ -8,30 +8,32 @@ use std::time::Instant;
 use color_eyre::eyre::Result;
 use tokio::sync::mpsc;
 
-use crate::app::cmd::browse as cmd_browse;
-use crate::app::cmd::cache::TtlCache;
-use crate::app::cmd::completion_engine::CompletionEngine;
-use crate::app::cmd::connection as cmd_connection;
-use crate::app::cmd::effect::Effect;
-use crate::app::cmd::er::handler as cmd_er;
-use crate::app::cmd::sql_editor::completion as cmd_completion;
-use crate::app::cmd::sql_editor::query_history as cmd_query_history;
-use crate::app::cmd::utility as cmd_utility;
-use crate::app::model::app_state::AppState;
-use crate::app::model::shared::ui_state::scroll_max_offset;
-use crate::app::ports::{
-    ClipboardWriter, ConfigWriter, ConnectionStore, DsnBuilder, ErDiagramExporter, ErLogWriter,
-    FolderOpener, MetadataProvider, QueryExecutor, QueryHistoryStore, Renderer, ServiceFileReader,
-};
-use crate::app::services::AppServices;
-use crate::app::update::action::Action;
+use crate::cmd::browse as cmd_browse;
+use crate::cmd::cache::TtlCache;
+use crate::cmd::completion_engine::CompletionEngine;
+use crate::cmd::connection as cmd_connection;
+use crate::cmd::effect::Effect;
+use crate::cmd::er::handler as cmd_er;
+use crate::cmd::settings as cmd_settings;
+use crate::cmd::sql_editor::completion as cmd_completion;
+use crate::cmd::sql_editor::query_history as cmd_query_history;
+use crate::cmd::utility as cmd_utility;
 use crate::domain::DatabaseMetadata;
 use crate::domain::connection::DatabaseType;
+use crate::model::app_state::AppState;
+use crate::model::shared::ui_state::scroll_max_offset;
+use crate::ports::outbound::{
+    ClipboardWriter, ConfigWriter, ConnectionStore, DsnBuilder, ErDiagramExporter, ErLogWriter,
+    FolderOpener, MetadataProvider, PgServiceEntryReader, QueryExecutor, QueryHistoryStore,
+    Renderer, SettingsStore,
+};
+use crate::services::AppServices;
+use crate::update::action::Action;
 
 struct ConnectionDeps {
     dsn_builder: Arc<dyn DsnBuilder>,
     connection_store: Arc<dyn ConnectionStore>,
-    service_file_reader: Arc<dyn ServiceFileReader>,
+    pg_service_entry_reader: Option<Arc<dyn PgServiceEntryReader>>,
 }
 
 struct QueryDeps {
@@ -50,12 +52,17 @@ struct UtilityDeps {
     folder_opener: Arc<dyn FolderOpener>,
 }
 
+struct SettingsDeps {
+    settings_store: Arc<dyn SettingsStore>,
+}
+
 pub struct EffectRunner {
     metadata_provider: Arc<dyn MetadataProvider>,
     connection: ConnectionDeps,
     query: QueryDeps,
     er: ErDeps,
     utility: UtilityDeps,
+    settings: SettingsDeps,
     metadata_cache: TtlCache<String, Arc<DatabaseMetadata>>,
     action_tx: mpsc::Sender<Action>,
     on_database_type_change: Option<Box<dyn Fn(DatabaseType) + Send + Sync>>,
@@ -69,10 +76,11 @@ pub struct EffectRunnerBuilder {
     config_writer: Option<Arc<dyn ConfigWriter>>,
     er_log_writer: Option<Arc<dyn ErLogWriter>>,
     connection_store: Option<Arc<dyn ConnectionStore>>,
-    service_file_reader: Option<Arc<dyn ServiceFileReader>>,
+    pg_service_entry_reader: Option<Arc<dyn PgServiceEntryReader>>,
     clipboard: Option<Arc<dyn ClipboardWriter>>,
     folder_opener: Option<Arc<dyn FolderOpener>>,
     query_history_store: Option<Arc<dyn QueryHistoryStore>>,
+    settings_store: Option<Arc<dyn SettingsStore>>,
     metadata_cache: Option<TtlCache<String, Arc<DatabaseMetadata>>>,
     action_tx: Option<mpsc::Sender<Action>>,
     on_database_type_change: Option<Box<dyn Fn(DatabaseType) + Send + Sync>>,
@@ -115,8 +123,8 @@ impl EffectRunnerBuilder {
         self
     }
     #[must_use]
-    pub fn service_file_reader(mut self, v: Arc<dyn ServiceFileReader>) -> Self {
-        self.service_file_reader = Some(v);
+    pub fn pg_service_entry_reader(mut self, v: Arc<dyn PgServiceEntryReader>) -> Self {
+        self.pg_service_entry_reader = Some(v);
         self
     }
     #[must_use]
@@ -132,6 +140,11 @@ impl EffectRunnerBuilder {
     #[must_use]
     pub fn query_history_store(mut self, v: Arc<dyn QueryHistoryStore>) -> Self {
         self.query_history_store = Some(v);
+        self
+    }
+    #[must_use]
+    pub fn settings_store(mut self, v: Arc<dyn SettingsStore>) -> Self {
+        self.settings_store = Some(v);
         self
     }
     #[must_use]
@@ -158,9 +171,7 @@ impl EffectRunnerBuilder {
             connection: ConnectionDeps {
                 dsn_builder: self.dsn_builder.expect("dsn_builder is required"),
                 connection_store: self.connection_store.expect("connection_store is required"),
-                service_file_reader: self
-                    .service_file_reader
-                    .expect("service_file_reader is required"),
+                pg_service_entry_reader: self.pg_service_entry_reader,
             },
             query: QueryDeps {
                 query_executor: self.query_executor.expect("query_executor is required"),
@@ -176,6 +187,9 @@ impl EffectRunnerBuilder {
             utility: UtilityDeps {
                 clipboard: self.clipboard.expect("clipboard is required"),
                 folder_opener: self.folder_opener.expect("folder_opener is required"),
+            },
+            settings: SettingsDeps {
+                settings_store: self.settings_store.expect("settings_store is required"),
             },
             metadata_cache: self.metadata_cache.expect("metadata_cache is required"),
             action_tx: self.action_tx.expect("action_tx is required"),
@@ -198,10 +212,11 @@ impl EffectRunner {
             config_writer: None,
             er_log_writer: None,
             connection_store: None,
-            service_file_reader: None,
+            pg_service_entry_reader: None,
             clipboard: None,
             folder_opener: None,
             query_history_store: None,
+            settings_store: None,
             metadata_cache: None,
             action_tx: None,
             on_database_type_change: None,
@@ -289,6 +304,9 @@ impl EffectRunner {
                 if let Some(height) = output.query_history_picker_pane_height {
                     state.query_history_picker.pane_height = height;
                 }
+                if let Some(width) = output.query_history_picker_filter_visible_width {
+                    state.query_history_picker.filter_visible_width = width;
+                }
                 if let Some(visible_rows) = output.jsonb_detail_editor_visible_rows {
                     state.ui.jsonb_detail_editor_visible_rows = visible_rows;
                     state.jsonb_detail.editor_mut().update_scroll(visible_rows);
@@ -345,7 +363,7 @@ impl EffectRunner {
                     &self.metadata_provider,
                     &self.metadata_cache,
                     &self.connection.connection_store,
-                    &self.connection.service_file_reader,
+                    self.connection.pg_service_entry_reader.as_ref(),
                     state,
                 )
                 .await?;
@@ -410,6 +428,11 @@ impl EffectRunner {
                 Ok(vec![])
             }
 
+            e @ Effect::SaveSettings { .. } => {
+                cmd_settings::run(e, &self.action_tx, &self.settings.settings_store).await;
+                Ok(vec![])
+            }
+
             e @ (Effect::CacheTableInCompletionEngine { .. }
             | Effect::EvictTablesFromCompletionCache { .. }
             | Effect::ClearCompletionEngineCache
@@ -425,14 +448,13 @@ impl EffectRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::cmd::test_support::*;
-    use crate::app::ports::RenderOutput;
-    use crate::app::ports::connection_store::MockConnectionStore;
-    use crate::app::ports::metadata::MockMetadataProvider;
-    use crate::app::ports::query_executor::MockQueryExecutor;
-    use crate::app::services::AppServices;
+    use crate::cmd::test_support::*;
     use crate::domain::{DatabaseMetadata, TableSummary};
-    use color_eyre::eyre::Result;
+    use crate::ports::outbound::connection_store::MockConnectionStore;
+    use crate::ports::outbound::metadata::MockMetadataProvider;
+    use crate::ports::outbound::query_executor::MockQueryExecutor;
+    use crate::ports::outbound::{RenderOutput, RenderResult};
+    use crate::services::AppServices;
     use tokio::sync::mpsc;
 
     struct NoopRenderer;
@@ -442,14 +464,14 @@ mod tests {
             _state: &AppState,
             _services: &AppServices,
             _now: Instant,
-        ) -> Result<RenderOutput> {
+        ) -> RenderResult<RenderOutput> {
             Ok(RenderOutput::default())
         }
     }
 
     mod render {
         use super::*;
-        use crate::app::model::browse::jsonb_detail::JsonbDetailState;
+        use crate::model::browse::jsonb_detail::JsonbDetailState;
 
         struct ExplorerWidthRenderer {
             explorer_content_width: usize,
@@ -465,7 +487,7 @@ mod tests {
                 _state: &AppState,
                 _services: &AppServices,
                 _now: Instant,
-            ) -> Result<RenderOutput> {
+            ) -> RenderResult<RenderOutput> {
                 Ok(RenderOutput {
                     explorer_content_width: self.explorer_content_width,
                     ..RenderOutput::default()
@@ -479,7 +501,7 @@ mod tests {
                 _state: &AppState,
                 _services: &AppServices,
                 _now: Instant,
-            ) -> Result<RenderOutput> {
+            ) -> RenderResult<RenderOutput> {
                 Ok(RenderOutput {
                     jsonb_detail_editor_visible_rows: Some(self.visible_rows),
                     ..RenderOutput::default()

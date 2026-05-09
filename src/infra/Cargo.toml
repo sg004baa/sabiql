@@ -1,0 +1,29 @@
+[package]
+name = "sabiql-infra"
+version.workspace = true
+edition.workspace = true
+description = "Infrastructure layer for sabiql"
+license.workspace = true
+repository.workspace = true
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+arboard.workspace = true
+async-trait.workspace = true
+csv.workspace = true
+dirs.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+toml.workspace = true
+urlencoding.workspace = true
+sabiql-app.workspace = true
+sabiql-domain.workspace = true
+
+[dev-dependencies]
+rstest.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

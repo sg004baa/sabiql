@@ -7,26 +7,29 @@ use crate::app::model::app_state::AppState;
 use crate::app::model::shared::input_mode::InputMode;
 use crate::app::model::shared::ui_state::explorer_content_width_from_pane_width;
 use crate::app::model::shared::viewport::ViewportPlan;
-use crate::app::ports::RenderOutput;
+use crate::app::ports::outbound::RenderOutput;
 use crate::app::services::AppServices;
-use crate::ui::features::browse::explorer::Explorer;
-use crate::ui::features::browse::inspector::Inspector;
-use crate::ui::features::browse::jsonb_detail::{JsonbDetail, JsonbDetailRenderMetrics};
-use crate::ui::features::browse::result::ResultPane;
-use crate::ui::features::connections::error::ConnectionError;
-use crate::ui::features::connections::selector::ConnectionSelector;
-use crate::ui::features::connections::setup::ConnectionSetup;
-use crate::ui::features::overlays::confirm_dialog::{ConfirmDialog, ConfirmPreviewMetrics};
-use crate::ui::features::overlays::help::HelpOverlay;
-use crate::ui::features::pickers::command_palette::CommandPalette;
-use crate::ui::features::pickers::er_table_picker::{ErTablePicker, ErTablePickerRenderMetrics};
-use crate::ui::features::pickers::query_history_picker::QueryHistoryPicker;
-use crate::ui::features::pickers::table_picker::{TablePicker, TablePickerRenderMetrics};
-use crate::ui::features::sql_modal::SqlModal;
-use crate::ui::shell::command_line::CommandLine;
-use crate::ui::shell::footer::Footer;
-use crate::ui::shell::header::Header;
-use crate::ui::theme::{ThemePalette, palette_for};
+use crate::features::browse::explorer::Explorer;
+use crate::features::browse::inspector::Inspector;
+use crate::features::browse::jsonb_detail::{JsonbDetail, JsonbDetailRenderMetrics};
+use crate::features::browse::result::ResultPane;
+use crate::features::connections::error::ConnectionError;
+use crate::features::connections::selector::ConnectionSelector;
+use crate::features::connections::setup::ConnectionSetup;
+use crate::features::overlays::confirm_dialog::{ConfirmDialog, ConfirmPreviewMetrics};
+use crate::features::overlays::help::HelpOverlay;
+use crate::features::overlays::settings::SettingsOverlay;
+use crate::features::pickers::command_palette::CommandPalette;
+use crate::features::pickers::er_table_picker::{ErTablePicker, ErTablePickerRenderMetrics};
+use crate::features::pickers::query_history_picker::{
+    QueryHistoryPicker, QueryHistoryPickerRenderMetrics,
+};
+use crate::features::pickers::table_picker::{TablePicker, TablePickerRenderMetrics};
+use crate::features::sql_modal::SqlModal;
+use crate::shell::command_line::CommandLine;
+use crate::shell::footer::Footer;
+use crate::shell::header::Header;
+use crate::theme::{ThemePalette, palette_for};
 
 pub struct MainLayout;
 
@@ -48,9 +51,8 @@ impl MainLayout {
         )
     }
 
-    #[cfg(any(test, feature = "test-support"))]
     // `render_with_theme` exists only as a test seam for injected palettes.
-    // It is hidden from docs and omitted from production builds.
+    #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn render_with_theme(
         frame: &mut Frame,
@@ -84,7 +86,7 @@ impl MainLayout {
         Header::render(frame, header_area, state, theme);
         let output = Self::render_browse_mode(frame, main_area, state, services, now, theme);
 
-        Footer::render(frame, footer_area, state, time_ms, theme);
+        Footer::render(frame, footer_area, state, services, time_ms, theme);
         let command_line_visible_width = CommandLine::render(frame, cmdline_area, state, theme);
         let connection_list_pane_height = match state.input_mode() {
             InputMode::ConnectionSelector => Some(ConnectionSelector::render(frame, state, theme)),
@@ -114,10 +116,17 @@ impl MainLayout {
             _ => (None, None),
         };
 
-        let query_history_picker_pane_height = match state.input_mode() {
-            InputMode::QueryHistoryPicker => Some(QueryHistoryPicker::render(frame, state, theme)),
-            _ => None,
-        };
+        let (query_history_picker_pane_height, query_history_picker_filter_visible_width) =
+            match state.input_mode() {
+                InputMode::QueryHistoryPicker => {
+                    let QueryHistoryPickerRenderMetrics {
+                        pane_height,
+                        filter_visible_width,
+                    } = QueryHistoryPicker::render(frame, state, theme);
+                    (Some(pane_height), Some(filter_visible_width))
+                }
+                _ => (None, None),
+            };
 
         let (
             confirm_preview_viewport_height,
@@ -136,7 +145,7 @@ impl MainLayout {
         };
 
         let explain_compare_viewport_height = if matches!(state.input_mode(), InputMode::SqlModal) {
-            SqlModal::render(frame, state, now, theme)
+            SqlModal::render(frame, state, services, now, theme)
         } else {
             None
         };
@@ -154,6 +163,7 @@ impl MainLayout {
 
         match state.input_mode() {
             InputMode::CommandPalette => CommandPalette::render(frame, state, theme),
+            InputMode::Settings => SettingsOverlay::render(frame, state, theme),
             InputMode::Help => HelpOverlay::render(frame, state, theme),
             InputMode::ConnectionSetup => ConnectionSetup::render(frame, state, theme),
             InputMode::ConnectionError => ConnectionError::render(frame, state, now, theme),
@@ -168,6 +178,7 @@ impl MainLayout {
             er_picker_pane_height,
             er_picker_filter_visible_width,
             query_history_picker_pane_height,
+            query_history_picker_filter_visible_width,
             jsonb_detail_editor_visible_rows,
             confirm_preview_viewport_height,
             confirm_preview_content_height,

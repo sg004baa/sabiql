@@ -1,16 +1,21 @@
-use crate::app::cmd::effect::Effect;
-use crate::app::model::app_state::AppState;
-use crate::app::model::shared::inspector_tab::InspectorTab;
-use crate::app::model::shared::viewport::{
-    calculate_next_column_offset, calculate_prev_column_offset,
-};
-use crate::app::services::AppServices;
-use crate::app::update::action::{Action, ScrollAmount, ScrollDirection, ScrollTarget};
+use crate::cmd::effect::Effect;
+use crate::model::app_state::AppState;
+use crate::model::shared::inspector_tab::InspectorTab;
+use crate::model::shared::viewport::{calculate_next_column_offset, calculate_prev_column_offset};
+use crate::services::AppServices;
+use crate::update::action::{Action, ScrollAmount, ScrollDirection, ScrollTarget};
 
 use super::inspector_max_scroll;
 
-fn inspector_page_scroll_delta(state: &AppState, amount: ScrollAmount) -> Option<usize> {
-    let visible = match state.ui.inspector_tab {
+fn inspector_page_scroll_delta(
+    state: &AppState,
+    services: &AppServices,
+    amount: ScrollAmount,
+) -> Option<usize> {
+    let visible = match services
+        .db_capabilities
+        .normalize_inspector_tab(state.ui.inspector_tab)
+    {
         InspectorTab::Ddl => state.inspector_ddl_visible_rows(),
         _ => state.inspector_visible_rows(),
     };
@@ -55,7 +60,7 @@ pub fn reduce(
             direction,
             amount: amount @ (ScrollAmount::HalfPage | ScrollAmount::FullPage),
         } => {
-            if let Some(delta) = inspector_page_scroll_delta(state, *amount) {
+            if let Some(delta) = inspector_page_scroll_delta(state, services, *amount) {
                 let max = inspector_max_scroll(state, services);
                 state.ui.inspector_scroll_offset =
                     direction.clamp_vertical_offset(state.ui.inspector_scroll_offset, max, delta);
@@ -93,8 +98,9 @@ pub fn reduce(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::update::browse::navigation::reduce_navigation;
-    use crate::domain::{Column, Table};
+    use crate::domain::{Column, ColumnAttributes, Table};
+    use crate::model::shared::db_capabilities::DbCapabilities;
+    use crate::update::browse::navigation::reduce_navigation;
     use std::time::Instant;
 
     mod inspector_scroll_top_bottom {
@@ -108,10 +114,8 @@ mod tests {
                 .map(|i| Column {
                     name: format!("col_{i}"),
                     data_type: "text".to_string(),
-                    nullable: false,
                     default: None,
-                    is_primary_key: false,
-                    is_unique: false,
+                    attributes: ColumnAttributes::empty(),
                     comment: None,
                     ordinal_position: i as i32,
                 })
@@ -251,6 +255,62 @@ mod tests {
 
             assert!(effects.is_some());
             assert_eq!(state.ui.inspector_scroll_offset, 0);
+        }
+
+        fn services_without_ddl() -> AppServices {
+            let mut services = AppServices::stub();
+            services.db_capabilities =
+                DbCapabilities::new(true, vec![InspectorTab::Info, InspectorTab::Columns]);
+            services
+        }
+
+        #[test]
+        fn inspector_half_page_scroll_normalizes_unsupported_ddl_tab() {
+            let mut state = state_with_table_detail(20);
+            let services = services_without_ddl();
+            state.ui.inspector_pane_height = 7;
+            state.ui.inspector_tab = InspectorTab::Ddl;
+            state.ui.inspector_scroll_offset = 1;
+            let expected_delta = ScrollAmount::HalfPage
+                .page_delta(state.inspector_visible_rows())
+                .unwrap();
+
+            let effects = reduce_navigation(
+                &mut state,
+                &Action::Scroll {
+                    target: ScrollTarget::Inspector,
+                    direction: ScrollDirection::Down,
+                    amount: ScrollAmount::HalfPage,
+                },
+                &services,
+                Instant::now(),
+            );
+
+            assert!(effects.is_some());
+            assert_eq!(state.ui.inspector_scroll_offset, 1 + expected_delta);
+        }
+
+        #[test]
+        fn inspector_full_page_scroll_normalizes_unsupported_ddl_tab() {
+            let mut state = state_with_table_detail(20);
+            let services = services_without_ddl();
+            state.ui.inspector_pane_height = 7;
+            state.ui.inspector_tab = InspectorTab::Ddl;
+            state.ui.inspector_scroll_offset = 1;
+
+            let effects = reduce_navigation(
+                &mut state,
+                &Action::Scroll {
+                    target: ScrollTarget::Inspector,
+                    direction: ScrollDirection::Down,
+                    amount: ScrollAmount::FullPage,
+                },
+                &services,
+                Instant::now(),
+            );
+
+            assert!(effects.is_some());
+            assert_eq!(state.ui.inspector_scroll_offset, 3);
         }
     }
 }

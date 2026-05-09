@@ -13,14 +13,12 @@ use crate::app::model::shared::inspector_tab::InspectorTab;
 use crate::app::model::shared::viewport::{
     ColumnWidthConfig, MAX_COL_WIDTH, SelectionContext, ViewportPlan, select_viewport_columns,
 };
-use crate::app::ports::DdlGenerator;
+use crate::app::ports::outbound::DdlGenerator;
 use crate::app::services::AppServices;
 use crate::domain::Table;
-use crate::ui::primitives::atoms::panel_block;
-use crate::ui::primitives::utils::text_utils::{
-    MIN_COL_WIDTH, PADDING, calculate_header_min_widths,
-};
-use crate::ui::theme::ThemePalette;
+use crate::primitives::atoms::panel_block;
+use crate::primitives::utils::text_utils::{MIN_COL_WIDTH, PADDING, calculate_header_min_widths};
+use crate::theme::ThemePalette;
 
 pub struct Inspector;
 
@@ -36,21 +34,41 @@ impl Inspector {
         let is_focused = state.ui.focused_pane == FocusedPane::Inspector;
         let [tab_area, content_area] =
             Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(area);
+        let active_tab = services
+            .db_capabilities
+            .normalize_inspector_tab(state.ui.inspector_tab);
 
-        Self::render_tab_bar(frame, tab_area, state, theme);
-        Self::render_content(frame, content_area, state, is_focused, services, now, theme)
+        Self::render_tab_bar(frame, tab_area, active_tab, services, theme);
+        Self::render_content(
+            frame,
+            content_area,
+            state,
+            active_tab,
+            is_focused,
+            services,
+            now,
+            theme,
+        )
     }
 
-    fn render_tab_bar(frame: &mut Frame, area: Rect, state: &AppState, theme: &ThemePalette) {
-        let tabs: Vec<Span> = InspectorTab::all()
+    fn render_tab_bar(
+        frame: &mut Frame,
+        area: Rect,
+        active_tab: InspectorTab,
+        services: &AppServices,
+        theme: &ThemePalette,
+    ) {
+        let tabs: Vec<Span> = services
+            .db_capabilities
+            .supported_inspector_tabs()
             .iter()
             .enumerate()
             .flat_map(|(i, tab)| {
-                let is_selected = *tab == state.ui.inspector_tab;
+                let is_selected = *tab == active_tab;
                 let style = if is_selected {
                     Style::default()
                         .fg(theme.component.navigation.tab_active)
-                        .add_modifier(Modifier::BOLD)
+                        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
                 } else {
                     Style::default().fg(theme.component.navigation.tab_inactive)
                 };
@@ -73,6 +91,7 @@ impl Inspector {
         frame: &mut Frame,
         area: Rect,
         state: &AppState,
+        active_tab: InspectorTab,
         is_focused: bool,
         services: &AppServices,
         now: Instant,
@@ -84,7 +103,7 @@ impl Inspector {
             let inner = block.inner(area);
             frame.render_widget(block, area);
 
-            match state.ui.inspector_tab {
+            match active_tab {
                 InspectorTab::Info => {
                     Self::render_info(frame, inner, table, state.ui.inspector_scroll_offset, theme);
                     ViewportPlan::default()
@@ -213,7 +232,7 @@ impl Inspector {
         let total_lines = lines.len();
         let visible_lines = area.height as usize;
 
-        use crate::ui::primitives::atoms::scroll_indicator::clamp_scroll_offset;
+        use crate::primitives::atoms::scroll_indicator::clamp_scroll_offset;
         let clamped_scroll_offset = clamp_scroll_offset(scroll_offset, visible_lines, total_lines);
 
         let paragraph = Paragraph::new(lines)
@@ -248,12 +267,12 @@ impl Inspector {
                 vec![
                     col.name.clone(),
                     col.data_type.clone(),
-                    if col.nullable {
+                    if col.is_nullable() {
                         "✓".to_string()
                     } else {
                         String::new()
                     },
-                    if col.is_primary_key {
+                    if col.is_primary_key() {
                         "✓".to_string()
                     } else {
                         String::new()
@@ -370,7 +389,7 @@ impl Inspector {
             .style(Style::default().fg(theme.semantic.text.primary));
         frame.render_widget(table_widget, area);
 
-        use crate::ui::primitives::atoms::scroll_indicator::{
+        use crate::primitives::atoms::scroll_indicator::{
             HorizontalScrollParams, VerticalScrollParams, render_horizontal_scroll_indicator,
             render_vertical_scroll_indicator_bar,
         };
@@ -418,7 +437,7 @@ impl Inspector {
                     idx.name.clone(),
                     idx.columns.join(", "),
                     format!("{:?}", idx.index_type).to_lowercase(),
-                    if idx.is_unique {
+                    if idx.is_unique() {
                         "✓".to_string()
                     } else {
                         String::new()
@@ -429,7 +448,7 @@ impl Inspector {
         let (col_widths, _) = calculate_column_widths(&headers, &data_rows);
         let widths: Vec<Constraint> = col_widths.iter().map(|&w| Constraint::Length(w)).collect();
 
-        use crate::ui::primitives::molecules::{StripedTableConfig, render_striped_table};
+        use crate::primitives::molecules::{StripedTableConfig, render_striped_table};
         render_striped_table(
             frame,
             area,
@@ -447,7 +466,7 @@ impl Inspector {
                     Cell::from(index.name.clone()),
                     Cell::from(index.columns.join(", ")),
                     Cell::from(format!("{:?}", index.index_type).to_lowercase()),
-                    Cell::from(if index.is_unique { "✓" } else { "" }),
+                    Cell::from(if index.is_unique() { "✓" } else { "" }),
                 ]
             },
         );
@@ -482,7 +501,7 @@ impl Inspector {
         let (col_widths, _) = calculate_column_widths(&headers, &data_rows);
         let widths: Vec<Constraint> = col_widths.iter().map(|&w| Constraint::Length(w)).collect();
 
-        use crate::ui::primitives::molecules::{StripedTableConfig, render_striped_table};
+        use crate::primitives::molecules::{StripedTableConfig, render_striped_table};
         render_striped_table(
             frame,
             area,
@@ -577,7 +596,7 @@ impl Inspector {
                 let total_lines = lines.len();
                 let visible_lines = area.height as usize;
 
-                use crate::ui::primitives::atoms::scroll_indicator::{
+                use crate::primitives::atoms::scroll_indicator::{
                     VerticalScrollParams, clamp_scroll_offset, render_vertical_scroll_indicator_bar,
                 };
                 let clamped_scroll_offset =
@@ -620,7 +639,7 @@ impl Inspector {
             Constraint::Percentage(15),
         ];
 
-        use crate::ui::primitives::molecules::{StripedTableConfig, render_striped_table};
+        use crate::primitives::molecules::{StripedTableConfig, render_striped_table};
         render_striped_table(
             frame,
             area,
@@ -670,7 +689,7 @@ impl Inspector {
         let total_lines = ddl.lines().count();
         let visible_lines = area.height as usize;
 
-        use crate::ui::primitives::atoms::scroll_indicator::{
+        use crate::primitives::atoms::scroll_indicator::{
             VerticalScrollParams, clamp_scroll_offset, render_vertical_scroll_indicator_bar,
         };
         let clamped_scroll_offset = clamp_scroll_offset(scroll_offset, visible_lines, total_lines);
@@ -684,7 +703,7 @@ impl Inspector {
             })
             .collect();
 
-        crate::ui::primitives::atoms::apply_yank_flash(&mut lines, flash_active, theme);
+        crate::primitives::atoms::apply_yank_flash(&mut lines, flash_active, theme);
 
         let paragraph = Paragraph::new(lines)
             .wrap(Wrap { trim: false })

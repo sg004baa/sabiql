@@ -2,8 +2,9 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 use async_trait::async_trait;
 
-use crate::app::ports::{
-    DbOperationError, DdlGenerator, DsnBuilder, MetadataProvider, QueryExecutor, SqlDialect,
+use crate::app::ports::outbound::{
+    DatabaseCapabilities, DatabaseCapabilityProvider, DbOperationError, DdlGenerator, DsnBuilder,
+    MetadataProvider, QueryExecutor, SqlDialect,
 };
 use crate::domain::connection::{ConnectionProfile, DatabaseType};
 use crate::domain::{DatabaseMetadata, QueryResult, Table, TableSignature, WriteExecutionResult};
@@ -56,6 +57,15 @@ impl DispatchAdapter {
 impl Default for DispatchAdapter {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl DatabaseCapabilityProvider for DispatchAdapter {
+    fn capabilities(&self) -> DatabaseCapabilities {
+        match self.active_type() {
+            DatabaseType::MySQL => self.mysql.capabilities(),
+            DatabaseType::PostgreSQL => self.postgres.capabilities(),
+        }
     }
 }
 
@@ -207,6 +217,20 @@ impl DsnBuilder for DispatchAdapter {
 }
 
 impl SqlDialect for DispatchAdapter {
+    fn build_explain_sql(&self, query: &str) -> Option<String> {
+        match self.active_type() {
+            DatabaseType::MySQL => self.mysql.build_explain_sql(query),
+            DatabaseType::PostgreSQL => self.postgres.build_explain_sql(query),
+        }
+    }
+
+    fn build_explain_analyze_sql(&self, query: &str) -> Option<String> {
+        match self.active_type() {
+            DatabaseType::MySQL => self.mysql.build_explain_analyze_sql(query),
+            DatabaseType::PostgreSQL => self.postgres.build_explain_analyze_sql(query),
+        }
+    }
+
     fn build_update_sql(
         &self,
         schema: &str,
@@ -301,7 +325,7 @@ mod tests {
 
     mod dsn_builder_dispatch {
         use super::*;
-        use crate::app::ports::DsnBuilder;
+        use crate::app::ports::outbound::DsnBuilder;
         use crate::domain::connection::SslMode;
 
         #[test]
@@ -345,8 +369,8 @@ mod tests {
 
     mod sync_trait_dispatch {
         use super::*;
-        use crate::app::ports::{DdlGenerator, SqlDialect};
-        use crate::domain::{Column, Table};
+        use crate::app::ports::outbound::{DdlGenerator, SqlDialect};
+        use crate::domain::{Column, ColumnAttributes, Table};
 
         fn make_table() -> Table {
             Table {
@@ -356,10 +380,8 @@ mod tests {
                 columns: vec![Column {
                     name: "id".to_string(),
                     data_type: "int".to_string(),
-                    nullable: false,
-                    is_primary_key: true,
+                    attributes: ColumnAttributes::from_parts(false, true, false),
                     default: None,
-                    is_unique: false,
                     comment: None,
                     ordinal_position: 1,
                 }],

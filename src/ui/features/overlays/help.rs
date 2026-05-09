@@ -1,27 +1,31 @@
 use ratatui::Frame;
-use ratatui::layout::Constraint;
+use ratatui::layout::{Constraint, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Wrap};
+use ratatui::widgets::Paragraph;
 
-use crate::ui::theme::ThemePalette;
+use crate::theme::ThemePalette;
 
 use crate::app::model::app_state::AppState;
-use crate::app::model::shared::ui_state::HELP_MODAL_HEIGHT_PERCENT;
+use crate::app::model::shared::ui_state::{
+    HELP_MODAL_HEIGHT_PERCENT, HELP_MODAL_WIDTH_PERCENT, HelpViewportLayout,
+    help_viewport_layout_for,
+};
 use crate::app::update::input::keybindings::{
     CELL_EDIT_KEYS, COMMAND_LINE_KEYS, COMMAND_PALETTE_ROWS, CONFIRM_DIALOG_KEYS,
     CONNECTION_ERROR_ROWS, CONNECTION_SELECTOR_ROWS, CONNECTION_SETUP_KEYS, ER_PICKER_ROWS,
     GLOBAL_KEYS, HELP_ROWS, HISTORY_KEYS, INSPECTOR_DDL_KEYS, JSONB_DETAIL_ROWS, JSONB_EDIT_ROWS,
     JSONB_SEARCH_KEYS, KeyBinding, ModeRow, NAVIGATION_KEYS, OVERLAY_KEYS,
-    QUERY_HISTORY_PICKER_ROWS, RESULT_ACTIVE_KEYS, SQL_MODAL_COMPARE_KEYS,
+    QUERY_HISTORY_PICKER_ROWS, RESULT_ACTIVE_KEYS, SETTINGS_ROWS, SQL_MODAL_COMPARE_KEYS,
     SQL_MODAL_CONFIRMING_KEYS, SQL_MODAL_KEYS, SQL_MODAL_NORMAL_KEYS, SQL_MODAL_PLAN_KEYS,
-    TABLE_PICKER_ROWS,
+    TABLE_PICKER_ROWS, help_content_width,
 };
 
-use crate::ui::primitives::atoms::scroll_indicator::{
-    VerticalScrollParams, clamp_scroll_offset, render_vertical_scroll_indicator_bar,
+use crate::primitives::atoms::scroll_indicator::{
+    HorizontalScrollParams, VerticalScrollParams, clamp_scroll_offset,
+    render_horizontal_scroll_indicator, render_vertical_scroll_indicator_bar,
 };
-use crate::ui::primitives::molecules::render_modal;
+use crate::primitives::molecules::render_modal;
 
 pub struct HelpOverlay;
 
@@ -29,7 +33,7 @@ impl HelpOverlay {
     pub fn render(frame: &mut Frame, state: &AppState, theme: &ThemePalette) {
         let (_, inner) = render_modal(
             frame,
-            Constraint::Percentage(70),
+            Constraint::Percentage(HELP_MODAL_WIDTH_PERCENT),
             Constraint::Percentage(HELP_MODAL_HEIGHT_PERCENT),
             " Help ",
             " ?/Esc/q Close ",
@@ -159,6 +163,12 @@ impl HelpOverlay {
         }
 
         help_lines.push(Line::from(""));
+        help_lines.push(Self::section("Settings", theme));
+        for row in SETTINGS_ROWS {
+            help_lines.push(Self::key_line(row.key, row.description, key_width, theme));
+        }
+
+        help_lines.push(Line::from(""));
         help_lines.push(Self::section("Help Overlay", theme));
         for row in HELP_ROWS {
             help_lines.push(Self::key_line(row.key, row.description, key_width, theme));
@@ -189,28 +199,64 @@ impl HelpOverlay {
         }
 
         let total_lines = help_lines.len();
-        let viewport_height = inner.height as usize;
+        let content_width = help_content_width();
+        let viewport = help_viewport_layout_for(
+            inner.height as usize,
+            inner.width as usize,
+            total_lines,
+            content_width,
+        );
+        let content_area = Self::content_area(inner, viewport);
+        let viewport_height = content_area.height as usize;
         let scroll_offset =
             clamp_scroll_offset(state.ui.help_scroll_offset, viewport_height, total_lines);
+        let viewport_width = content_area.width as usize;
+        let horizontal_offset = clamp_scroll_offset(
+            state.ui.help_horizontal_offset,
+            viewport_width,
+            content_width,
+        );
 
         let help = Paragraph::new(help_lines)
-            .wrap(Wrap { trim: false })
             .style(Style::default())
-            .scroll((scroll_offset as u16, 0));
+            .scroll((scroll_offset as u16, horizontal_offset as u16));
 
-        frame.render_widget(help, inner);
+        frame.render_widget(help, content_area);
 
-        render_vertical_scroll_indicator_bar(
-            frame,
-            inner,
-            VerticalScrollParams {
-                position: scroll_offset,
-                viewport_size: viewport_height,
-                total_items: total_lines,
-                has_horizontal_scrollbar: false,
-            },
-            theme,
-        );
+        if viewport.has_horizontal_scrollbar {
+            render_horizontal_scroll_indicator(
+                frame,
+                inner,
+                HorizontalScrollParams {
+                    position: horizontal_offset,
+                    viewport_size: viewport_width,
+                    total_items: content_width,
+                },
+                theme,
+            );
+        }
+
+        if viewport.has_vertical_scrollbar {
+            render_vertical_scroll_indicator_bar(
+                frame,
+                inner,
+                VerticalScrollParams {
+                    position: scroll_offset,
+                    viewport_size: viewport_height,
+                    total_items: total_lines,
+                    has_horizontal_scrollbar: viewport.has_horizontal_scrollbar,
+                },
+                theme,
+            );
+        }
+    }
+
+    fn content_area(inner: Rect, viewport: HelpViewportLayout) -> Rect {
+        Rect {
+            height: viewport.visible_rows as u16,
+            width: viewport.visible_columns as u16,
+            ..inner
+        }
     }
 
     fn section(title: &str, theme: &ThemePalette) -> Line<'static> {
@@ -308,6 +354,7 @@ impl HelpOverlay {
             QUERY_HISTORY_PICKER_ROWS,
             TABLE_PICKER_ROWS,
             COMMAND_PALETTE_ROWS,
+            SETTINGS_ROWS,
             HELP_ROWS,
             JSONB_DETAIL_ROWS,
             JSONB_EDIT_ROWS,

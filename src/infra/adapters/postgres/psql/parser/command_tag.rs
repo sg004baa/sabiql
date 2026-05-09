@@ -3,60 +3,94 @@ use crate::domain::CommandTag;
 use super::super::super::PostgresAdapter;
 use super::lexer::{has_select_into, split_sql_statements};
 
+#[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
+pub(in crate::adapters::postgres) enum ParseCommandTagError {
+    #[error("empty command tag")]
+    Empty,
+    #[error("invalid command tag: {input}")]
+    Invalid { input: String },
+}
+
 impl PostgresAdapter {
-    pub(in crate::infra::adapters::postgres) fn parse_command_tag(tag: &str) -> Option<CommandTag> {
+    fn parse_command_tag_str(tag: &str) -> Result<CommandTag, ParseCommandTagError> {
         let trimmed = tag.trim();
         if trimmed.is_empty() {
-            return None;
+            return Err(ParseCommandTagError::Empty);
         }
 
         let parts: Vec<&str> = trimmed.split_whitespace().collect();
-        match parts.first().copied()? {
+        let invalid = || ParseCommandTagError::Invalid {
+            input: tag.to_string(),
+        };
+
+        match parts[0] {
             "SELECT" => {
-                let n = parts.get(1)?.parse::<u64>().ok()?;
-                Some(CommandTag::Select(n))
+                let n = parts
+                    .get(1)
+                    .ok_or_else(&invalid)?
+                    .parse::<u64>()
+                    .map_err(|_| invalid())?;
+                Ok(CommandTag::Select(n))
             }
             "INSERT" => {
                 // INSERT oid count — count is at index 2
-                let n = parts.get(2)?.parse::<u64>().ok()?;
-                Some(CommandTag::Insert(n))
+                let n = parts
+                    .get(2)
+                    .ok_or_else(&invalid)?
+                    .parse::<u64>()
+                    .map_err(|_| invalid())?;
+                Ok(CommandTag::Insert(n))
             }
             "UPDATE" => {
-                let n = parts.get(1)?.parse::<u64>().ok()?;
-                Some(CommandTag::Update(n))
+                let n = parts
+                    .get(1)
+                    .ok_or_else(&invalid)?
+                    .parse::<u64>()
+                    .map_err(|_| invalid())?;
+                Ok(CommandTag::Update(n))
             }
             "DELETE" => {
-                let n = parts.get(1)?.parse::<u64>().ok()?;
-                Some(CommandTag::Delete(n))
+                let n = parts
+                    .get(1)
+                    .ok_or_else(&invalid)?
+                    .parse::<u64>()
+                    .map_err(|_| invalid())?;
+                Ok(CommandTag::Delete(n))
             }
             "CREATE" => {
-                let obj = parts.get(1)?;
-                Some(CommandTag::Create(obj.to_string()))
+                let obj = parts.get(1).ok_or_else(&invalid)?;
+                Ok(CommandTag::Create(obj.to_string()))
             }
             "DROP" => {
-                let obj = parts.get(1)?;
-                Some(CommandTag::Drop(obj.to_string()))
+                let obj = parts.get(1).ok_or_else(&invalid)?;
+                Ok(CommandTag::Drop(obj.to_string()))
             }
             "ALTER" => {
-                let obj = parts.get(1)?;
-                Some(CommandTag::Alter(obj.to_string()))
+                let obj = parts.get(1).ok_or_else(&invalid)?;
+                Ok(CommandTag::Alter(obj.to_string()))
             }
-            "TRUNCATE" => Some(CommandTag::Truncate),
-            "BEGIN" => Some(CommandTag::Begin),
-            "COMMIT" => Some(CommandTag::Commit),
-            "ROLLBACK" => Some(CommandTag::Rollback),
-            _ => Some(CommandTag::Other(trimmed.to_string())),
+            "TRUNCATE" => Ok(CommandTag::Truncate),
+            "BEGIN" => Ok(CommandTag::Begin),
+            "COMMIT" => Ok(CommandTag::Commit),
+            "ROLLBACK" => Ok(CommandTag::Rollback),
+            _ => Ok(CommandTag::Other(trimmed.to_string())),
         }
     }
 
-    pub(in crate::infra::adapters::postgres) fn extract_command_tag(
+    pub(in crate::adapters::postgres) fn parse_command_tag(
         stdout: &str,
-    ) -> Option<CommandTag> {
+    ) -> Result<CommandTag, ParseCommandTagError> {
         stdout
             .lines()
             .rev()
             .find(|line| !line.trim().is_empty())
-            .and_then(Self::parse_command_tag)
+            .ok_or(ParseCommandTagError::Empty)
+            .and_then(Self::parse_command_tag_str)
+    }
+
+    #[cfg(test)]
+    pub(in crate::adapters::postgres) fn extract_command_tag(stdout: &str) -> Option<CommandTag> {
+        Self::parse_command_tag(stdout).ok()
     }
 
     fn is_known_tcl_tag(s: &str) -> bool {
@@ -73,7 +107,7 @@ impl PostgresAdapter {
             if trimmed.is_empty() {
                 continue;
             }
-            let tag = Self::parse_command_tag(trimmed)?;
+            let tag = Self::parse_command_tag_str(trimmed).ok()?;
             if let CommandTag::Other(ref raw) = tag
                 && !Self::is_known_tcl_tag(raw)
             {
@@ -147,7 +181,7 @@ impl PostgresAdapter {
 
     // -- CTAS / SELECT INTO correction (newspaper style: high→low) --
 
-    pub(in crate::infra::adapters::postgres) fn parse_aggregate_command_tag(
+    pub(in crate::adapters::postgres) fn parse_aggregate_command_tag(
         stdout: &str,
         sql: &str,
     ) -> Option<CommandTag> {
@@ -203,13 +237,13 @@ impl PostgresAdapter {
 }
 
 #[cfg_attr(test, derive(Debug))]
-pub(in crate::infra::adapters::postgres) struct ResolvedTags {
+pub(in crate::adapters::postgres) struct ResolvedTags {
     all: Vec<CommandTag>,
     effective: Vec<CommandTag>,
 }
 
 impl ResolvedTags {
-    pub(in crate::infra::adapters::postgres) fn resolve(stdout: &str, sql: &str) -> Option<Self> {
+    pub(in crate::adapters::postgres) fn resolve(stdout: &str, sql: &str) -> Option<Self> {
         let parsed = PostgresAdapter::parse_all_tags(stdout)?;
         let corrected = PostgresAdapter::correct_ctas_tags(sql, parsed);
         let effective = PostgresAdapter::discard_rolled_back(&corrected);
@@ -219,7 +253,7 @@ impl ResolvedTags {
         })
     }
 
-    pub(in crate::infra::adapters::postgres) fn aggregate(&self) -> Option<CommandTag> {
+    pub(in crate::adapters::postgres) fn aggregate(&self) -> Option<CommandTag> {
         if let Some(tag) = self.effective.iter().find(|t| t.is_schema_modifying()) {
             return Some(tag.clone());
         }
@@ -238,8 +272,9 @@ impl ResolvedTags {
 
 #[cfg(test)]
 mod tests {
+    use super::ParseCommandTagError;
+    use crate::adapters::postgres::PostgresAdapter;
     use crate::domain::CommandTag;
-    use crate::infra::adapters::postgres::PostgresAdapter;
 
     mod detect_create_as_kind {
         use super::*;
@@ -325,14 +360,17 @@ mod tests {
         #[case("COMMIT", CommandTag::Commit)]
         #[case("ROLLBACK", CommandTag::Rollback)]
         fn parse_known_tags(#[case] input: &str, #[case] expected: CommandTag) {
-            assert_eq!(PostgresAdapter::parse_command_tag(input), Some(expected));
+            assert_eq!(PostgresAdapter::parse_command_tag(input), Ok(expected));
         }
 
         #[rstest]
         #[case("")]
         #[case("   ")]
-        fn empty_or_whitespace_returns_none(#[case] input: &str) {
-            assert_eq!(PostgresAdapter::parse_command_tag(input), None);
+        fn empty_or_whitespace_returns_empty_error(#[case] input: &str) {
+            assert!(matches!(
+                PostgresAdapter::parse_command_tag(input),
+                Err(ParseCommandTagError::Empty)
+            ));
         }
 
         #[rstest]
@@ -341,15 +379,18 @@ mod tests {
         #[case("INSERT 0 abc")]
         #[case("UPDATE")]
         #[case("DELETE")]
-        fn malformed_count_returns_none(#[case] input: &str) {
-            assert_eq!(PostgresAdapter::parse_command_tag(input), None);
+        fn malformed_count_returns_invalid_error(#[case] input: &str) {
+            assert!(matches!(
+                PostgresAdapter::parse_command_tag(input),
+                Err(ParseCommandTagError::Invalid { .. })
+            ));
         }
 
         #[test]
         fn unknown_command_returns_other() {
             assert_eq!(
                 PostgresAdapter::parse_command_tag("VACUUM"),
-                Some(CommandTag::Other("VACUUM".to_string()))
+                Ok(CommandTag::Other("VACUUM".to_string()))
             );
         }
 

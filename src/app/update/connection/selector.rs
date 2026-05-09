@@ -1,13 +1,13 @@
 use std::time::Instant;
 
-use crate::app::cmd::effect::Effect;
-use crate::app::model::app_state::AppState;
-use crate::app::model::shared::input_mode::InputMode;
-use crate::app::update::action::Action;
+use crate::cmd::effect::Effect;
+use crate::model::app_state::AppState;
+use crate::model::shared::input_mode::InputMode;
+use crate::update::action::{Action, ModalKind};
 
 pub fn reduce(state: &mut AppState, action: &Action, now: Instant) -> Option<Vec<Effect>> {
     match action {
-        Action::OpenConnectionSelector => {
+        Action::OpenModal(ModalKind::ConnectionSelector) => {
             state.modal.set_mode(InputMode::ConnectionSelector);
             state.ui.set_connection_list_selection(Some(0));
             Some(vec![Effect::LoadConnections])
@@ -15,7 +15,7 @@ pub fn reduce(state: &mut AppState, action: &Action, now: Instant) -> Option<Vec
 
         // ===== Connection Deletion =====
         Action::RequestDeleteSelectedConnection => {
-            use crate::app::model::connection::list::ConnectionListItem;
+            use crate::model::connection::list::ConnectionListItem;
             let selected_idx = state.ui.connection_list_selected;
             let profile_idx = match state.connection_list_items().get(selected_idx) {
                 Some(ConnectionListItem::Profile(i)) => *i,
@@ -36,7 +36,7 @@ pub fn reduce(state: &mut AppState, action: &Action, now: Instant) -> Option<Vec
                 state.confirm_dialog.open(
                     "Delete Connection",
                     message,
-                    crate::app::model::shared::confirm_dialog::ConfirmIntent::DeleteConnection(id),
+                    crate::model::shared::confirm_dialog::ConfirmIntent::DeleteConnection(id),
                 );
                 state.modal.push_mode(InputMode::ConfirmDialog);
             }
@@ -77,7 +77,7 @@ pub fn reduce(state: &mut AppState, action: &Action, now: Instant) -> Option<Vec
 
         // ===== Connection Edit =====
         Action::RequestEditSelectedConnection => {
-            use crate::app::model::connection::list::ConnectionListItem;
+            use crate::model::connection::list::ConnectionListItem;
             let selected_idx = state.ui.connection_list_selected;
             let profile_idx = match state.connection_list_items().get(selected_idx) {
                 Some(ConnectionListItem::Profile(i)) => *i,
@@ -98,8 +98,8 @@ pub fn reduce(state: &mut AppState, action: &Action, now: Instant) -> Option<Vec
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::model::connection::list::build_connection_list;
     use crate::domain::connection::{ConnectionProfile, DatabaseType, SslMode};
+    use crate::model::connection::list::build_connection_list;
 
     fn create_profile(name: &str) -> ConnectionProfile {
         ConnectionProfile::new(
@@ -122,7 +122,11 @@ mod tests {
         fn sets_mode_and_loads_connections() {
             let mut state = AppState::new("test".to_string());
 
-            let effects = reduce(&mut state, &Action::OpenConnectionSelector, Instant::now());
+            let effects = reduce(
+                &mut state,
+                &Action::OpenModal(ModalKind::ConnectionSelector),
+                Instant::now(),
+            );
 
             assert_eq!(state.input_mode(), InputMode::ConnectionSelector);
             let effects = effects.unwrap();
@@ -134,7 +138,11 @@ mod tests {
             let mut state = AppState::new("test".to_string());
             state.ui.set_connection_list_selection(Some(3));
 
-            reduce(&mut state, &Action::OpenConnectionSelector, Instant::now());
+            reduce(
+                &mut state,
+                &Action::OpenModal(ModalKind::ConnectionSelector),
+                Instant::now(),
+            );
 
             assert_eq!(state.ui.connection_list_selected, 0);
         }
@@ -256,7 +264,7 @@ mod tests {
 
     mod connection_deleted {
         use super::*;
-        use crate::app::model::connection::state::ConnectionState;
+        use crate::model::connection::state::ConnectionState;
 
         #[test]
         fn removes_connection_from_list() {
@@ -329,7 +337,7 @@ mod tests {
             assert_eq!(state.query.pagination.current_page, 0);
             assert_eq!(
                 state.result_interaction.selection().mode(),
-                crate::app::model::shared::ui_state::ResultNavMode::Scroll
+                crate::model::shared::ui_state::ResultNavMode::Scroll
             );
             assert_eq!(state.result_interaction.scroll_offset, 0);
             assert_eq!(state.result_interaction.horizontal_offset, 0);

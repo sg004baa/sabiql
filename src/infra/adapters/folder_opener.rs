@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::app::ports::folder_opener::{FolderOpenError, FolderOpener};
+use crate::app::ports::outbound::folder_opener::{FolderOpenError, FolderOpener};
 
 pub struct NativeFolderOpener;
 
@@ -20,8 +20,7 @@ impl FolderOpener for NativeFolderOpener {
         )))]
         compile_error!("FolderOpener: unsupported target OS");
 
-        result.map(|_| ()).map_err(|e| FolderOpenError {
-            message: e.to_string(),
-        })
+        result?;
+        Ok(())
     }
 }

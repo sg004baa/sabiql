@@ -1,3 +1,7 @@
+use std::borrow::Cow;
+
+use crate::update::action::CursorMove;
+
 use super::text_input::TextInputState;
 
 #[derive(Debug, Clone, Default)]
@@ -6,10 +10,14 @@ pub struct PickerState {
     scroll_offset: usize,
     pub pane_height: u16,
     pub filter_visible_width: usize,
-    pub filter_input: TextInputState,
+    filter_input: TextInputState,
 }
 
 impl PickerState {
+    pub fn filter_input(&self) -> &TextInputState {
+        &self.filter_input
+    }
+
     pub fn selected(&self) -> usize {
         self.selected
     }
@@ -30,6 +38,49 @@ impl PickerState {
     pub fn reset(&mut self) {
         self.selected = 0;
         self.scroll_offset = 0;
+    }
+
+    pub fn clear_filter_and_reset(&mut self) {
+        self.filter_input.clear();
+        self.reset();
+    }
+
+    pub fn clear_filter(&mut self) {
+        self.filter_input.clear();
+    }
+
+    pub fn insert_filter_char(&mut self, ch: char) {
+        self.filter_input.insert_char(ch);
+        self.filter_input.update_viewport(self.filter_visible_width);
+        self.reset();
+    }
+
+    pub fn insert_filter_str(&mut self, text: &str) {
+        self.filter_input.insert_str(&sanitize_filter_text(text));
+        self.filter_input.update_viewport(self.filter_visible_width);
+        self.reset();
+    }
+
+    pub fn backspace_filter(&mut self) {
+        self.filter_input.backspace();
+        self.filter_input.update_viewport(self.filter_visible_width);
+        self.reset();
+    }
+
+    pub fn move_filter_cursor(&mut self, direction: CursorMove) {
+        self.filter_input.move_cursor(direction);
+        self.filter_input.update_viewport(self.filter_visible_width);
+    }
+}
+
+pub(crate) fn sanitize_filter_text(text: &str) -> Cow<'_, str> {
+    if text.contains(['\n', '\r']) {
+        text.chars()
+            .filter(|c| *c != '\n' && *c != '\r')
+            .collect::<String>()
+            .into()
+    } else {
+        text.into()
     }
 }
 

@@ -1,13 +1,15 @@
 use std::time::{Duration, Instant};
 
-use crate::app::cmd::effect::Effect;
-use crate::app::model::app_state::AppState;
-use crate::app::model::shared::flash_timer::FlashId;
-use crate::app::model::shared::inspector_tab::InspectorTab;
-use crate::app::model::shared::ui_state::YankFlash;
-use crate::app::ports::ClipboardError;
-use crate::app::services::AppServices;
-use crate::app::update::action::Action;
+use crate::cmd::effect::Effect;
+#[cfg(test)]
+use crate::domain::ColumnAttributes;
+use crate::model::app_state::AppState;
+use crate::model::shared::flash_timer::FlashId;
+use crate::model::shared::inspector_tab::InspectorTab;
+use crate::model::shared::ui_state::YankFlash;
+use crate::ports::outbound::ClipboardError;
+use crate::services::AppServices;
+use crate::update::action::Action;
 
 pub fn reduce(
     state: &mut AppState,
@@ -49,7 +51,7 @@ pub fn reduce(
             }
         }
         Action::ResultRowYankOperatorPending => {
-            state.result_interaction.yank_op_pending = true;
+            state.result_interaction.start_yank_operator();
             Some(vec![])
         }
         Action::DdlYank => {
@@ -61,9 +63,7 @@ pub fn reduce(
                 return Some(vec![Effect::CopyToClipboard {
                     content: ddl,
                     on_success: Some(Action::CellCopied),
-                    on_failure: Some(Action::CopyFailed(ClipboardError {
-                        message: "Clipboard unavailable".into(),
-                    })),
+                    on_failure: Some(clipboard_unavailable()),
                 }]);
             }
             Some(vec![])
@@ -115,16 +115,14 @@ pub fn reduce(
 }
 
 fn clipboard_unavailable() -> Action {
-    Action::CopyFailed(ClipboardError {
-        message: "Clipboard unavailable".into(),
-    })
+    Action::CopyFailed(ClipboardError::Unavailable("Clipboard unavailable".into()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::ports::ddl_generator::DdlGenerator;
     use crate::domain::{Column, Table};
+    use crate::ports::outbound::ddl_generator::DdlGenerator;
     use std::sync::Arc;
 
     mod cell_yank {
@@ -226,7 +224,7 @@ mod tests {
             .unwrap();
 
             assert!(effects.is_empty());
-            assert!(state.result_interaction.yank_op_pending);
+            assert!(state.result_interaction.is_yank_operator_pending());
         }
 
         #[test]
@@ -452,10 +450,8 @@ mod tests {
                 columns: vec![Column {
                     name: "id".to_string(),
                     data_type: "integer".to_string(),
-                    nullable: false,
                     default: None,
-                    is_primary_key: true,
-                    is_unique: true,
+                    attributes: ColumnAttributes::PRIMARY_KEY | ColumnAttributes::UNIQUE,
                     comment: None,
                     ordinal_position: 1,
                 }],

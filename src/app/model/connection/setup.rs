@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use crate::app::model::shared::text_input::TextInputState;
 use crate::domain::connection::{ConnectionId, ConnectionProfile, DatabaseType, SslMode};
+use crate::model::shared::text_input::TextInputState;
 
 pub const CONNECTION_INPUT_WIDTH: u16 = 30;
 pub const CONNECTION_INPUT_VISIBLE_WIDTH: usize = (CONNECTION_INPUT_WIDTH - 4) as usize;
@@ -32,7 +32,7 @@ impl ConnectionField {
         ]
     }
 
-    pub fn next(&self) -> Option<Self> {
+    pub fn next(self) -> Option<Self> {
         match self {
             Self::DatabaseType => Some(Self::Name),
             Self::Name => Some(Self::Host),
@@ -45,7 +45,7 @@ impl ConnectionField {
         }
     }
 
-    pub fn prev(&self) -> Option<Self> {
+    pub fn prev(self) -> Option<Self> {
         match self {
             Self::DatabaseType => None,
             Self::Name => Some(Self::DatabaseType),
@@ -58,14 +58,14 @@ impl ConnectionField {
         }
     }
 
-    pub fn is_required(&self) -> bool {
+    pub fn is_required(self) -> bool {
         matches!(
             self,
             Self::Name | Self::Host | Self::Port | Self::Database | Self::User
         )
     }
 
-    pub fn label(&self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             Self::DatabaseType => "Type:",
             Self::Name => "Name:",

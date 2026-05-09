@@ -1,18 +1,20 @@
-use crate::app::update::action::{Action, CursorMove, InputTarget};
+use crate::update::action::{Action, CursorMove, InputTarget, ModalKind};
 
-use crate::app::update::input::vim::types::{
+use crate::update::input::vim::types::{
     JsonbDetailVimContext, SearchContinuation, VimCommand, VimModeTransition, VimNavigation,
     VimOperator,
 };
 
-pub(in crate::app::update::input::vim) fn command(
+pub(in crate::update::input::vim) fn command(
     command: VimCommand,
     ctx: JsonbDetailVimContext,
 ) -> Option<Action> {
     match ctx {
         JsonbDetailVimContext::Viewing => match command {
             VimCommand::Navigation(navigation) => navigation_action(navigation),
-            VimCommand::ModeTransition(VimModeTransition::Escape) => Some(Action::CloseJsonbDetail),
+            VimCommand::ModeTransition(VimModeTransition::Escape) => {
+                Some(Action::CloseModal(ModalKind::JsonbDetail))
+            }
             VimCommand::ModeTransition(VimModeTransition::Insert) => Some(Action::JsonbEnterEdit),
             VimCommand::ModeTransition(VimModeTransition::Append) => {
                 Some(Action::JsonbAppendInsert)
@@ -62,9 +64,9 @@ fn navigation_action(navigation: VimNavigation) -> Option<Action> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::model::shared::key_sequence::Prefix;
-    use crate::app::update::input::keybindings::{Key, KeyCombo};
-    use crate::app::update::input::vim::{VimSurfaceContext, action_for_key};
+    use crate::model::shared::key_sequence::Prefix;
+    use crate::update::input::keybindings::{Key, KeyCombo};
+    use crate::update::input::vim::{VimSurfaceContext, action_for_key};
     use rstest::rstest;
 
     fn combo(key: Key) -> KeyCombo {
@@ -114,7 +116,7 @@ mod tests {
 
     #[test]
     fn gg_moves_to_first_line() {
-        let action = crate::app::update::input::vim::action_for_input(
+        let action = crate::update::input::vim::action_for_input(
             &combo(Key::Char('g')),
             Some(Prefix::G),
             VimSurfaceContext::JsonbDetail(JsonbDetailVimContext::Viewing),

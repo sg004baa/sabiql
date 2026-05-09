@@ -1,19 +1,19 @@
 use std::time::Instant;
 
-use crate::app::cmd::effect::Effect;
-use crate::app::model::app_state::AppState;
-use crate::app::model::connection::setup::{
+use crate::cmd::effect::Effect;
+use crate::domain::connection::{DatabaseType, SslMode};
+use crate::model::app_state::AppState;
+use crate::model::connection::setup::{
     CONNECTION_INPUT_VISIBLE_WIDTH, ConnectionField, ConnectionSetupState,
 };
-use crate::app::model::shared::input_mode::InputMode;
-use crate::app::model::shared::text_input::TextInputState;
-use crate::app::update::action::{Action, ConnectionTarget, InputTarget};
-use crate::app::update::helpers::{validate_all, validate_field};
-use crate::domain::connection::{DatabaseType, SslMode};
+use crate::model::shared::input_mode::InputMode;
+use crate::model::shared::text_input::TextInputState;
+use crate::update::action::{Action, ConnectionTarget, InputTarget, ModalKind};
+use crate::update::helpers::{validate_all, validate_field};
 
 pub fn reduce(state: &mut AppState, action: &Action, now: Instant) -> Option<Vec<Effect>> {
     match action {
-        Action::OpenConnectionSetup => {
+        Action::OpenModal(ModalKind::ConnectionSetup) => {
             state.connection_setup.reset();
             if !state.connections().is_empty() || state.session.dsn.is_some() {
                 state.connection_setup.is_first_run = false;
@@ -33,7 +33,7 @@ pub fn reduce(state: &mut AppState, action: &Action, now: Instant) -> Option<Vec
             state.messages.set_error_at(e.to_string(), now);
             Some(vec![])
         }
-        Action::CloseConnectionSetup => {
+        Action::CloseModal(ModalKind::ConnectionSetup) => {
             state.modal.set_mode(InputMode::Normal);
             Some(vec![])
         }
@@ -240,7 +240,7 @@ pub fn reduce(state: &mut AppState, action: &Action, now: Instant) -> Option<Vec
                 state.confirm_dialog.open(
                     "Confirm",
                     "No connection configured.\nAre you sure you want to quit?",
-                    crate::app::model::shared::confirm_dialog::ConfirmIntent::QuitNoConnection,
+                    crate::model::shared::confirm_dialog::ConfirmIntent::QuitNoConnection,
                 );
                 state.modal.push_mode(InputMode::ConfirmDialog);
                 Some(vec![])
@@ -291,8 +291,8 @@ mod tests {
 
     mod paste {
         use super::*;
-        use crate::app::model::connection::setup::ConnectionField;
-        use crate::app::model::shared::text_input::TextInputState;
+        use crate::model::connection::setup::ConnectionField;
+        use crate::model::shared::text_input::TextInputState;
 
         fn setup_state_with_field(field: ConnectionField) -> AppState {
             let mut state = AppState::new("test".to_string());
@@ -401,9 +401,9 @@ mod tests {
 
     mod connection_save {
         use super::*;
-        use crate::app::model::connection::state::ConnectionState;
-        use crate::app::update::action::ConnectionTarget;
         use crate::domain::MetadataState;
+        use crate::model::connection::state::ConnectionState;
+        use crate::update::action::ConnectionTarget;
 
         fn fill_valid_form(state: &mut AppState) {
             state.connection_setup.name.set_content("test".to_string());
@@ -460,7 +460,11 @@ mod tests {
         fn is_first_run_true_when_no_connections() {
             let mut state = AppState::new("test".to_string());
 
-            reduce(&mut state, &Action::OpenConnectionSetup, Instant::now());
+            reduce(
+                &mut state,
+                &Action::OpenModal(ModalKind::ConnectionSetup),
+                Instant::now(),
+            );
 
             assert!(state.connection_setup.is_first_run);
         }
@@ -471,7 +475,11 @@ mod tests {
             let profile = create_profile("test");
             state.set_connections(vec![profile]);
 
-            reduce(&mut state, &Action::OpenConnectionSetup, Instant::now());
+            reduce(
+                &mut state,
+                &Action::OpenModal(ModalKind::ConnectionSetup),
+                Instant::now(),
+            );
 
             assert!(!state.connection_setup.is_first_run);
         }
@@ -481,7 +489,11 @@ mod tests {
             let mut state = AppState::new("test".to_string());
             state.session.dsn = Some("postgres://localhost/db".to_string());
 
-            reduce(&mut state, &Action::OpenConnectionSetup, Instant::now());
+            reduce(
+                &mut state,
+                &Action::OpenModal(ModalKind::ConnectionSetup),
+                Instant::now(),
+            );
 
             assert!(!state.connection_setup.is_first_run);
         }

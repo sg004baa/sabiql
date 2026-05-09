@@ -1,1 +1,1 @@
-pub(in crate::infra::adapters::mysql) mod metadata;
+pub(in crate::adapters::mysql) mod metadata;

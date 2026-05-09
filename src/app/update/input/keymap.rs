@@ -1,5 +1,5 @@
 use super::keybindings::{KeyBinding, KeyCombo, ModeRow};
-use crate::app::update::action::Action;
+use crate::update::action::Action;
 
 pub fn resolve(combo: &KeyCombo, bindings: &[KeyBinding]) -> Option<Action> {
     bindings
@@ -23,7 +23,8 @@ pub fn resolve_mode(combo: &KeyCombo, rows: &[ModeRow]) -> Option<Action> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::update::input::keybindings::{Key, KeyCombo};
+    use crate::update::action::ModalKind;
+    use crate::update::input::keybindings::{Key, KeyCombo};
 
     static QUIT_COMBOS: &[KeyCombo] = &[KeyCombo::plain(Key::Char('q'))];
     static HELP_COMBOS: &[KeyCombo] = &[KeyCombo::plain(Key::Char('?'))];
@@ -58,7 +59,7 @@ mod tests {
             key: "?",
             desc_short: "Help",
             description: "Help",
-            action: Action::OpenHelp,
+            action: Action::ToggleModal(ModalKind::Help),
             combos: HELP_COMBOS,
         }
     }
@@ -130,7 +131,7 @@ mod tests {
 
     mod resolve_mode_tests {
         use super::*;
-        use crate::app::update::input::keybindings::{
+        use crate::update::input::keybindings::{
             CONNECTION_ERROR_ROWS, HELP_ROWS, TABLE_PICKER_ROWS,
         };
 
@@ -145,7 +146,7 @@ mod tests {
         fn matches_binding_in_rows() {
             let result = resolve_mode(&KeyCombo::plain(Key::Esc), HELP_ROWS);
 
-            assert!(matches!(result, Some(Action::CloseHelp)));
+            assert!(matches!(result, Some(Action::CloseModal(ModalKind::Help))));
         }
 
         #[test]

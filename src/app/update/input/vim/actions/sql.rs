@@ -1,20 +1,22 @@
-use crate::app::update::action::{
-    Action, CursorMove, InputTarget, ScrollAmount, ScrollDirection, ScrollTarget,
+use crate::update::action::{
+    Action, CursorMove, InputTarget, ModalKind, ScrollAmount, ScrollDirection, ScrollTarget,
 };
 
 use super::scroll;
-use crate::app::update::input::vim::types::{
+use crate::update::input::vim::types::{
     SqlModalVimContext, VimCommand, VimModeTransition, VimNavigation, VimOperator,
 };
 
-pub(in crate::app::update::input::vim) fn command(
+pub(in crate::update::input::vim) fn command(
     command: VimCommand,
     ctx: SqlModalVimContext,
 ) -> Option<Action> {
     match ctx {
         SqlModalVimContext::QueryNormal => match command {
             VimCommand::Navigation(navigation) => query_navigation(navigation),
-            VimCommand::ModeTransition(VimModeTransition::Escape) => Some(Action::CloseSqlModal),
+            VimCommand::ModeTransition(VimModeTransition::Escape) => {
+                Some(Action::CloseModal(ModalKind::SqlModal))
+            }
             VimCommand::ModeTransition(VimModeTransition::Append) => {
                 Some(Action::SqlModalAppendInsert)
             }
@@ -67,7 +69,9 @@ fn viewer(command: VimCommand, target: ScrollTarget) -> Option<Action> {
         VimCommand::Navigation(VimNavigation::MoveUp) => {
             Some(scroll(target, ScrollDirection::Up, ScrollAmount::Line))
         }
-        VimCommand::ModeTransition(VimModeTransition::Escape) => Some(Action::CloseSqlModal),
+        VimCommand::ModeTransition(VimModeTransition::Escape) => {
+            Some(Action::CloseModal(ModalKind::SqlModal))
+        }
         VimCommand::Operator(VimOperator::Yank) => Some(Action::SqlModalYank),
         _ => None,
     }
@@ -76,9 +80,9 @@ fn viewer(command: VimCommand, target: ScrollTarget) -> Option<Action> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::model::shared::key_sequence::Prefix;
-    use crate::app::update::input::keybindings::{Key, KeyCombo};
-    use crate::app::update::input::vim::{VimSurfaceContext, action_for_key};
+    use crate::model::shared::key_sequence::Prefix;
+    use crate::update::input::keybindings::{Key, KeyCombo};
+    use crate::update::input::vim::{VimSurfaceContext, action_for_key};
     use rstest::rstest;
 
     fn combo(key: Key) -> KeyCombo {
@@ -143,7 +147,7 @@ mod tests {
 
     #[test]
     fn gg_moves_to_first_line() {
-        let action = crate::app::update::input::vim::action_for_input(
+        let action = crate::update::input::vim::action_for_input(
             &combo(Key::Char('g')),
             Some(Prefix::G),
             VimSurfaceContext::SqlModal(SqlModalVimContext::QueryNormal),

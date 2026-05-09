@@ -5,9 +5,17 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 
 use crate::app::model::app_state::AppState;
-use crate::ui::primitives::atoms::text_cursor_spans;
-use crate::ui::primitives::molecules::render_modal;
-use crate::ui::theme::ThemePalette;
+use crate::primitives::atoms::text_cursor_spans;
+use crate::primitives::molecules::render_modal;
+use crate::theme::ThemePalette;
+
+pub(super) fn filter_visible_width(raw_width: usize, cursor: usize, char_count: usize) -> usize {
+    if cursor == char_count {
+        raw_width.saturating_sub(1)
+    } else {
+        raw_width
+    }
+}
 
 pub struct TablePicker;
 
@@ -37,12 +45,8 @@ impl TablePicker {
 
         let raw_width = filter_area.width.saturating_sub(4) as usize; // "  > " prefix
 
-        let input = &state.ui.table_picker.filter_input;
-        let visible_width = if input.cursor() == input.char_count() {
-            raw_width.saturating_sub(1)
-        } else {
-            raw_width
-        };
+        let input = state.ui.table_picker.filter_input();
+        let visible_width = filter_visible_width(raw_width, input.cursor(), input.char_count());
         let cursor_spans = text_cursor_spans(
             input.content(),
             input.cursor(),
@@ -83,7 +87,7 @@ impl TablePicker {
         frame.render_stateful_widget(list, list_area, &mut list_state);
         TablePickerRenderMetrics {
             pane_height: list_area.height,
-            filter_visible_width: raw_width,
+            filter_visible_width: visible_width,
         }
     }
 }

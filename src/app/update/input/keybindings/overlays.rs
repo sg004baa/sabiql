@@ -1,8 +1,8 @@
-use super::types::{Key, KeyCombo};
 use super::{ExecBinding, KeyBinding, ModeRow};
-use crate::app::update::action::{
-    Action, CursorMove, InputTarget, ListMotion, ListTarget, ScrollAmount, ScrollDirection,
-    ScrollTarget,
+use super::{Key, KeyCombo};
+use crate::update::action::{
+    Action, CursorMove, InputTarget, ListMotion, ListTarget, ModalKind, ScrollAmount,
+    ScrollDirection, ScrollTarget,
 };
 
 // =============================================================================
@@ -181,12 +181,36 @@ pub const HELP_ROWS: &[ModeRow] = &[
         ],
     },
     ModeRow {
+        key_short: "h/l / ←→",
+        key: "h / l / ← / →",
+        desc_short: "H-Scroll",
+        description: "Scroll left / right",
+        bindings: &[
+            ExecBinding {
+                action: Action::Scroll {
+                    target: ScrollTarget::Help,
+                    direction: ScrollDirection::Left,
+                    amount: ScrollAmount::Line,
+                },
+                combos: &[KeyCombo::plain(Key::Char('h')), KeyCombo::plain(Key::Left)],
+            },
+            ExecBinding {
+                action: Action::Scroll {
+                    target: ScrollTarget::Help,
+                    direction: ScrollDirection::Right,
+                    amount: ScrollAmount::Line,
+                },
+                combos: &[KeyCombo::plain(Key::Char('l')), KeyCombo::plain(Key::Right)],
+            },
+        ],
+    },
+    ModeRow {
         key_short: "?/Esc/q",
         key: "? / Esc / q",
         desc_short: "Close",
         description: "Close help",
         bindings: &[ExecBinding {
-            action: Action::CloseHelp,
+            action: Action::CloseModal(ModalKind::Help),
             combos: &[
                 KeyCombo::plain(Key::Char('?')),
                 KeyCombo::plain(Key::Esc),
@@ -281,7 +305,7 @@ pub const TABLE_PICKER_ROWS: &[ModeRow] = &[
         desc_short: "Close",
         description: "Close",
         bindings: &[ExecBinding {
-            action: Action::CloseTablePicker,
+            action: Action::CloseModal(ModalKind::TablePicker),
             combos: &[KeyCombo::plain(Key::Esc)],
         }],
     },
@@ -392,7 +416,7 @@ pub const ER_PICKER_ROWS: &[ModeRow] = &[
         desc_short: "Close",
         description: "Close",
         bindings: &[ExecBinding {
-            action: Action::CloseErTablePicker,
+            action: Action::CloseModal(ModalKind::ErTablePicker),
             combos: &[KeyCombo::plain(Key::Esc)],
         }],
     },
@@ -483,7 +507,7 @@ pub const QUERY_HISTORY_PICKER_ROWS: &[ModeRow] = &[
         desc_short: "Close",
         description: "Close",
         bindings: &[ExecBinding {
-            action: Action::CloseQueryHistoryPicker,
+            action: Action::CloseModal(ModalKind::QueryHistoryPicker),
             combos: &[KeyCombo::plain(Key::Esc)],
         }],
     },
@@ -540,8 +564,51 @@ pub const COMMAND_PALETTE_ROWS: &[ModeRow] = &[
         desc_short: "Close",
         description: "Close",
         bindings: &[ExecBinding {
-            action: Action::CloseCommandPalette,
+            action: Action::CloseModal(ModalKind::CommandPalette),
             combos: &[KeyCombo::plain(Key::Esc), KeyCombo::plain(Key::Char('q'))],
+        }],
+    },
+];
+
+// =============================================================================
+// Settings
+// =============================================================================
+
+pub const SETTINGS_ROWS: &[ModeRow] = &[
+    ModeRow {
+        key_short: "Enter",
+        key: "Enter",
+        desc_short: "Apply",
+        description: "Apply setting",
+        bindings: &[ExecBinding {
+            action: Action::SettingsApply,
+            combos: &[KeyCombo::plain(Key::Enter)],
+        }],
+    },
+    ModeRow {
+        key_short: "j/k/↑↓",
+        key: "j / k / ↑ / ↓",
+        desc_short: "Select",
+        description: "Select setting",
+        bindings: &[
+            ExecBinding {
+                action: Action::SettingsSelectNextTheme,
+                combos: &[KeyCombo::plain(Key::Char('j')), KeyCombo::plain(Key::Down)],
+            },
+            ExecBinding {
+                action: Action::SettingsSelectPreviousTheme,
+                combos: &[KeyCombo::plain(Key::Char('k')), KeyCombo::plain(Key::Up)],
+            },
+        ],
+    },
+    ModeRow {
+        key_short: "Esc",
+        key: "Esc",
+        desc_short: "Cancel",
+        description: "Cancel",
+        bindings: &[ExecBinding {
+            action: Action::SettingsCancel,
+            combos: &[KeyCombo::plain(Key::Esc)],
         }],
     },
 ];
@@ -780,7 +847,7 @@ pub const JSONB_DETAIL_ROWS: &[ModeRow] = &[
         desc_short: "Close",
         description: "Close JSONB detail",
         bindings: &[ExecBinding {
-            action: Action::CloseJsonbDetail,
+            action: Action::CloseModal(ModalKind::JsonbDetail),
             combos: &[KeyCombo::plain(Key::Esc), KeyCombo::plain(Key::Char('q'))],
         }],
     },

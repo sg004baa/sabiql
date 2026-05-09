@@ -5,7 +5,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tokio::time::timeout;
 
-use crate::app::ports::DbOperationError;
+use crate::app::ports::outbound::DbOperationError;
 use crate::domain::{QueryResult, QuerySource, WriteExecutionResult};
 
 use super::super::MySqlAdapter;
@@ -154,7 +154,7 @@ impl MySqlAdapter {
 
     /// Execute a metadata query (returns raw JSON string from a SELECT that
     /// produces a single JSON value).
-    pub(in crate::infra::adapters::mysql) async fn execute_meta_query(
+    pub(in crate::adapters::mysql) async fn execute_meta_query(
         &self,
         dsn: &str,
         query: &str,
@@ -177,7 +177,7 @@ impl MySqlAdapter {
 
     /// Execute a data query (preview or adhoc) returning tabular results.
     /// mysql --batch outputs tab-separated values with column headers.
-    pub(in crate::infra::adapters::mysql) async fn execute_query_raw(
+    pub(in crate::adapters::mysql) async fn execute_query_raw(
         &self,
         dsn: &str,
         query: &str,
@@ -251,7 +251,7 @@ impl MySqlAdapter {
     /// Appends `SELECT ROW_COUNT()` so the affected-row count is reliably
     /// returned via stdout, regardless of `--batch` or pipe-mode suppression
     /// of the "Query OK" info message.
-    pub(in crate::infra::adapters::mysql) async fn execute_write_raw(
+    pub(in crate::adapters::mysql) async fn execute_write_raw(
         &self,
         dsn: &str,
         query: &str,
@@ -276,15 +276,9 @@ impl MySqlAdapter {
             ));
         }
 
-        let affected_rows = output
-            .stdout
-            .trim()
-            .parse::<usize>()
-            .map_err(|_| {
-                DbOperationError::QueryFailed(
-                    "Failed to parse affected row count".to_string(),
-                )
-            })?;
+        let affected_rows = output.stdout.trim().parse::<usize>().map_err(|_| {
+            DbOperationError::QueryFailed("Failed to parse affected row count".to_string())
+        })?;
 
         Ok(WriteExecutionResult {
             affected_rows,
@@ -292,7 +286,7 @@ impl MySqlAdapter {
         })
     }
 
-    pub(in crate::infra::adapters::mysql) async fn count_rows(
+    pub(in crate::adapters::mysql) async fn count_rows(
         &self,
         dsn: &str,
         query: &str,
@@ -314,7 +308,7 @@ impl MySqlAdapter {
         })
     }
 
-    pub(in crate::infra::adapters::mysql) async fn export_csv_to_file(
+    pub(in crate::adapters::mysql) async fn export_csv_to_file(
         &self,
         dsn: &str,
         query: &str,
@@ -417,7 +411,7 @@ impl MySqlAdapter {
         Ok(row_count)
     }
 
-    pub(in crate::infra::adapters::mysql) async fn fetch_preview_order_columns(
+    pub(in crate::adapters::mysql) async fn fetch_preview_order_columns(
         &self,
         dsn: &str,
         schema: &str,
@@ -430,7 +424,8 @@ impl MySqlAdapter {
             return Ok(vec![]);
         }
 
-        serde_json::from_str(trimmed).map_err(|e| DbOperationError::InvalidJson(e.to_string()))
+        serde_json::from_str(trimmed)
+            .map_err(|e| DbOperationError::InvalidJson(std::sync::Arc::new(e)))
     }
 }
 

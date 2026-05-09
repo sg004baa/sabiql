@@ -2,28 +2,29 @@ use std::time::Instant;
 
 use super::explain_context::ExplainContext;
 use super::runtime_state::RuntimeState;
-use crate::app::model::browse::jsonb_detail::JsonbDetailState;
-use crate::app::model::browse::query_execution::QueryExecution;
-use crate::app::model::browse::result_interaction::ResultInteraction;
-use crate::app::model::browse::session::BrowseSession;
-use crate::app::model::connection::cache::ConnectionCacheStore;
-use crate::app::model::connection::error_state::ConnectionErrorState;
-use crate::app::model::connection::list::ConnectionListItem;
-use crate::app::model::connection::setup::ConnectionSetupState;
-use crate::app::model::shared::confirm_dialog::ConfirmDialogState;
-use crate::app::model::shared::flash_timer::FlashTimerStore;
-use crate::app::model::shared::input_mode::InputMode;
-use crate::app::model::shared::message::MessageState;
-use crate::app::model::shared::modal::ModalState;
-use crate::app::model::shared::ui_state::UiState;
-use crate::app::model::sql_editor::modal::SqlModalContext;
-use crate::app::model::sql_editor::query_history::QueryHistoryPickerState;
 use crate::domain::TableSummary;
 use crate::domain::connection::{ConnectionProfile, ServiceEntry};
+use crate::model::browse::jsonb_detail::JsonbDetailState;
+use crate::model::browse::query_execution::QueryExecution;
+use crate::model::browse::result_interaction::ResultInteraction;
+use crate::model::browse::session::BrowseSession;
+use crate::model::connection::cache::ConnectionCacheStore;
+use crate::model::connection::error_state::ConnectionErrorState;
+use crate::model::connection::list::ConnectionListItem;
+use crate::model::connection::setup::ConnectionSetupState;
+use crate::model::shared::confirm_dialog::ConfirmDialogState;
+use crate::model::shared::flash_timer::FlashTimerStore;
+use crate::model::shared::input_mode::InputMode;
+use crate::model::shared::message::MessageState;
+use crate::model::shared::modal::ModalState;
+use crate::model::shared::settings::SettingsState;
+use crate::model::shared::ui_state::UiState;
+use crate::model::sql_editor::modal::SqlModalContext;
+use crate::model::sql_editor::query_history::QueryHistoryPickerState;
 
 pub struct AppState {
     pub should_quit: bool,
-    pub command_line_input: crate::app::model::shared::text_input::TextInputState,
+    pub command_line_input: crate::model::shared::text_input::TextInputState,
     pub command_line_visible_width: usize,
 
     pub render_dirty: bool,
@@ -41,6 +42,7 @@ pub struct AppState {
     pub result_interaction: ResultInteraction,
     pub jsonb_detail: JsonbDetailState,
     pub query_history_picker: QueryHistoryPickerState,
+    pub settings: SettingsState,
     pub explain: ExplainContext,
     pub modal: ModalState,
     pub flash_timers: FlashTimerStore,
@@ -54,7 +56,7 @@ impl AppState {
     pub fn new(project_name: String) -> Self {
         Self {
             should_quit: false,
-            command_line_input: crate::app::model::shared::text_input::TextInputState::default(),
+            command_line_input: crate::model::shared::text_input::TextInputState::default(),
             command_line_visible_width: 70,
             render_dirty: true,
             session: BrowseSession::default(),
@@ -70,6 +72,7 @@ impl AppState {
             result_interaction: ResultInteraction::default(),
             jsonb_detail: JsonbDetailState::default(),
             query_history_picker: QueryHistoryPickerState::default(),
+            settings: SettingsState::default(),
             explain: ExplainContext::default(),
             modal: ModalState::default(),
             flash_timers: FlashTimerStore::default(),
@@ -134,7 +137,7 @@ impl AppState {
     }
 
     pub fn filtered_tables(&self) -> Vec<&TableSummary> {
-        let filter_lower = self.ui.table_picker.filter_input.content().to_lowercase();
+        let filter_lower = self.ui.table_picker.filter_input().content().to_lowercase();
         self.session
             .metadata()
             .map(|m| {
@@ -147,7 +150,7 @@ impl AppState {
     }
 
     pub fn er_filtered_tables(&self) -> Vec<&TableSummary> {
-        let filter_lower = self.ui.er_picker.filter_input.content().to_lowercase();
+        let filter_lower = self.ui.er_picker.filter_input().content().to_lowercase();
         self.session
             .metadata()
             .map(|m| {
@@ -201,7 +204,7 @@ impl AppState {
     }
 
     fn rebuild_connection_list(&mut self) {
-        self.connection_list_items = crate::app::model::connection::list::build_connection_list(
+        self.connection_list_items = crate::model::connection::list::build_connection_list(
             self.connections.len(),
             self.service_entries.len(),
         );
@@ -222,13 +225,13 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
-    use crate::app::model::er_state::ErStatus;
-    use crate::app::model::shared::focused_pane::FocusedPane;
-    use crate::app::update::action::Action;
-    use crate::app::update::reduce_metadata;
     use crate::domain::DatabaseMetadata;
     use crate::domain::QuerySource;
     use crate::domain::Table;
+    use crate::model::er_state::ErStatus;
+    use crate::model::shared::focused_pane::FocusedPane;
+    use crate::update::action::Action;
+    use crate::update::reduce_metadata;
     use rstest::rstest;
     fn make_state() -> AppState {
         AppState::new("test".to_string())
@@ -371,11 +374,7 @@ mod tests {
                 TableSummary::new("public".to_string(), "users".to_string(), Some(100), false),
                 TableSummary::new("public".to_string(), "posts".to_string(), Some(50), false),
             ])));
-            state
-                .ui
-                .table_picker
-                .filter_input
-                .set_content(String::new());
+            state.ui.table_picker.clear_filter();
 
             let filtered = state.filtered_tables();
 
@@ -389,11 +388,7 @@ mod tests {
                 TableSummary::new("public".to_string(), "users".to_string(), Some(100), false),
                 TableSummary::new("public".to_string(), "posts".to_string(), Some(50), false),
             ])));
-            state
-                .ui
-                .table_picker
-                .filter_input
-                .set_content("user".to_string());
+            state.ui.table_picker.insert_filter_str("user");
 
             let filtered = state.filtered_tables();
 
@@ -412,11 +407,7 @@ mod tests {
                     Some(100),
                     false,
                 )])));
-            state
-                .ui
-                .table_picker
-                .filter_input
-                .set_content("user".to_string());
+            state.ui.table_picker.insert_filter_str("user");
 
             let filtered = state.filtered_tables();
 
@@ -511,7 +502,7 @@ mod tests {
 
             state.sql_modal.failed_prefetch_tables.insert(
                 "public.users".to_string(),
-                crate::app::model::sql_editor::modal::FailedPrefetchEntry {
+                crate::model::sql_editor::modal::FailedPrefetchEntry {
                     failed_at: now,
                     error: "connection timeout".to_string(),
                     retry_count: 0,
@@ -551,7 +542,7 @@ mod tests {
                 .insert("public.orders".to_string());
             state.sql_modal.failed_prefetch_tables.insert(
                 "public.failed".to_string(),
-                crate::app::model::sql_editor::modal::FailedPrefetchEntry {
+                crate::model::sql_editor::modal::FailedPrefetchEntry {
                     failed_at: Instant::now(),
                     error: "timeout".to_string(),
                     retry_count: 0,
@@ -713,10 +704,10 @@ mod tests {
 
     mod connection_catalog {
         use super::*;
-        use crate::app::model::connection::list::ConnectionListItem;
         use crate::domain::connection::{
             ConnectionId, ConnectionName, ConnectionProfile, DatabaseType, SslMode,
         };
+        use crate::model::connection::list::ConnectionListItem;
 
         fn make_profile(name: &str) -> ConnectionProfile {
             ConnectionProfile {

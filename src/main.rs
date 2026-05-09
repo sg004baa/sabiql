@@ -7,29 +7,39 @@ use color_eyre::eyre::Result;
 use tokio::sync::mpsc;
 use tokio::time::sleep_until;
 
-use sabiql::app::cmd::cache::TtlCache;
-use sabiql::app::cmd::completion_engine::CompletionEngine;
-use sabiql::app::cmd::effect::Effect;
-use sabiql::app::cmd::render_schedule::next_animation_deadline;
-use sabiql::app::cmd::runner::EffectRunner;
-use sabiql::app::model::app_state::AppState;
-use sabiql::app::model::shared::input_mode::InputMode;
-use sabiql::app::ports::{
-    ConnectionStore, ConnectionStoreError, ServiceFileError, ServiceFileReader,
+mod error;
+
+#[cfg(test)]
+mod tests;
+
+#[cfg(test)]
+#[path = "tests/render_snapshots/mod.rs"]
+mod render_snapshots;
+
+use sabiql_app::cmd::cache::TtlCache;
+use sabiql_app::cmd::completion_engine::CompletionEngine;
+use sabiql_app::cmd::effect::Effect;
+use sabiql_app::cmd::render_schedule::next_animation_deadline;
+use sabiql_app::cmd::runner::EffectRunner;
+use sabiql_app::model::app_state::AppState;
+use sabiql_app::model::shared::db_capabilities::DbCapabilities;
+use sabiql_app::model::shared::input_mode::InputMode;
+use sabiql_app::ports::outbound::{
+    ConnectionStore, ConnectionStoreError, DatabaseCapabilityProvider, PgServiceEntryReader,
+    ServiceFileError, SettingsStore,
 };
-use sabiql::app::services::AppServices;
-use sabiql::app::update::action::Action;
-use sabiql::app::update::reducer::reduce;
-use sabiql::error;
-use sabiql::infra::adapters::{
+use sabiql_app::services::AppServices;
+use sabiql_app::update::action::Action;
+use sabiql_app::update::input::handle_event;
+use sabiql_app::update::reducer::reduce;
+use sabiql_infra::adapters::{
     ArboardClipboard, DispatchAdapter, FileConfigWriter, FileQueryHistoryStore, FsErLogWriter,
-    NativeFolderOpener, PgServiceFileReader, TomlConnectionStore,
+    NativeFolderOpener, PgServiceFileReader, TomlConnectionStore, TomlSettingsStore,
 };
-use sabiql::infra::config::project_root::{find_project_root, get_project_name};
-use sabiql::infra::export::DotExporter;
-use sabiql::ui::adapters::TuiAdapter;
-use sabiql::ui::event::handlers::handle_event;
-use sabiql::ui::tui::TuiRunner;
+use sabiql_infra::config::project_root::{find_project_root, get_project_name};
+use sabiql_infra::export::DotExporter;
+use sabiql_ui::adapters::TuiAdapter;
+use sabiql_ui::tui::TuiRunner;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -80,10 +90,15 @@ async fn main() -> Result<()> {
     let metadata_cache = TtlCache::new(300);
     let completion_engine = RefCell::new(CompletionEngine::new());
     let connection_store = TomlConnectionStore::new()?;
+    let settings_store = TomlSettingsStore::new()?;
+    let app_settings = settings_store.load().unwrap_or_default();
     let all_profiles = connection_store.load_all();
     let connection_store = Arc::new(connection_store);
+    let settings_store = Arc::new(settings_store);
 
-    let service_file_reader: Arc<dyn ServiceFileReader> = Arc::new(PgServiceFileReader::new());
+    let db_capabilities: DbCapabilities = adapter.capabilities().into();
+    let pg_service_entry_reader: Arc<dyn PgServiceEntryReader> =
+        Arc::new(PgServiceFileReader::new());
 
     let adapter_for_callback = Arc::clone(&adapter);
     let effect_runner = EffectRunner::builder()
@@ -94,10 +109,11 @@ async fn main() -> Result<()> {
         .config_writer(Arc::new(FileConfigWriter::new()))
         .er_log_writer(Arc::new(FsErLogWriter))
         .connection_store(Arc::clone(&connection_store) as _)
-        .service_file_reader(Arc::clone(&service_file_reader))
+        .pg_service_entry_reader(Arc::clone(&pg_service_entry_reader))
         .clipboard(Arc::new(ArboardClipboard))
         .folder_opener(Arc::new(NativeFolderOpener))
         .query_history_store(Arc::new(FileQueryHistoryStore::new()))
+        .settings_store(Arc::clone(&settings_store) as _)
         .metadata_cache(metadata_cache.clone())
         .action_tx(action_tx.clone())
         .on_database_type_change(Box::new(move |db_type| {
@@ -108,13 +124,15 @@ async fn main() -> Result<()> {
     let services = AppServices {
         ddl_generator: Arc::clone(&adapter) as _,
         sql_dialect: Arc::clone(&adapter) as _,
+        db_capabilities,
     };
 
     let mut state = AppState::new(project_name);
+    state.ui.set_theme(app_settings.theme_id);
 
     match all_profiles {
         Ok(profiles) if profiles.is_empty() => {
-            load_service_entries(&mut state, &*service_file_reader);
+            load_service_entries(&mut state, Some(&*pg_service_entry_reader));
             if state.service_entries().is_empty() {
                 state.connection_setup.is_first_run = true;
                 state.modal.set_mode(InputMode::ConnectionSetup);
@@ -130,7 +148,7 @@ async fn main() -> Result<()> {
                     .cmp(&b.display_name().to_lowercase())
             });
             state.set_connections(profiles);
-            load_service_entries(&mut state, &*service_file_reader);
+            load_service_entries(&mut state, Some(&*pg_service_entry_reader));
 
             state.modal.set_mode(InputMode::ConnectionSelector);
             state.ui.set_connection_list_selection(Some(0));
@@ -155,6 +173,7 @@ async fn main() -> Result<()> {
     tui.enter()?;
 
     let initial_size = tui.terminal().size()?;
+    state.ui.terminal_width = initial_size.width;
     state.ui.terminal_height = initial_size.height;
 
     if state.session.dsn.is_some() && state.input_mode() == InputMode::Normal {
@@ -178,7 +197,7 @@ async fn main() -> Result<()> {
 
         tokio::select! {
             Some(event) = tui.next_event() => {
-                let action = handle_event(event, &state);
+                let action = handle_event(event, &state, &services);
                 if !action.is_none() {
                     drain_and_process_terminal_events(action, &mut state, &mut tui, &effect_runner, &completion_engine, &services).await?;
                 }
@@ -197,10 +216,10 @@ async fn main() -> Result<()> {
             }
         }
 
-        if let Some(debounce_until) = state.sql_modal.completion_debounce
+        if let Some(debounce_until) = state.sql_modal.completion_debounce()
             && Instant::now() >= debounce_until
         {
-            state.sql_modal.completion_debounce = None;
+            state.sql_modal.consume_completion_debounce();
             process_action(
                 Action::CompletionTrigger,
                 &mut state,
@@ -370,7 +389,7 @@ async fn drain_and_process_terminal_events(
             break;
         };
         drained += 1;
-        let action = handle_event(event, state);
+        let action = handle_event(event, state, services);
         if action.is_none() {
             continue;
         }
@@ -438,7 +457,11 @@ async fn drain_and_process_terminal_events(
     Ok(())
 }
 
-fn load_service_entries(state: &mut AppState, reader: &dyn ServiceFileReader) {
+fn load_service_entries(state: &mut AppState, reader: Option<&dyn PgServiceEntryReader>) {
+    let Some(reader) = reader else {
+        return;
+    };
+
     match reader.read_services() {
         Ok((services, path)) if !services.is_empty() => {
             state.set_service_entries(services);
@@ -485,39 +508,4 @@ fn self_update_disabled_message() -> String {
          If installed via cargo:    cargo install sabiql",
         env!("CARGO_PKG_VERSION")
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use clap::Parser;
-
-    #[test]
-    fn no_subcommand_returns_none() {
-        let args = Args::parse_from(["sabiql"]);
-        assert!(args.command.is_none());
-    }
-
-    #[test]
-    #[cfg(feature = "self-update")]
-    fn update_subcommand_is_recognized() {
-        let args = Args::parse_from(["sabiql", "update"]);
-        assert!(matches!(args.command, Some(Command::Update)));
-    }
-
-    #[test]
-    #[cfg(not(feature = "self-update"))]
-    fn update_subcommand_available_but_self_update_disabled() {
-        let args = Args::parse_from(["sabiql", "update"]);
-        assert!(matches!(args.command, Some(Command::Update)));
-    }
-
-    #[test]
-    #[cfg(not(feature = "self-update"))]
-    fn disabled_message_contains_version_and_upgrade_guidance() {
-        let msg = self_update_disabled_message();
-        assert!(msg.contains(env!("CARGO_PKG_VERSION")));
-        assert!(msg.contains("brew upgrade sabiql"));
-        assert!(msg.contains("cargo install sabiql"));
-    }
 }

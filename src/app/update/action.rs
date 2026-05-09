@@ -1,19 +1,20 @@
 use std::sync::Arc;
 
-use crate::app::model::connection::error::ConnectionErrorInfo;
-use crate::app::model::shared::focused_pane::FocusedPane;
-use crate::app::model::shared::key_sequence::Prefix;
-use crate::app::model::sql_editor::completion::CompletionCandidate;
-use crate::app::policy::write::write_guardrails::WritePreview;
-use crate::app::ports::DbOperationError;
-use crate::app::ports::clipboard::ClipboardError;
-use crate::app::ports::connection_store::ConnectionStoreError;
-use crate::app::ports::folder_opener::FolderOpenError;
-use crate::app::ports::query_history::QueryHistoryError;
 use crate::domain::connection::{ConnectionNameError, ConnectionProfile, ServiceEntry};
+use crate::model::connection::error::ConnectionErrorInfo;
+use crate::model::shared::focused_pane::FocusedPane;
+use crate::model::shared::key_sequence::Prefix;
+use crate::model::sql_editor::completion::CompletionCandidate;
+use crate::policy::write::write_guardrails::WritePreview;
+use crate::ports::outbound::DbOperationError;
+use crate::ports::outbound::clipboard::ClipboardError;
+use crate::ports::outbound::connection_store::ConnectionStoreError;
+use crate::ports::outbound::folder_opener::FolderOpenError;
+use crate::ports::outbound::query_history::QueryHistoryError;
+use crate::ports::outbound::settings_store::SettingsStoreError;
 use std::collections::HashMap;
 
-use crate::domain::{ConnectionId, DatabaseMetadata, QueryResult, Table};
+use crate::domain::{ConnectionId, DatabaseMetadata, QueryResult, QuerySource, Table};
 
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum ConnectionSaveError {
@@ -182,6 +183,25 @@ pub enum ListMotion {
     Previous,
 }
 
+/// Payload-free modal lifecycle kinds.
+///
+/// Modal lifecycle actions stay generic only while opening does not need a
+/// payload. Payload-bearing modals keep explicit actions until there is a
+/// repeated payload pattern worth abstracting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModalKind {
+    TablePicker,
+    CommandPalette,
+    Settings,
+    Help,
+    SqlModal,
+    ErTablePicker,
+    QueryHistoryPicker,
+    JsonbDetail,
+    ConnectionSetup,
+    ConnectionSelector,
+}
+
 #[derive(Debug, Clone)]
 pub struct SmartErRefreshResult {
     pub run_id: u64,
@@ -230,6 +250,8 @@ pub struct ConnectionTarget {
     pub name: String,
 }
 
+// Do not derive PartialEq here: payload variants carry domain snapshots and
+// errors that are not all value-comparable.
 #[derive(Debug, Clone)]
 pub enum Action {
     None,
@@ -270,22 +292,17 @@ pub enum Action {
         motion: ListMotion,
     },
 
-    // Overlay toggles
-    OpenTablePicker,
-    CloseTablePicker,
-    OpenCommandPalette,
-    CloseCommandPalette,
-    OpenHelp,
-    CloseHelp,
+    // Modal lifecycle
+    OpenModal(ModalKind),
+    CloseModal(ModalKind),
+    ToggleModal(ModalKind),
 
     // Connection lifecycle
     TryConnect,
     SwitchConnection(ConnectionTarget),
 
     // Connection Setup
-    OpenConnectionSetup,
     StartEditConnection(ConnectionId),
-    CloseConnectionSetup,
     ConnectionSetupNextField,
     ConnectionSetupPrevField,
     ConnectionSetupToggleDropdown,
@@ -299,9 +316,6 @@ pub enum Action {
     ConnectionSaveFailed(ConnectionSaveError),
     ConnectionEditLoaded(Box<ConnectionProfile>),
     ConnectionEditLoadFailed(ConnectionStoreError),
-
-    // Connection Selector
-    OpenConnectionSelector,
 
     // Connection Error
     ShowConnectionError(ConnectionErrorInfo),
@@ -329,6 +343,14 @@ pub enum Action {
     EnterCommandLine,
     ExitCommandLine,
     CommandLineSubmit,
+
+    // Settings
+    SettingsSelectNextTheme,
+    SettingsSelectPreviousTheme,
+    SettingsApply,
+    SettingsCancel,
+    SettingsSaved,
+    SettingsSaveFailed(SettingsStoreError),
 
     // Connection list navigation
     ConnectionsLoaded(ConnectionsLoadedPayload),
@@ -390,8 +412,6 @@ pub enum Action {
     Paste(String),
 
     // SQL Modal
-    OpenSqlModal,
-    CloseSqlModal,
     SqlModalAppendInsert,
     SqlModalEnterInsert,
     SqlModalEnterNormal,
@@ -442,7 +462,11 @@ pub enum Action {
         generation: u64,
         target_page: Option<usize>,
     },
-    QueryFailed(DbOperationError, u64),
+    QueryFailed {
+        error: DbOperationError,
+        generation: u64,
+        source: QuerySource,
+    },
     ExecuteWriteSucceeded {
         affected_rows: usize,
     },
@@ -492,15 +516,11 @@ pub enum Action {
     ToggleReadOnly,
 
     // ER Table Picker
-    OpenErTablePicker,
-    CloseErTablePicker,
     ErToggleSelection,
     ErSelectAll,
     ErConfirmSelection,
 
     // Query History Picker
-    OpenQueryHistoryPicker,
-    CloseQueryHistoryPicker,
     QueryHistoryLoaded(
         crate::domain::ConnectionId,
         Vec<crate::domain::query_history::QueryHistoryEntry>,
@@ -528,8 +548,6 @@ pub enum Action {
     CsvExportFailed(DbOperationError),
 
     // JSONB Detail View
-    OpenJsonbDetail,
-    CloseJsonbDetail,
     JsonbYankAll,
     JsonbEnterEdit,
     JsonbAppendInsert,
