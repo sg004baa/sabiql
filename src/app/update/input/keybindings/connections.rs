@@ -146,12 +146,12 @@ pub const CONNECTION_ERROR_ROWS: &[ModeRow] = &[
     },
     ModeRow {
         key_short: "Esc",
-        key: "Esc",
+        key: "Esc / q",
         desc_short: "Close",
         description: "Close",
         bindings: &[ExecBinding {
             action: Action::CloseConnectionError,
-            combos: &[KeyCombo::plain(Key::Esc)],
+            combos: &[KeyCombo::plain(Key::Esc), KeyCombo::plain(Key::Char('q'))],
         }],
     },
     ModeRow {
@@ -243,12 +243,12 @@ pub const CONNECTION_SELECTOR_ROWS: &[ModeRow] = &[
     },
     ModeRow {
         key_short: "Esc",
-        key: "Esc",
+        key: "Esc / q",
         desc_short: "Close",
         description: "Close selector",
         bindings: &[ExecBinding {
             action: Action::Escape,
-            combos: &[KeyCombo::plain(Key::Esc)],
+            combos: &[KeyCombo::plain(Key::Esc), KeyCombo::plain(Key::Char('q'))],
         }],
     },
 ];

@@ -65,11 +65,11 @@ pub const SQL_MODAL_NORMAL_KEYS: &[KeyBinding] = &[
     },
     KeyBinding {
         key_short: "Esc",
-        key: "Esc",
+        key: "Esc / q",
         desc_short: "Close",
         description: "Close editor",
         action: Action::CloseSqlModal,
-        combos: &[KeyCombo::plain(Key::Esc)],
+        combos: &[KeyCombo::plain(Key::Esc), KeyCombo::plain(Key::Char('q'))],
     },
     KeyBinding {
         key_short: "^L",
@@ -144,11 +144,11 @@ pub const SQL_MODAL_PLAN_KEYS: &[KeyBinding] = &[
     },
     KeyBinding {
         key_short: "Esc",
-        key: "Esc",
+        key: "Esc / q",
         desc_short: "Close",
         description: "Close editor",
         action: Action::CloseSqlModal,
-        combos: &[KeyCombo::plain(Key::Esc)],
+        combos: &[KeyCombo::plain(Key::Esc), KeyCombo::plain(Key::Char('q'))],
     },
 ];
 
@@ -215,11 +215,11 @@ pub const SQL_MODAL_COMPARE_KEYS: &[KeyBinding] = &[
     },
     KeyBinding {
         key_short: "Esc",
-        key: "Esc",
+        key: "Esc / q",
         desc_short: "Close",
         description: "Close editor",
         action: Action::CloseSqlModal,
-        combos: &[KeyCombo::plain(Key::Esc)],
+        combos: &[KeyCombo::plain(Key::Esc), KeyCombo::plain(Key::Char('q'))],
     },
 ];
 
