@@ -24,12 +24,15 @@ pub const GLOBAL_KEYS: &[KeyBinding] = &[
         combos: &[KeyCombo::plain(Key::Char('?'))],
     },
     KeyBinding {
-        key_short: "^P",
-        key: "Ctrl+P",
+        key_short: "/ ^P",
+        key: "/, Ctrl+P",
         desc_short: "Tables",
         description: "Open Table Picker",
         action: Action::OpenTablePicker,
-        combos: &[KeyCombo::ctrl(Key::Char('p'))],
+        combos: &[
+            KeyCombo::plain(Key::Char('/')),
+            KeyCombo::ctrl(Key::Char('p')),
+        ],
     },
     KeyBinding {
         key_short: "^K",
@@ -66,10 +69,10 @@ pub const GLOBAL_KEYS: &[KeyBinding] = &[
         combos: &[KeyCombo::plain(Key::Char('f'))],
     },
     KeyBinding {
-        key_short: "1/2/3",
-        key: "1/2/3",
+        key_short: "1/2/3 </>",
+        key: "1/2/3, < / >",
         desc_short: "Pane",
-        description: "Switch pane focus",
+        description: "Switch or cycle pane focus",
         action: Action::None,
         combos: &[],
     },

@@ -42,7 +42,8 @@ Built in Rust for minimal memory footprint and near-zero idle CPU. A full-featur
 
 ### Navigation
 
-- **Fuzzy Search** (`/`) — Incremental table filtering
+- **Fuzzy Search** (`/` or `Ctrl+P`) — Incremental table filtering
+- **Pane Focus** (`1`/`2`/`3` or `<`/`>`) — Jump to a pane directly, or cycle prev/next
 - **Focus Mode** (`f`) — Expand any pane to full screen
 - **Command Palette** (`Ctrl+K`) — Searchable command list
 
