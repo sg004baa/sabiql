@@ -176,7 +176,12 @@ impl MySqlAdapter {
     }
 
     /// Execute a data query (preview or adhoc) returning tabular results.
-    /// mysql --batch outputs tab-separated values with column headers.
+    ///
+    /// Runs `mysql --batch` (no `--raw`) so the client escapes embedded tabs,
+    /// newlines, carriage returns, NUL, backslash, and SUB inside each field —
+    /// preventing row/column misalignment. When the local client supports
+    /// `--binary-as-hex` (MySQL 8.0.19+) it is added so `BINARY/VARBINARY/BLOB`
+    /// values render as `0xABCD…` instead of corrupted UTF-8 bytes.
     pub(in crate::adapters::mysql) async fn execute_query_raw(
         &self,
         dsn: &str,
@@ -186,14 +191,14 @@ impl MySqlAdapter {
     ) -> Result<QueryResult, DbOperationError> {
         let start = Instant::now();
 
-        let mut cmd = Self::build_mysql_cmd(
-            dsn,
-            &["--batch", "--raw", "--column-names"],
-            query,
-            read_only,
-        )?;
-
-        let output = Self::collect_output(&mut cmd, self.timeout_secs).await?;
+        let output = self
+            .run_query_with_binary_as_hex_fallback(
+                dsn,
+                &["--batch", "--column-names"],
+                query,
+                read_only,
+            )
+            .await?;
         let elapsed = start.elapsed().as_millis() as u64;
 
         if !output.status.success() {
@@ -215,28 +220,7 @@ impl MySqlAdapter {
             ));
         }
 
-        // mysql --batch outputs tab-separated values
-        let mut reader = csv::ReaderBuilder::new()
-            .has_headers(true)
-            .delimiter(b'\t')
-            .flexible(true)
-            .from_reader(output.stdout.as_bytes());
-
-        let columns: Vec<String> = reader
-            .headers()
-            .map_err(|e| DbOperationError::QueryFailed(format!("TSV parse error: {e}")))?
-            .iter()
-            .map(ToString::to_string)
-            .collect();
-
-        let mut rows = Vec::new();
-        for result in reader.records() {
-            let record = result
-                .map_err(|e| DbOperationError::QueryFailed(format!("TSV parse error: {e}")))?;
-            let row: Vec<String> = record.iter().map(ToString::to_string).collect();
-            rows.push(row);
-        }
-
+        let (columns, rows) = parse_tsv_output(&output.stdout)?;
         Ok(QueryResult::success(
             query.to_string(),
             columns,
@@ -244,6 +228,34 @@ impl MySqlAdapter {
             elapsed,
             source,
         ))
+    }
+
+    /// Run a data query with `--binary-as-hex` when supported, transparently
+    /// falling back if the local mysql client rejects the option.
+    async fn run_query_with_binary_as_hex_fallback(
+        &self,
+        dsn: &str,
+        base_args: &[&str],
+        query: &str,
+        read_only: bool,
+    ) -> Result<MysqlOutput, DbOperationError> {
+        use std::sync::atomic::Ordering;
+
+        if !self.binary_as_hex_disabled.load(Ordering::Relaxed) {
+            let mut args: Vec<&str> = Vec::with_capacity(base_args.len() + 1);
+            args.push("--binary-as-hex");
+            args.extend_from_slice(base_args);
+            let mut cmd = Self::build_mysql_cmd(dsn, &args, query, read_only)?;
+            let output = Self::collect_output(&mut cmd, self.timeout_secs).await?;
+            if output.status.success() || !looks_like_unknown_binary_as_hex(&output.stderr) {
+                return Ok(output);
+            }
+            // One-shot fallback: client predates 8.0.19 (or is MariaDB).
+            self.binary_as_hex_disabled.store(true, Ordering::Relaxed);
+        }
+
+        let mut cmd = Self::build_mysql_cmd(dsn, base_args, query, read_only)?;
+        Self::collect_output(&mut cmd, self.timeout_secs).await
     }
 
     /// Execute a write query (UPDATE, DELETE, INSERT) and return affected rows.
@@ -315,12 +327,22 @@ impl MySqlAdapter {
         path: &std::path::Path,
         read_only: bool,
     ) -> Result<usize, DbOperationError> {
-        let mut cmd = Self::build_mysql_cmd(
-            dsn,
-            &["--batch", "--raw", "--column-names"],
-            query,
-            read_only,
-        )?;
+        use std::sync::atomic::Ordering;
+
+        // Mirrors `execute_query_raw`: drop `--raw` so embedded tabs/newlines
+        // are escaped, and prefer `--binary-as-hex` when the local client
+        // supports it. We reuse the adapter-wide `binary_as_hex_disabled`
+        // flag rather than retrying inside the streaming write — in the
+        // unlikely case the very first DB interaction is a CSV export against
+        // an old client, the user sees a normal `unknown option` error and
+        // the partial file is cleaned up below.
+        let mut args: Vec<&str> = Vec::with_capacity(3);
+        if !self.binary_as_hex_disabled.load(Ordering::Relaxed) {
+            args.push("--binary-as-hex");
+        }
+        args.push("--batch");
+        args.push("--column-names");
+        let mut cmd = Self::build_mysql_cmd(dsn, &args, query, read_only)?;
 
         let mut child = cmd
             .stdout(Stdio::piped())
@@ -429,14 +451,100 @@ impl MySqlAdapter {
     }
 }
 
+/// Parse the TSV stdout of `mysql --batch --column-names` into
+/// `(columns, rows)`. Each field is unescaped to restore embedded
+/// tabs/newlines/etc. that the client encoded.
+///
+/// CSV quoting is disabled because mysql does not quote fields; a bare `"`
+/// inside a text value would otherwise be misinterpreted as a quote opener.
+///
+/// The terminator is pinned to `\n` because the mysql client emits a raw `\r`
+/// byte for stored carriage returns instead of the `\r` escape form. With the
+/// csv crate's default `CRLF` terminator, that lone `\r` would split a single
+/// logical row in two.
+fn parse_tsv_output(stdout: &str) -> Result<(Vec<String>, Vec<Vec<String>>), DbOperationError> {
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .delimiter(b'\t')
+        .flexible(true)
+        .quoting(false)
+        .terminator(csv::Terminator::Any(b'\n'))
+        .from_reader(stdout.as_bytes());
+
+    let columns: Vec<String> = reader
+        .headers()
+        .map_err(|e| DbOperationError::QueryFailed(format!("TSV parse error: {e}")))?
+        .iter()
+        .map(unescape_mysql_tsv)
+        .collect();
+
+    let mut rows = Vec::new();
+    for result in reader.records() {
+        let record =
+            result.map_err(|e| DbOperationError::QueryFailed(format!("TSV parse error: {e}")))?;
+        let row: Vec<String> = record.iter().map(unescape_mysql_tsv).collect();
+        rows.push(row);
+    }
+
+    Ok((columns, rows))
+}
+
+/// Decode the escape sequences that `mysql --batch` (non-`--raw`) emits inside
+/// each TSV field.
+///
+/// Why: without `--raw`, the mysql client escapes any byte in a value that
+/// would otherwise corrupt the TSV layout (tabs, newlines, carriage returns,
+/// NUL, backslash, SUB). Reversing those escapes after parsing restores the
+/// original bytes while keeping the row/column structure intact.
+fn unescape_mysql_tsv(field: &str) -> String {
+    let mut result = String::with_capacity(field.len());
+    let mut chars = field.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            result.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('0') => result.push('\0'),
+            Some('\\') => result.push('\\'),
+            Some('n') => result.push('\n'),
+            Some('r') => result.push('\r'),
+            Some('t') => result.push('\t'),
+            Some('Z') => result.push('\u{001A}'),
+            Some(other) => {
+                result.push('\\');
+                result.push(other);
+            }
+            None => result.push('\\'),
+        }
+    }
+    result
+}
+
+/// Whether the mysql client rejected `--binary-as-hex` because the local
+/// binary predates 8.0.19 (or is MariaDB). Used to drive a one-shot fallback.
+fn looks_like_unknown_binary_as_hex(stderr: &str) -> bool {
+    let lower = stderr.to_lowercase();
+    lower.contains("binary-as-hex") && (lower.contains("unknown") || lower.contains("unrecognized"))
+}
+
 /// Convert a TSV line to a CSV line (tab → comma, with proper quoting).
+///
+/// Fields are first unescaped from MySQL's `--batch` escape form so embedded
+/// tabs/newlines round-trip into the CSV via RFC 4180 quoting instead of
+/// staying as literal `\n` / `\t` text.
 fn tsv_line_to_csv(line: &str) -> String {
     line.split('\t')
+        .map(unescape_mysql_tsv)
         .map(|field| {
-            if field.contains(',') || field.contains('"') || field.contains('\n') {
+            if field.contains(',')
+                || field.contains('"')
+                || field.contains('\n')
+                || field.contains('\r')
+            {
                 format!("\"{}\"", field.replace('"', "\"\""))
             } else {
-                field.to_string()
+                field
             }
         })
         .collect::<Vec<_>>()
@@ -493,6 +601,188 @@ mod tests {
         }
     }
 
+    mod parse_tsv_output {
+        use super::super::parse_tsv_output;
+
+        #[test]
+        fn simple_two_column_table_parses() {
+            let stdout = "id\tname\n1\tAlice\n2\tBob\n";
+            let (cols, rows) = parse_tsv_output(stdout).unwrap();
+            assert_eq!(cols, vec!["id", "name"]);
+            assert_eq!(rows, vec![vec!["1", "Alice"], vec!["2", "Bob"]]);
+        }
+
+        #[test]
+        fn embedded_newline_stays_in_single_row() {
+            // Without `--raw`, mysql emits the newline inside the value as
+            // the two chars `\n`. The TSV layout must report one row, and
+            // the value must contain a real newline after unescape.
+            let stdout = "id\tnote\n1\thello\\nworld\n";
+            let (cols, rows) = parse_tsv_output(stdout).unwrap();
+            assert_eq!(cols, vec!["id", "note"]);
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0], vec!["1", "hello\nworld"]);
+        }
+
+        #[test]
+        fn embedded_tab_stays_in_single_field() {
+            // Embedded tab encoded as `\t`; must not split the field.
+            let stdout = "id\tnote\n1\tcol\\ta\n";
+            let (cols, rows) = parse_tsv_output(stdout).unwrap();
+            assert_eq!(cols, vec!["id", "note"]);
+            assert_eq!(rows, vec![vec!["1", "col\ta"]]);
+        }
+
+        #[test]
+        fn binary_as_hex_value_passes_through() {
+            // With `--binary-as-hex`, BINARY values arrive as `0x…` literals.
+            let stdout = "id\tdata\n1\t0xDEADBEEF\n";
+            let (cols, rows) = parse_tsv_output(stdout).unwrap();
+            assert_eq!(cols, vec!["id", "data"]);
+            assert_eq!(rows, vec![vec!["1", "0xDEADBEEF"]]);
+        }
+
+        #[test]
+        fn bare_double_quote_in_field_is_not_treated_as_quote_delimiter() {
+            // mysql does not quote fields; the csv reader must not interpret
+            // a stray `"` as opening a quoted region.
+            let stdout = "id\tnote\n1\the said \"hi\"\n2\tplain\n";
+            let (cols, rows) = parse_tsv_output(stdout).unwrap();
+            assert_eq!(cols, vec!["id", "note"]);
+            assert_eq!(rows, vec![vec!["1", "he said \"hi\""], vec!["2", "plain"]]);
+        }
+
+        #[test]
+        fn newlines_and_binary_mixed_keeps_columns_aligned() {
+            let stdout = "id\tnote\tblob\n1\tline1\\nline2\t0xCAFE\n2\tplain\t0xBABE\n";
+            let (cols, rows) = parse_tsv_output(stdout).unwrap();
+            assert_eq!(cols, vec!["id", "note", "blob"]);
+            assert_eq!(rows.len(), 2);
+            assert_eq!(rows[0], vec!["1", "line1\nline2", "0xCAFE"]);
+            assert_eq!(rows[1], vec!["2", "plain", "0xBABE"]);
+        }
+
+        #[test]
+        fn header_only_returns_no_rows() {
+            let stdout = "id\tname\n";
+            let (cols, rows) = parse_tsv_output(stdout).unwrap();
+            assert_eq!(cols, vec!["id", "name"]);
+            assert!(rows.is_empty());
+        }
+
+        #[test]
+        fn raw_carriage_return_inside_field_does_not_split_row() {
+            // mysql --batch leaks a stored `\r` as a raw byte rather than the
+            // `\r` escape form. The TSV must still be one logical row; the
+            // unescape pass is a no-op for raw `\r`, so it stays in the field.
+            let stdout = "id\ttext\n15\tA\rB\n";
+            let (cols, rows) = parse_tsv_output(stdout).unwrap();
+            assert_eq!(cols, vec!["id", "text"]);
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0], vec!["15", "A\rB"]);
+        }
+    }
+
+    mod unescape_mysql_tsv {
+        use super::super::unescape_mysql_tsv;
+
+        #[test]
+        fn plain_text_passes_through_unchanged() {
+            assert_eq!(unescape_mysql_tsv("hello world"), "hello world");
+        }
+
+        #[test]
+        fn escaped_newline_becomes_lf() {
+            assert_eq!(unescape_mysql_tsv("line1\\nline2"), "line1\nline2");
+        }
+
+        #[test]
+        fn escaped_tab_becomes_tab() {
+            assert_eq!(unescape_mysql_tsv("a\\tb"), "a\tb");
+        }
+
+        #[test]
+        fn escaped_carriage_return_becomes_cr() {
+            assert_eq!(unescape_mysql_tsv("a\\rb"), "a\rb");
+        }
+
+        #[test]
+        fn escaped_null_becomes_nul_byte() {
+            assert_eq!(unescape_mysql_tsv("a\\0b"), "a\0b");
+        }
+
+        #[test]
+        fn double_backslash_becomes_single_backslash() {
+            assert_eq!(unescape_mysql_tsv("a\\\\b"), "a\\b");
+        }
+
+        #[test]
+        fn escaped_sub_becomes_ascii_1a() {
+            assert_eq!(unescape_mysql_tsv("a\\Zb"), "a\u{001A}b");
+        }
+
+        #[test]
+        fn unknown_escape_is_kept_literal() {
+            // Unknown escape (e.g. \q) is preserved as-is so we never silently
+            // drop bytes when MySQL adds a new escape sequence in the future.
+            assert_eq!(unescape_mysql_tsv("a\\qb"), "a\\qb");
+        }
+
+        #[test]
+        fn trailing_backslash_is_kept() {
+            assert_eq!(unescape_mysql_tsv("abc\\"), "abc\\");
+        }
+
+        #[test]
+        fn empty_input_returns_empty() {
+            assert_eq!(unescape_mysql_tsv(""), "");
+        }
+
+        #[test]
+        fn multiple_escapes_in_sequence_all_decode() {
+            assert_eq!(unescape_mysql_tsv("\\n\\t\\\\\\0"), "\n\t\\\0");
+        }
+    }
+
+    mod looks_like_unknown_binary_as_hex {
+        use super::super::looks_like_unknown_binary_as_hex;
+
+        #[test]
+        fn unknown_option_message_matches() {
+            assert!(looks_like_unknown_binary_as_hex(
+                "mysql: unknown option '--binary-as-hex'"
+            ));
+        }
+
+        #[test]
+        fn unrecognized_option_message_matches() {
+            assert!(looks_like_unknown_binary_as_hex(
+                "mysql: unrecognized option '--binary-as-hex'"
+            ));
+        }
+
+        #[test]
+        fn case_insensitive_match() {
+            assert!(looks_like_unknown_binary_as_hex(
+                "MySQL: Unknown Option '--BINARY-AS-HEX'"
+            ));
+        }
+
+        #[test]
+        fn unrelated_error_does_not_match() {
+            assert!(!looks_like_unknown_binary_as_hex(
+                "ERROR 1146 (42S02): Table 'foo' doesn't exist"
+            ));
+        }
+
+        #[test]
+        fn unknown_about_another_option_does_not_match() {
+            assert!(!looks_like_unknown_binary_as_hex(
+                "mysql: unknown option '--some-other'"
+            ));
+        }
+    }
+
     mod tsv_to_csv {
         use super::super::tsv_line_to_csv;
 
@@ -514,6 +804,31 @@ mod tests {
         #[test]
         fn single_field() {
             assert_eq!(tsv_line_to_csv("value"), "value");
+        }
+
+        #[test]
+        fn escaped_newline_is_unescaped_then_csv_quoted() {
+            // MySQL emits embedded newlines as the two chars `\n`; the CSV
+            // output must restore the real newline and wrap the field in
+            // quotes per RFC 4180.
+            assert_eq!(tsv_line_to_csv("a\\nb\tc"), "\"a\nb\",c");
+        }
+
+        #[test]
+        fn escaped_tab_is_unescaped_in_place() {
+            assert_eq!(tsv_line_to_csv("a\\tb\tc"), "a\tb,c");
+        }
+
+        #[test]
+        fn escaped_backslash_round_trips() {
+            assert_eq!(tsv_line_to_csv("a\\\\b\tc"), "a\\b,c");
+        }
+
+        #[test]
+        fn escaped_carriage_return_is_quoted_per_rfc4180() {
+            // RFC 4180 requires CR-bearing fields to be quoted; otherwise a
+            // strict reader (or Excel on Windows) would split the row.
+            assert_eq!(tsv_line_to_csv("a\\rb\tc"), "\"a\rb\",c");
         }
     }
 }

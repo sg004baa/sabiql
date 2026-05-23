@@ -1,3 +1,6 @@
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+
 use async_trait::async_trait;
 
 use crate::app::ports::outbound::{
@@ -14,15 +17,26 @@ mod sql;
 
 pub struct MySqlAdapter {
     timeout_secs: u64,
+    // Flipped to true the first time the local `mysql` client rejects
+    // `--binary-as-hex` (MySQL < 8.0.19 or MariaDB). Subsequent calls skip
+    // the option and fall back to legacy raw-byte rendering for binary
+    // columns. Shared across cloned references so the probe is one-shot.
+    pub(crate) binary_as_hex_disabled: Arc<AtomicBool>,
 }
 
 impl MySqlAdapter {
     pub fn new() -> Self {
-        Self { timeout_secs: 30 }
+        Self {
+            timeout_secs: 30,
+            binary_as_hex_disabled: Arc::new(AtomicBool::new(false)),
+        }
     }
 
     pub fn with_timeout(timeout_secs: u64) -> Self {
-        Self { timeout_secs }
+        Self {
+            timeout_secs,
+            binary_as_hex_disabled: Arc::new(AtomicBool::new(false)),
+        }
     }
 
     fn extract_primary_key(columns: &[Column]) -> Option<Vec<String>> {
