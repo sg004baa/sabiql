@@ -119,6 +119,34 @@ fn try_add_bonus_column(
     false
 }
 
+fn try_add_partial_bonus_column(
+    config: &ColumnWidthConfig,
+    indices: &mut Vec<usize>,
+    widths: &mut Vec<u16>,
+    available_width: u16,
+) -> bool {
+    let Some(&rightmost_idx) = indices.last() else {
+        return false;
+    };
+    let next_idx = rightmost_idx + 1;
+
+    if next_idx >= config.ideal_widths.len() {
+        return false;
+    }
+
+    let current_total = total_width_with_separators(widths);
+    let slack = available_width.saturating_sub(current_total);
+
+    if slack >= 3 {
+        indices.push(next_idx);
+        // Partial width may be below MIN_COL_WIDTH as a visual hint of more columns.
+        widths.push(slack - 1);
+        return true;
+    }
+
+    false
+}
+
 pub fn select_viewport_columns(
     config: &ColumnWidthConfig,
     ctx: &SelectionContext,
@@ -155,7 +183,8 @@ fn select_fixed_columns(
 
     // Add bonus column when scrolling is needed (max_offset > 0)
     if ctx.max_offset > 0 {
-        try_add_bonus_column(config, &mut indices, &mut widths, ctx.available_width);
+        while try_add_bonus_column(config, &mut indices, &mut widths, ctx.available_width) {}
+        try_add_partial_bonus_column(config, &mut indices, &mut widths, ctx.available_width);
     }
 
     let total_needed = total_width_with_separators(&widths);
@@ -704,10 +733,10 @@ mod tests {
             let max_offset = 2;
 
             let (idx0, _) = select_viewport_columns(&cfg, &ctx(0, 75, Some(3), max_offset));
-            assert_eq!(idx0, vec![0, 1, 2]);
+            assert_eq!(idx0, vec![0, 1, 2, 3]);
 
             let (idx1, _) = select_viewport_columns(&cfg, &ctx(1, 75, Some(3), max_offset));
-            assert_eq!(idx1, vec![1, 2, 3]);
+            assert_eq!(idx1, vec![1, 2, 3, 4]);
 
             let (idx2, _) = select_viewport_columns(&cfg, &ctx(2, 75, Some(3), max_offset));
             assert_eq!(idx2, vec![2, 3, 4]);
@@ -852,7 +881,10 @@ mod tests {
                 for (i, &w) in widths.iter().enumerate() {
                     let col_idx = indices[i];
                     let min_w = min[col_idx];
-                    assert!(w >= min_w, "offset={offset}, col={col_idx}: {w} < {min_w}");
+                    assert!(
+                        w >= min_w || i == widths.len() - 1,
+                        "offset={offset}, col={col_idx}: {w} < {min_w}"
+                    );
                 }
             }
         }
@@ -1018,8 +1050,8 @@ mod tests {
                 &ctx_with_slack(2, 60, Some(3), max_offset, SlackPolicy::None),
             );
 
-            assert_eq!(idx0, vec![0, 1, 2]);
-            assert_eq!(idx1, vec![1, 2, 3]);
+            assert_eq!(idx0, vec![0, 1, 2, 3]);
+            assert_eq!(idx1, vec![1, 2, 3, 4]);
             assert_eq!(idx2, vec![2, 3, 4]);
         }
     }
@@ -1090,7 +1122,7 @@ mod tests {
                 for (i, &w) in widths.iter().enumerate() {
                     let col_idx = indices[i];
                     assert!(
-                        w >= min[col_idx],
+                        w >= min[col_idx] || i == widths.len() - 1,
                         "offset={}, col={}: width {} < min {}",
                         offset,
                         col_idx,
@@ -1159,7 +1191,7 @@ mod tests {
                 let (indices, widths) = run_full_pipeline(&ideal, &min, available, offset);
 
                 // Column count should be stable
-                assert_eq!(indices.len(), plan.column_count);
+                assert!(indices.len() >= plan.column_count);
 
                 // Total width should not exceed available
                 let total: u16 =
@@ -1172,7 +1204,7 @@ mod tests {
                 // All widths should be >= min
                 for (i, &w) in widths.iter().enumerate() {
                     let col_idx = indices[i];
-                    assert!(w >= min[col_idx]);
+                    assert!(w >= min[col_idx] || i == widths.len() - 1);
                 }
             }
         }
@@ -1200,8 +1232,8 @@ mod tests {
         #[test]
         fn adds_bonus_when_slack_sufficient() {
             // 3 fixed columns + bonus potential
-            let ideal = vec![10, 10, 10, 10, 10];
-            let min = vec![4, 4, 4, 4, 4];
+            let ideal = vec![10, 10, 10, 10];
+            let min = vec![4, 4, 4, 4];
             let cfg = config(&ideal, &min);
 
             // Fixed count = 3, max_offset = 2
@@ -1225,12 +1257,12 @@ mod tests {
             let cfg = config(&ideal, &min);
 
             // 3 cols: 10+10+10 + 2 sep = 32
-            // Available: 40, slack: 8
+            // Available: 34, slack: 2
             // Next col needs: 20 + 1 sep = 21
-            // 8 < 21, no bonus
+            // 2 < 21, no bonus or partial bonus
             let (indices, _) = select_viewport_columns(
                 &cfg,
-                &ctx_with_slack(0, 40, Some(3), 2, SlackPolicy::None),
+                &ctx_with_slack(0, 34, Some(3), 2, SlackPolicy::None),
             );
 
             assert_eq!(indices.len(), 3, "Should not add bonus column");
@@ -1312,6 +1344,66 @@ mod tests {
                 total <= 80,
                 "Total width {total} should not exceed available 80"
             );
+        }
+
+        #[test]
+        fn loops_until_slack_exhausted() {
+            let ideal = vec![8, 8, 8, 8, 8];
+            let min = vec![4, 4, 4, 4, 4];
+            let cfg = config(&ideal, &min);
+
+            let (indices, widths) = select_viewport_columns(
+                &cfg,
+                &ctx_with_slack(0, 44, Some(1), 4, SlackPolicy::None),
+            );
+
+            assert_eq!(indices, vec![0, 1, 2, 3, 4]);
+            assert_eq!(widths, vec![8, 8, 8, 8, 8]);
+        }
+
+        #[test]
+        fn partial_bonus_added_when_slack_below_ideal() {
+            let ideal = vec![10, 10, 50, 10, 10];
+            let min = vec![4, 4, 4, 4, 4];
+            let cfg = config(&ideal, &min);
+
+            let (indices, widths) = select_viewport_columns(
+                &cfg,
+                &ctx_with_slack(0, 60, Some(1), 4, SlackPolicy::None),
+            );
+
+            assert_eq!(indices, vec![0, 1, 2]);
+            assert_eq!(widths, vec![10, 10, 38]);
+        }
+
+        #[test]
+        fn no_partial_when_slack_too_small() {
+            let ideal = vec![10, 10, 50, 10, 10];
+            let min = vec![4, 4, 4, 4, 4];
+            let cfg = config(&ideal, &min);
+
+            let (indices, widths) = select_viewport_columns(
+                &cfg,
+                &ctx_with_slack(0, 23, Some(1), 4, SlackPolicy::None),
+            );
+
+            assert_eq!(indices, vec![0, 1]);
+            assert_eq!(widths, vec![10, 10]);
+        }
+
+        #[test]
+        fn no_partial_when_already_at_last_column() {
+            let ideal = vec![10, 10, 10];
+            let min = vec![4, 4, 4];
+            let cfg = config(&ideal, &min);
+
+            let (indices, widths) = select_viewport_columns(
+                &cfg,
+                &ctx_with_slack(0, 50, Some(1), 2, SlackPolicy::None),
+            );
+
+            assert_eq!(indices, vec![0, 1, 2]);
+            assert_eq!(widths, vec![10, 10, 10]);
         }
     }
 }
