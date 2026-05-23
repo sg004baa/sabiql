@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::time::Instant;
 
@@ -434,8 +435,8 @@ pub(crate) fn calculate_ideal_widths(headers: &[String], rows: &[Vec<String>]) -
             let sample_size = rows.len().min(SAMPLE_ROWS);
             for row in rows.iter().take(sample_size) {
                 if let Some(cell) = row.get(col_idx) {
-                    let first_line = cell.lines().next().unwrap_or(cell);
-                    let cell_width = first_line.chars().count();
+                    let escaped = escape_for_display(cell);
+                    let cell_width = escaped.chars().count();
                     max_width = max_width.max(cell_width);
                 }
             }
@@ -474,17 +475,43 @@ fn cell_edit_line_with_cursor(
     ))
 }
 
+/// Render control characters as their backslash-escape form so that values
+/// containing `\n` / `\r` / `\t` / `\0` / `\Z` show as readable literals in the
+/// fixed-height result grid instead of breaking the row layout or being hidden
+/// past the first line.
+///
+/// Bare backslashes are intentionally not doubled — most stored values
+/// (filesystem paths, JSON, etc.) contain literal `\` and rewriting them to
+/// `\\` would obscure far more than it would clarify.
+fn escape_for_display(s: &str) -> Cow<'_, str> {
+    if !s
+        .chars()
+        .any(|c| matches!(c, '\n' | '\r' | '\t' | '\0' | '\u{001A}'))
+    {
+        return Cow::Borrowed(s);
+    }
+    let mut out = String::with_capacity(s.len() + 2);
+    for c in s.chars() {
+        match c {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\0' => out.push_str("\\0"),
+            '\u{001A}' => out.push_str("\\Z"),
+            other => out.push(other),
+        }
+    }
+    Cow::Owned(out)
+}
+
 fn truncate_cell(s: &str, max_chars: usize) -> String {
-    let first_line = s.lines().next().unwrap_or(s);
-    let char_count = first_line.chars().count();
+    let escaped = escape_for_display(s);
+    let char_count = escaped.chars().count();
 
     if char_count <= max_chars {
-        first_line.to_string()
+        escaped.into_owned()
     } else {
-        let truncated: String = first_line
-            .chars()
-            .take(max_chars.saturating_sub(3))
-            .collect();
+        let truncated: String = escaped.chars().take(max_chars.saturating_sub(3)).collect();
         format!("{truncated}...")
     }
 }
@@ -562,17 +589,17 @@ mod tests {
         }
 
         #[test]
-        fn only_considers_first_line_for_multiline_cells() {
+        fn newline_in_cell_widens_column_for_escape_literal() {
+            // Newlines now render as `\n` literals, so width estimation must
+            // account for the escaped form rather than only the first line.
             let headers = vec!["text".to_string()];
-            let rows = vec![vec![
-                "short\nvery long second line that should be ignored".to_string(),
-            ]];
+            let rows = vec![vec!["short\nlong".to_string()]];
 
             let result = calculate_ideal_widths(&headers, &rows);
 
             assert_eq!(result.len(), 1);
-            // "short" = 5 chars, max(4, 5) + 2 = 7
-            assert_eq!(result[0], 7);
+            // "short\\nlong" = 11 chars, max(4, 11) + 2 = 13
+            assert_eq!(result[0], 13);
         }
 
         #[test]
@@ -649,17 +676,39 @@ mod tests {
     }
 
     #[test]
-    fn newline_shows_first_line_only() {
-        let result = truncate_cell("first\nsecond\nthird", 20);
+    fn newline_is_rendered_as_escape_literal() {
+        let result = truncate_cell("first\nsecond\nthird", 30);
 
-        assert_eq!(result, "first");
+        assert_eq!(result, "first\\nsecond\\nthird");
     }
 
     #[test]
-    fn newline_with_truncation_applies_to_first_line() {
+    fn newline_with_truncation_truncates_escaped_form() {
         let result = truncate_cell("this is a long first line\nsecond", 10);
 
         assert_eq!(result, "this is...");
+    }
+
+    #[test]
+    fn control_characters_render_as_backslash_escapes() {
+        let raw = "A\0B\nC\tD\r\nE";
+        let result = truncate_cell(raw, 40);
+
+        assert_eq!(result, "A\\0B\\nC\\tD\\r\\nE");
+    }
+
+    #[test]
+    fn sub_character_renders_as_backslash_z() {
+        let result = truncate_cell("A\u{001A}B", 10);
+
+        assert_eq!(result, "A\\ZB");
+    }
+
+    #[test]
+    fn bare_backslash_is_left_untouched() {
+        let result = truncate_cell("C:\\Users\\name", 30);
+
+        assert_eq!(result, "C:\\Users\\name");
     }
 
     #[test]
