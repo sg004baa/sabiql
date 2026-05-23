@@ -537,7 +537,11 @@ fn tsv_line_to_csv(line: &str) -> String {
     line.split('\t')
         .map(unescape_mysql_tsv)
         .map(|field| {
-            if field.contains(',') || field.contains('"') || field.contains('\n') {
+            if field.contains(',')
+                || field.contains('"')
+                || field.contains('\n')
+                || field.contains('\r')
+            {
                 format!("\"{}\"", field.replace('"', "\"\""))
             } else {
                 field
@@ -818,6 +822,13 @@ mod tests {
         #[test]
         fn escaped_backslash_round_trips() {
             assert_eq!(tsv_line_to_csv("a\\\\b\tc"), "a\\b,c");
+        }
+
+        #[test]
+        fn escaped_carriage_return_is_quoted_per_rfc4180() {
+            // RFC 4180 requires CR-bearing fields to be quoted; otherwise a
+            // strict reader (or Excel on Windows) would split the row.
+            assert_eq!(tsv_line_to_csv("a\\rb\tc"), "\"a\rb\",c");
         }
     }
 }

@@ -43,10 +43,16 @@ mod binary_and_newline_rendering {
         let adapter = MySqlAdapter::new();
         let dsn = test_dsn();
 
-        // MySQL interprets `\n` inside single quotes as a real newline byte;
-        // the parser must keep this as one row with the newline preserved.
+        // `CHAR(10)` is used instead of `'\n'` so the byte is produced
+        // deterministically even when the server runs with
+        // `NO_BACKSLASH_ESCAPES`. The parser must keep this as one row with
+        // the newline preserved.
         let result = adapter
-            .execute_adhoc(&dsn, "SELECT 'line1\\nline2' AS note", false)
+            .execute_adhoc(
+                &dsn,
+                "SELECT CONCAT('line1', CHAR(10), 'line2') AS note",
+                false,
+            )
             .await
             .unwrap();
 
@@ -66,7 +72,11 @@ mod binary_and_newline_rendering {
         let dsn = test_dsn();
 
         let result = adapter
-            .execute_adhoc(&dsn, "SELECT 'col\\ta' AS note, 'x' AS sentinel", false)
+            .execute_adhoc(
+                &dsn,
+                "SELECT CONCAT('col', CHAR(9), 'a') AS note, 'x' AS sentinel",
+                false,
+            )
             .await
             .unwrap();
 
@@ -84,7 +94,7 @@ mod binary_and_newline_rendering {
         let result = adapter
             .execute_adhoc(
                 &dsn,
-                "SELECT 1 AS id, 'a\\nb' AS note, 0xCAFE AS blob_col \
+                "SELECT 1 AS id, CONCAT('a', CHAR(10), 'b') AS note, 0xCAFE AS blob_col \
                  UNION ALL SELECT 2, 'plain', 0xBABE",
                 false,
             )
