@@ -14,8 +14,7 @@ use crate::app::model::app_state::AppState;
 use crate::app::model::shared::focused_pane::FocusedPane;
 use crate::app::model::shared::ui_state::{RESULT_INNER_OVERHEAD, ResultSelection, YankFlash};
 use crate::app::model::shared::viewport::{
-    ColumnWidthConfig, ColumnWidthsCache, MAX_COL_WIDTH, SelectionContext, ViewportPlan,
-    select_viewport_columns,
+    ColumnWidthConfig, ColumnWidthsCache, SelectionContext, ViewportPlan, select_viewport_columns,
 };
 use crate::domain::{QueryResult, QuerySource};
 use crate::primitives::utils::text_utils::{MIN_COL_WIDTH, PADDING, calculate_header_min_widths};
@@ -423,6 +422,12 @@ impl ResultPane {
     }
 }
 
+/// Upper bound (in characters) on a result-pane column's ideal width. Stops a
+/// single long value (UUID, JSON, free text) from monopolizing the viewport and
+/// pushing every other column off-screen behind a horizontal scroll. Cells wider
+/// than this are truncated with a trailing ellipsis.
+const RESULT_MAX_COL_WIDTH: u16 = 50;
+
 pub(crate) fn calculate_ideal_widths(headers: &[String], rows: &[Vec<String>]) -> Vec<u16> {
     const SAMPLE_ROWS: usize = 50;
 
@@ -441,7 +446,7 @@ pub(crate) fn calculate_ideal_widths(headers: &[String], rows: &[Vec<String>]) -
                 }
             }
 
-            (max_width as u16 + PADDING).clamp(MIN_COL_WIDTH, MAX_COL_WIDTH)
+            (max_width as u16 + PADDING).clamp(MIN_COL_WIDTH, RESULT_MAX_COL_WIDTH)
         })
         .collect()
 }
@@ -572,8 +577,8 @@ mod tests {
             let result = calculate_ideal_widths(&headers, &rows);
 
             assert_eq!(result.len(), 1);
-            // Should be capped at MAX_COL_WIDTH (200)
-            assert_eq!(result[0], 200);
+            // Should be capped at RESULT_MAX_COL_WIDTH (50)
+            assert_eq!(result[0], 50);
         }
 
         #[test]
