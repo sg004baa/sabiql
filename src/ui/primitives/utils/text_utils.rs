@@ -1,3 +1,5 @@
+use unicode_width::UnicodeWidthChar;
+
 pub const MIN_COL_WIDTH: u16 = 4;
 pub const PADDING: u16 = 2;
 
@@ -20,6 +22,54 @@ pub fn wrapped_line_count(text: &str, width: u16) -> u16 {
         let wrapped = w.max(1).div_ceil(width);
         acc.saturating_add(wrapped)
     })
+}
+
+pub fn search_viewport_offset(input: &str, cursor: usize, visible_width: usize) -> usize {
+    let chars: Vec<char> = input.chars().collect();
+    let cursor = cursor.min(chars.len());
+
+    if visible_width == 0 {
+        return cursor;
+    }
+
+    let mut viewport_offset = 0;
+    let mut width_before_cursor = display_width(&chars[..cursor]);
+
+    while width_before_cursor >= visible_width && viewport_offset < cursor {
+        width_before_cursor =
+            width_before_cursor.saturating_sub(char_width(chars[viewport_offset]));
+        viewport_offset += 1;
+    }
+
+    viewport_offset
+}
+
+pub fn slice_chars_fitting_width(input: &str, start: usize, visible_width: usize) -> String {
+    if visible_width == 0 {
+        return String::new();
+    }
+
+    let mut width = 0;
+    let mut visible = String::new();
+
+    for ch in input.chars().skip(start) {
+        let ch_width = char_width(ch);
+        if width + ch_width > visible_width {
+            break;
+        }
+        width += ch_width;
+        visible.push(ch);
+    }
+
+    visible
+}
+
+pub fn display_width(chars: &[char]) -> usize {
+    chars.iter().map(|&ch| char_width(ch)).sum()
+}
+
+pub fn char_width(ch: char) -> usize {
+    UnicodeWidthChar::width(ch).unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -63,5 +113,15 @@ mod tests {
         fn counts_wrapped_lines(#[case] text: &str, #[case] width: u16, #[case] expected: u16) {
             assert_eq!(wrapped_line_count(text, width), expected);
         }
+    }
+
+    #[test]
+    fn slice_chars_fitting_width_omits_first_wide_char_when_viewport_is_too_narrow() {
+        assert_eq!(slice_chars_fitting_width("界a", 0, 1), "");
+    }
+
+    #[test]
+    fn slice_chars_fitting_width_keeps_chars_that_fit_exactly() {
+        assert_eq!(slice_chars_fitting_width("ab", 0, 2), "ab");
     }
 }
