@@ -8,7 +8,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Cell, Paragraph, Row, Table, Wrap};
 
-use crate::primitives::atoms::{panel_block_highlight, text_cursor_spans};
+use crate::primitives::atoms::{CursorKind, panel_block_highlight, text_cursor_spans_with_kind};
 
 use crate::app::model::app_state::AppState;
 use crate::app::model::shared::focused_pane::FocusedPane;
@@ -17,7 +17,10 @@ use crate::app::model::shared::viewport::{
     ColumnWidthConfig, ColumnWidthsCache, SelectionContext, ViewportPlan, select_viewport_columns,
 };
 use crate::domain::{QueryResult, QuerySource};
-use crate::primitives::utils::text_utils::{MIN_COL_WIDTH, PADDING, calculate_header_min_widths};
+use crate::primitives::utils::text_utils::{
+    MIN_COL_WIDTH, PADDING, calculate_header_min_widths, search_viewport_offset,
+    slice_chars_fitting_width,
+};
 use crate::theme::ThemePalette;
 
 pub struct ResultPane;
@@ -457,26 +460,22 @@ fn cell_edit_line_with_cursor(
     max_chars: usize,
     theme: &ThemePalette,
 ) -> Line<'static> {
-    let total = text.chars().count();
-
-    // For narrow columns, try to keep cursor visible
     if max_chars == 0 {
         return Line::from(vec![]);
     }
 
-    // Determine viewport window to keep cursor visible
-    let view_start = if cursor >= total {
-        // Cursor at end: need space for block cursor
-        let effective = max_chars.saturating_sub(1);
-        total.saturating_sub(effective)
-    } else if cursor < max_chars {
-        0
-    } else {
-        cursor.saturating_sub(max_chars / 2)
-    };
+    let visible_width = max_chars.saturating_sub(1);
+    let viewport_offset = search_viewport_offset(text, cursor, visible_width);
+    let visible = slice_chars_fitting_width(text, viewport_offset, visible_width);
+    let relative_cursor = cursor.saturating_sub(viewport_offset);
 
-    Line::from(text_cursor_spans(
-        text, cursor, view_start, max_chars, theme,
+    Line::from(text_cursor_spans_with_kind(
+        &visible,
+        relative_cursor,
+        0,
+        visible.chars().count(),
+        CursorKind::Block,
+        theme,
     ))
 }
 
@@ -524,7 +523,24 @@ fn truncate_cell(s: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::theme::DEFAULT_THEME;
     use rstest::rstest;
+    use unicode_width::UnicodeWidthStr;
+
+    fn line_display_width(line: &Line<'_>) -> usize {
+        line.spans
+            .iter()
+            .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+            .sum()
+    }
+
+    fn line_text(line: &Line<'_>) -> String {
+        let mut text = String::new();
+        for span in &line.spans {
+            text.push_str(span.content.as_ref());
+        }
+        text
+    }
 
     mod calculate_ideal_widths_tests {
         use super::*;
@@ -740,6 +756,55 @@ mod tests {
         let result = truncate_cell("hello world", max);
 
         assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn cell_edit_line_with_wide_chars_keeps_tail_cursor_inside_width() {
+        let theme = DEFAULT_THEME;
+        let text = "甲乙丙丁戊己庚辛壬癸";
+        let cursor = text.chars().count();
+        let col_width = 8;
+
+        let line = cell_edit_line_with_cursor(text, cursor, col_width, &theme);
+
+        assert!(line_display_width(&line) <= col_width);
+        assert_eq!(
+            line.spans.last().map(|span| span.content.as_ref()),
+            Some(" ")
+        );
+        // 先頭の全角文字は省略され、末尾側 (カーソル付近) が表示される
+        assert!(!line_text(&line).starts_with('甲'));
+        assert!(text.ends_with(line_text(&line).trim_end_matches(' ')));
+    }
+
+    #[test]
+    fn cell_edit_line_with_wide_chars_scrolls_when_cursor_moves_left() {
+        let theme = DEFAULT_THEME;
+        let text = "甲乙丙丁戊己庚辛壬癸";
+        let col_width = 8;
+        let tail_cursor = text.chars().count();
+        let left_cursor = tail_cursor - 4;
+
+        let tail = cell_edit_line_with_cursor(text, tail_cursor, col_width, &theme);
+        let left = cell_edit_line_with_cursor(text, left_cursor, col_width, &theme);
+
+        assert!(line_display_width(&tail) <= col_width);
+        assert!(line_display_width(&left) <= col_width);
+        assert_ne!(line_text(&tail), line_text(&left));
+    }
+
+    #[test]
+    fn cell_edit_line_ascii_tail_behavior_is_unchanged() {
+        let theme = DEFAULT_THEME;
+        let text = "abcdefghijklmnopqrstuvwxyz";
+        let cursor = text.chars().count();
+        let col_width = 8;
+
+        let line = cell_edit_line_with_cursor(text, cursor, col_width, &theme);
+        let rendered = line_text(&line);
+
+        assert!(rendered.ends_with("z "));
+        assert!(line_display_width(&line) <= col_width);
     }
 
     #[test]
