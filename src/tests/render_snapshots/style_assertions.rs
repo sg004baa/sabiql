@@ -560,6 +560,17 @@ fn sql_modal_block_cursor_position(buffer: &ratatui::buffer::Buffer) -> Option<(
         })
 }
 
+fn block_cursor_position(buffer: &ratatui::buffer::Buffer) -> Option<(u16, u16)> {
+    (0..buffer.area.height)
+        .flat_map(|y| (0..buffer.area.width).map(move |x| (x, y)))
+        .find(|&(x, y)| {
+            buffer.cell((x, y)).is_some_and(|cell| {
+                cell.bg == DEFAULT_THEME.semantic.cursor.bg
+                    && cell.fg == DEFAULT_THEME.semantic.cursor.text_fg
+            })
+        })
+}
+
 #[test]
 fn sql_modal_normal_cursor_position_tracks_head_middle_and_tail() {
     let mut state = create_test_state();
@@ -756,6 +767,45 @@ fn jsonb_search_cursor_uses_display_width_for_wide_chars() {
 
     assert_eq!(after_wide.y, head.y);
     assert_eq!(after_wide.x, head.x + 3);
+}
+
+#[test]
+fn result_cell_edit_tail_cursor_is_visible_for_wide_chars() {
+    let (mut state, now) = table_detail_loaded_state();
+    let mut terminal = create_test_terminal_sized(32, TEST_HEIGHT);
+    let wide_value = "日本語日本語日本語日本語".to_string();
+
+    state.query.set_current_result(Arc::new(QueryResult {
+        query: "SELECT id, name, email FROM users LIMIT 100".to_string(),
+        columns: vec!["id".to_string(), "name".to_string(), "email".to_string()],
+        rows: vec![vec!["1".to_string(), "Alice".to_string(), wide_value]],
+        row_count: 1,
+        execution_time_ms: 1,
+        executed_at: now,
+        source: QuerySource::Preview,
+        error: None,
+        command_tag: None,
+    }));
+    state.query.pagination.schema = "public".to_string();
+    state.query.pagination.table = "users".to_string();
+    state.ui.focused_pane = FocusedPane::Result;
+    state.result_interaction.activate_cell(0, 2);
+
+    reduce_result(
+        &mut state,
+        &Action::ResultEnterCellEdit,
+        &AppServices::stub(),
+        now,
+    );
+
+    let buffer = render_and_get_buffer(&mut terminal, &mut state);
+    let (x, _) =
+        block_cursor_position(&buffer).expect("Expected visible result cell edit block cursor");
+
+    assert!(
+        x < buffer.area.width - 1,
+        "Expected block cursor inside the rendered result column"
+    );
 }
 
 #[test]

@@ -3,7 +3,7 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
 use crate::app::model::app_state::AppState;
 use crate::app::model::browse::jsonb_detail::JsonbDetailMode;
@@ -14,6 +14,7 @@ use crate::primitives::atoms::{
     set_terminal_cursor, text_cursor_spans_with_kind,
 };
 use crate::primitives::molecules::render_modal;
+use crate::primitives::utils::text_utils::{search_viewport_offset, slice_chars_fitting_width};
 use crate::theme::ThemePalette;
 
 pub struct JsonbDetailRenderMetrics {
@@ -189,66 +190,5 @@ impl JsonbDetail {
 
         frame.render_widget(Paragraph::new(Line::from(spans)), area);
         set_terminal_cursor(frame, area, &visible_input, 0, relative_cursor, 0, 1);
-    }
-}
-
-fn search_viewport_offset(input: &str, cursor: usize, visible_width: usize) -> usize {
-    if visible_width == 0 {
-        return cursor;
-    }
-
-    let chars: Vec<char> = input.chars().collect();
-    let mut viewport_offset = 0;
-    let mut width_before_cursor = display_width(&chars[..cursor.min(chars.len())]);
-
-    while width_before_cursor >= visible_width && viewport_offset < cursor {
-        width_before_cursor =
-            width_before_cursor.saturating_sub(char_width(chars[viewport_offset]));
-        viewport_offset += 1;
-    }
-
-    viewport_offset
-}
-
-fn slice_chars_fitting_width(input: &str, start: usize, visible_width: usize) -> String {
-    if visible_width == 0 {
-        return String::new();
-    }
-
-    let mut width = 0;
-    let mut visible = String::new();
-
-    for ch in input.chars().skip(start) {
-        let ch_width = char_width(ch);
-        if width + ch_width > visible_width {
-            break;
-        }
-        width += ch_width;
-        visible.push(ch);
-    }
-
-    visible
-}
-
-fn display_width(chars: &[char]) -> usize {
-    chars.iter().map(|&ch| char_width(ch)).sum()
-}
-
-fn char_width(ch: char) -> usize {
-    UnicodeWidthChar::width(ch).unwrap_or(0)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::slice_chars_fitting_width;
-
-    #[test]
-    fn slice_chars_fitting_width_omits_first_wide_char_when_viewport_is_too_narrow() {
-        assert_eq!(slice_chars_fitting_width("界a", 0, 1), "");
-    }
-
-    #[test]
-    fn slice_chars_fitting_width_keeps_chars_that_fit_exactly() {
-        assert_eq!(slice_chars_fitting_width("ab", 0, 2), "ab");
     }
 }
