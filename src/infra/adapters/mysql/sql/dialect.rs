@@ -171,6 +171,24 @@ mod tests {
         }
 
         #[test]
+        fn backslash_in_value_is_escaped_for_mysql() {
+            let adapter = MySqlAdapter::new();
+
+            let sql = adapter.build_update_sql(
+                "mydb",
+                "users",
+                "path",
+                r"C:\Users\test",
+                &[("id".into(), "1".into())],
+            );
+
+            assert_eq!(
+                sql,
+                "UPDATE `mydb`.`users`\nSET `path` = 'C:\\\\Users\\\\test'\nWHERE `id` = '1';"
+            );
+        }
+
+        #[test]
         fn column_name_with_backtick_is_escaped() {
             let adapter = MySqlAdapter::new();
 

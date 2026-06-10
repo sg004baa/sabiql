@@ -1,4 +1,4 @@
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 pub const MIN_COL_WIDTH: u16 = 4;
 pub const PADDING: u16 = 2;
@@ -6,13 +6,11 @@ pub const PADDING: u16 = 2;
 pub fn calculate_header_min_widths<S: AsRef<str>>(headers: &[S]) -> Vec<u16> {
     headers
         .iter()
-        .map(|h| (h.as_ref().chars().count() as u16 + PADDING).max(MIN_COL_WIDTH))
+        .map(|h| (UnicodeWidthStr::width(h.as_ref()) as u16 + PADDING).max(MIN_COL_WIDTH))
         .collect()
 }
 
 pub fn wrapped_line_count(text: &str, width: u16) -> u16 {
-    use unicode_width::UnicodeWidthStr;
-
     if width == 0 {
         return 0;
     }
@@ -95,6 +93,14 @@ mod tests {
         let headers = ["a"];
         let widths = calculate_header_min_widths(&headers);
         assert_eq!(widths, vec![MIN_COL_WIDTH]);
+    }
+
+    #[test]
+    fn full_width_headers_use_display_width() {
+        let headers = ["名前", "id"];
+        let widths = calculate_header_min_widths(&headers);
+        // "名前" renders as 4 terminal cells, not 2 chars
+        assert_eq!(widths, vec![6, 4]);
     }
 
     mod wrapped_line_count_tests {
