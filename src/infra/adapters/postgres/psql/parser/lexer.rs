@@ -36,17 +36,19 @@ pub(super) fn skip_double_quoted(bytes: &[u8], mut i: usize) -> usize {
     i
 }
 
-pub(super) fn skip_dollar_quoted(sql: &str, bytes: &[u8], mut i: usize) -> usize {
+pub(super) fn skip_dollar_quoted(bytes: &[u8], mut i: usize) -> usize {
     let tag_start = i;
     i += 1;
     while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
         i += 1;
     }
     if i < bytes.len() && bytes[i] == b'$' {
-        let tag = &sql[tag_start..=i];
+        // Compare raw bytes: slicing the &str here would panic when the scan
+        // lands mid-way through a multi-byte UTF-8 character inside the body.
+        let tag = &bytes[tag_start..=i];
         i += 1;
         while i + tag.len() <= bytes.len() {
-            if &sql[i..i + tag.len()] == tag {
+            if &bytes[i..i + tag.len()] == tag {
                 return i + tag.len();
             }
             i += 1;
@@ -83,7 +85,7 @@ pub(in crate::adapters::postgres) fn split_sql_statements(sql: &str) -> Vec<&str
         match bytes[i] {
             b'\'' => i = skip_single_quoted(bytes, i),
             b'"' => i = skip_double_quoted(bytes, i),
-            b'$' => i = skip_dollar_quoted(sql, bytes, i),
+            b'$' => i = skip_dollar_quoted(bytes, i),
             b'-' if i + 1 < bytes.len() && bytes[i + 1] == b'-' => i = skip_line_comment(bytes, i),
             b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => i = skip_block_comment(bytes, i),
             b';' => {
@@ -114,7 +116,7 @@ pub(super) fn has_select_into(lower: &str) -> bool {
         match bytes[i] {
             b'\'' => i = skip_single_quoted(bytes, i),
             b'"' => i = skip_double_quoted(bytes, i),
-            b'$' => i = skip_dollar_quoted(lower, bytes, i),
+            b'$' => i = skip_dollar_quoted(bytes, i),
             b'-' if i + 1 < bytes.len() && bytes[i + 1] == b'-' => i = skip_line_comment(bytes, i),
             b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => i = skip_block_comment(bytes, i),
             b'(' => {
@@ -176,6 +178,15 @@ mod tests {
         #[case::double_quotes(r#"SELECT "a;b""#, vec![r#"SELECT "a;b""#])]
         #[case::dollar_quote("SELECT $$a;b$$", vec!["SELECT $$a;b$$"])]
         #[case::tagged_dollar_quote("SELECT $tag$a;b$tag$", vec!["SELECT $tag$a;b$tag$"])]
+        #[case::multibyte_in_dollar_quote("SELECT $$日;本語$$", vec!["SELECT $$日;本語$$"])]
+        #[case::multibyte_in_tagged_dollar_quote(
+            "SELECT $tag$あ;い$tag$; SELECT 2",
+            vec!["SELECT $tag$あ;い$tag$", "SELECT 2"]
+        )]
+        #[case::multibyte_in_unclosed_dollar_quote(
+            "SELECT $$日本語",
+            vec!["SELECT $$日本語"]
+        )]
         #[case::line_comment("SELECT 1 -- comment; here\n", vec!["SELECT 1 -- comment; here"])]
         #[case::block_comment("SELECT /* ; */ 1", vec!["SELECT /* ; */ 1"])]
         fn quoted_semicolon_returns_single_statement(
