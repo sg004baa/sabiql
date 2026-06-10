@@ -3,7 +3,10 @@ fn quote_ident_mysql(name: &str) -> String {
 }
 
 fn quote_literal(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
+    // MySQL's default sql_mode treats `\` as an escape character inside
+    // string literals (unlike PostgreSQL), so it must be doubled or values
+    // like `C:\temp` would be silently corrupted (`\t` → TAB).
+    format!("'{}'", value.replace('\\', "\\\\").replace('\'', "''"))
 }
 
 pub(in crate::adapters::mysql) mod ddl;
@@ -37,5 +40,15 @@ mod tests {
     #[test]
     fn quote_literal_supports_empty_string() {
         assert_eq!(quote_literal(""), "''");
+    }
+
+    #[test]
+    fn quote_literal_escapes_backslashes() {
+        assert_eq!(quote_literal(r"C:\temp\new"), r"'C:\\temp\\new'");
+    }
+
+    #[test]
+    fn quote_literal_escapes_backslash_before_quote() {
+        assert_eq!(quote_literal(r"a\'b"), r"'a\\''b'");
     }
 }
