@@ -7,6 +7,7 @@ use ratatui::layout::{Constraint, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Cell, Paragraph, Row, Table, Wrap};
+use unicode_width::UnicodeWidthStr;
 
 use crate::primitives::atoms::{CursorKind, panel_block_highlight, text_cursor_spans_with_kind};
 
@@ -425,7 +426,7 @@ impl ResultPane {
     }
 }
 
-/// Upper bound (in characters) on a result-pane column's ideal width. Stops a
+/// Upper bound (in terminal cells) on a result-pane column's ideal width. Stops a
 /// single long value (UUID, JSON, free text) from monopolizing the viewport and
 /// pushing every other column off-screen behind a horizontal scroll. Cells wider
 /// than this are truncated with a trailing ellipsis.
@@ -438,13 +439,13 @@ pub(crate) fn calculate_ideal_widths(headers: &[String], rows: &[Vec<String>]) -
         .iter()
         .enumerate()
         .map(|(col_idx, header)| {
-            let mut max_width = header.chars().count();
+            let mut max_width = UnicodeWidthStr::width(header.as_str());
 
             let sample_size = rows.len().min(SAMPLE_ROWS);
             for row in rows.iter().take(sample_size) {
                 if let Some(cell) = row.get(col_idx) {
                     let escaped = escape_for_display(cell);
-                    let cell_width = escaped.chars().count();
+                    let cell_width = UnicodeWidthStr::width(escaped.as_ref());
                     max_width = max_width.max(cell_width);
                 }
             }
@@ -508,14 +509,13 @@ fn escape_for_display(s: &str) -> Cow<'_, str> {
     Cow::Owned(out)
 }
 
-fn truncate_cell(s: &str, max_chars: usize) -> String {
+fn truncate_cell(s: &str, max_width: usize) -> String {
     let escaped = escape_for_display(s);
-    let char_count = escaped.chars().count();
 
-    if char_count <= max_chars {
+    if UnicodeWidthStr::width(escaped.as_ref()) <= max_width {
         escaped.into_owned()
     } else {
-        let truncated: String = escaped.chars().take(max_chars.saturating_sub(3)).collect();
+        let truncated = slice_chars_fitting_width(&escaped, 0, max_width.saturating_sub(3));
         format!("{truncated}...")
     }
 }
@@ -605,8 +605,8 @@ mod tests {
             let result = calculate_ideal_widths(&headers, &rows);
 
             assert_eq!(result.len(), 1);
-            // "日本語テスト" = 6 chars + 2 padding = 8
-            assert_eq!(result[0], 8);
+            // "日本語テスト" renders as 12 terminal cells + 2 padding = 14
+            assert_eq!(result[0], 14);
         }
 
         #[test]
@@ -674,15 +674,17 @@ mod tests {
 
     #[test]
     fn multibyte_characters_count_correctly() {
+        // 5 cells available: "こ" (2 cells) + "..." (3 cells)
         let result = truncate_cell("こんにちは世界", 5);
 
-        assert_eq!(result, "こん...");
+        assert_eq!(result, "こ...");
     }
 
     #[rstest]
-    #[case("日本語テスト", 10, "日本語テスト")]
-    #[case("日本語テスト", 5, "日本...")]
-    #[case("日本語テスト", 4, "日...")]
+    #[case("日本語テスト", 14, "日本語テスト")]
+    #[case("日本語テスト", 10, "日本語...")]
+    #[case("日本語テスト", 5, "日...")]
+    #[case("日本語テスト", 4, "...")]
     #[case("日本語テスト", 3, "...")]
     #[case("SELECT * FROM 日本語テーブル", 15, "SELECT * FRO...")]
     fn multibyte_truncation_is_safe(
@@ -693,7 +695,7 @@ mod tests {
         let result = truncate_cell(input, max);
 
         assert_eq!(result, expected);
-        assert!(result.chars().count() <= max);
+        assert!(UnicodeWidthStr::width(result.as_str()) <= max.max(3));
     }
 
     #[test]
