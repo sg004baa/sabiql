@@ -78,22 +78,49 @@ impl ConnectionField {
         }
     }
 
-    /// Returns the next field, skipping `SslMode` when `skip_ssl` is true.
-    pub fn next_for(self, skip_ssl: bool) -> Option<Self> {
-        let n = self.next()?;
-        if skip_ssl && n == Self::SslMode {
-            return None;
+    /// Label adjusted for the selected database type: SQLite's "database"
+    /// is a file path, so the field is presented as such.
+    pub fn label_for(self, db_type: DatabaseType) -> &'static str {
+        if self == Self::Database && db_type == DatabaseType::SQLite {
+            "File:"
+        } else {
+            self.label()
         }
-        Some(n)
     }
 
-    /// Returns the previous field, skipping `SslMode` when `skip_ssl` is true.
-    pub fn prev_for(self, skip_ssl: bool) -> Option<Self> {
-        let p = self.prev()?;
-        if skip_ssl && p == Self::SslMode {
-            return p.prev();
+    /// Whether this field applies to the selected database type.
+    /// SQLite is file-based: no host, port, credentials, or SSL.
+    /// MySQL connections don't expose an SSL mode selector.
+    pub fn is_visible_for(self, db_type: DatabaseType) -> bool {
+        match db_type {
+            DatabaseType::PostgreSQL => true,
+            DatabaseType::MySQL => self != Self::SslMode,
+            DatabaseType::SQLite => {
+                matches!(self, Self::DatabaseType | Self::Name | Self::Database)
+            }
         }
-        Some(p)
+    }
+
+    /// Returns the next field visible for the selected database type.
+    pub fn next_for(self, db_type: DatabaseType) -> Option<Self> {
+        let mut field = self.next()?;
+        loop {
+            if field.is_visible_for(db_type) {
+                return Some(field);
+            }
+            field = field.next()?;
+        }
+    }
+
+    /// Returns the previous field visible for the selected database type.
+    pub fn prev_for(self, db_type: DatabaseType) -> Option<Self> {
+        let mut field = self.prev()?;
+        loop {
+            if field.is_visible_for(db_type) {
+                return Some(field);
+            }
+            field = field.prev()?;
+        }
     }
 }
 
@@ -146,8 +173,13 @@ impl Default for ConnectionSetupState {
 }
 
 impl ConnectionSetupState {
-    pub fn skip_ssl(&self) -> bool {
-        self.database_type == DatabaseType::MySQL
+    /// Fields shown in the form for the currently selected database type.
+    pub fn visible_fields(&self) -> Vec<ConnectionField> {
+        ConnectionField::all()
+            .iter()
+            .copied()
+            .filter(|f| f.is_visible_for(self.database_type))
+            .collect()
     }
 }
 
@@ -313,21 +345,67 @@ mod tests {
         }
 
         #[test]
-        fn next_for_skips_ssl_mode() {
-            assert_eq!(ConnectionField::Password.next_for(true), None,);
+        fn next_for_mysql_skips_ssl_mode() {
             assert_eq!(
-                ConnectionField::Password.next_for(false),
+                ConnectionField::Password.next_for(DatabaseType::MySQL),
+                None
+            );
+            assert_eq!(
+                ConnectionField::Password.next_for(DatabaseType::PostgreSQL),
                 Some(ConnectionField::SslMode),
             );
         }
 
         #[test]
-        fn prev_for_skips_ssl_mode() {
-            // SslMode.prev_for(true) still returns Password (its direct predecessor).
-            // The skip logic only applies when the *result* would be SslMode.
+        fn prev_for_mysql_skips_ssl_mode() {
             assert_eq!(
-                ConnectionField::SslMode.prev_for(true),
+                ConnectionField::SslMode.prev_for(DatabaseType::MySQL),
                 Some(ConnectionField::Password),
+            );
+        }
+
+        #[test]
+        fn next_for_sqlite_skips_hidden_fields() {
+            assert_eq!(
+                ConnectionField::Name.next_for(DatabaseType::SQLite),
+                Some(ConnectionField::Database),
+            );
+            assert_eq!(
+                ConnectionField::Database.next_for(DatabaseType::SQLite),
+                None
+            );
+        }
+
+        #[test]
+        fn prev_for_sqlite_skips_hidden_fields() {
+            assert_eq!(
+                ConnectionField::Database.prev_for(DatabaseType::SQLite),
+                Some(ConnectionField::Name),
+            );
+        }
+
+        #[rstest]
+        #[case(ConnectionField::DatabaseType, true)]
+        #[case(ConnectionField::Name, true)]
+        #[case(ConnectionField::Database, true)]
+        #[case(ConnectionField::Host, false)]
+        #[case(ConnectionField::Port, false)]
+        #[case(ConnectionField::User, false)]
+        #[case(ConnectionField::Password, false)]
+        #[case(ConnectionField::SslMode, false)]
+        fn sqlite_visibility(#[case] field: ConnectionField, #[case] expected: bool) {
+            assert_eq!(field.is_visible_for(DatabaseType::SQLite), expected);
+        }
+
+        #[test]
+        fn database_label_becomes_file_for_sqlite() {
+            assert_eq!(
+                ConnectionField::Database.label_for(DatabaseType::SQLite),
+                "File:"
+            );
+            assert_eq!(
+                ConnectionField::Database.label_for(DatabaseType::PostgreSQL),
+                "Database:"
             );
         }
     }

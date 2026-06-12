@@ -114,8 +114,7 @@ pub fn reduce(state: &mut AppState, action: &Action, now: Instant) -> Option<Vec
         Action::ConnectionSetupNextField => {
             let setup = &mut state.connection_setup;
             validate_field(setup, setup.focused_field);
-            let skip_ssl = setup.skip_ssl();
-            if let Some(next) = setup.focused_field.next_for(skip_ssl) {
+            if let Some(next) = setup.focused_field.next_for(setup.database_type) {
                 setup.focused_field = next;
             }
             Some(vec![])
@@ -123,8 +122,7 @@ pub fn reduce(state: &mut AppState, action: &Action, now: Instant) -> Option<Vec
         Action::ConnectionSetupPrevField => {
             let setup = &mut state.connection_setup;
             validate_field(setup, setup.focused_field);
-            let skip_ssl = setup.skip_ssl();
-            if let Some(prev) = setup.focused_field.prev_for(skip_ssl) {
+            if let Some(prev) = setup.focused_field.prev_for(setup.database_type) {
                 setup.focused_field = prev;
             }
             Some(vec![])

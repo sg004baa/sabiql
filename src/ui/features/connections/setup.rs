@@ -33,10 +33,11 @@ pub struct ConnectionSetup;
 impl ConnectionSetup {
     pub fn render(frame: &mut Frame, state: &AppState, theme: &ThemePalette) {
         let form_state = &state.connection_setup;
-        let skip_ssl = form_state.skip_ssl();
+        let visible_fields = form_state.visible_fields();
 
         let modal_width = LABEL_WIDTH + INPUT_WIDTH + ERROR_WIDTH + 8;
-        let modal_height: u16 = if skip_ssl { 13 } else { 14 };
+        // fields + spacer + notice + modal chrome
+        let modal_height = visible_fields.len() as u16 + 6;
 
         let (title, hint) = if form_state.is_edit_mode() {
             (
@@ -60,109 +61,54 @@ impl ConnectionSetup {
 
         let inner = modal_inner.inner(Margin::new(2, 1));
 
-        let mut constraints = vec![
-            Constraint::Length(FIELD_HEIGHT), // DatabaseType
-            Constraint::Length(FIELD_HEIGHT), // Name
-            Constraint::Length(FIELD_HEIGHT), // Host
-            Constraint::Length(FIELD_HEIGHT), // Port
-            Constraint::Length(FIELD_HEIGHT), // Database
-            Constraint::Length(FIELD_HEIGHT), // User
-            Constraint::Length(FIELD_HEIGHT), // Password
-        ];
-        if !skip_ssl {
-            constraints.push(Constraint::Length(FIELD_HEIGHT)); // SslMode
-        }
+        let mut constraints = vec![Constraint::Length(FIELD_HEIGHT); visible_fields.len()];
         constraints.push(Constraint::Length(1)); // spacer
         constraints.push(Constraint::Length(1)); // notice
 
         let chunks = Layout::vertical(constraints).split(inner);
 
-        // Row indices shift depending on whether SslMode is present
-        let mut row = 0;
-
-        Self::render_selector_field(
-            frame,
-            chunks[row],
-            "Type:",
-            &form_state.database_type.to_string(),
-            form_state.focused_field == ConnectionField::DatabaseType,
-            theme,
-        );
-        row += 1;
-
-        Self::render_text_field(
-            frame,
-            chunks[row],
-            form_state,
-            ConnectionField::Name,
-            false,
-            theme,
-        );
-        row += 1;
-        Self::render_text_field(
-            frame,
-            chunks[row],
-            form_state,
-            ConnectionField::Host,
-            false,
-            theme,
-        );
-        row += 1;
-        Self::render_text_field(
-            frame,
-            chunks[row],
-            form_state,
-            ConnectionField::Port,
-            false,
-            theme,
-        );
-        row += 1;
-        Self::render_text_field(
-            frame,
-            chunks[row],
-            form_state,
-            ConnectionField::Database,
-            false,
-            theme,
-        );
-        row += 1;
-        Self::render_text_field(
-            frame,
-            chunks[row],
-            form_state,
-            ConnectionField::User,
-            false,
-            theme,
-        );
-        row += 1;
-        Self::render_text_field(
-            frame,
-            chunks[row],
-            form_state,
-            ConnectionField::Password,
-            true,
-            theme,
-        );
-        row += 1;
-
-        let ssl_row = row;
-        if !skip_ssl {
-            Self::render_selector_field(
-                frame,
-                chunks[row],
-                "SSL Mode:",
-                &form_state.ssl_mode.to_string(),
-                form_state.focused_field == ConnectionField::SslMode,
-                theme,
-            );
-            row += 1;
+        let mut ssl_row = None;
+        for (row, field) in visible_fields.iter().enumerate() {
+            match field {
+                ConnectionField::DatabaseType => {
+                    Self::render_selector_field(
+                        frame,
+                        chunks[row],
+                        "Type:",
+                        &form_state.database_type.to_string(),
+                        form_state.focused_field == ConnectionField::DatabaseType,
+                        theme,
+                    );
+                }
+                ConnectionField::SslMode => {
+                    ssl_row = Some(row);
+                    Self::render_selector_field(
+                        frame,
+                        chunks[row],
+                        "SSL Mode:",
+                        &form_state.ssl_mode.to_string(),
+                        form_state.focused_field == ConnectionField::SslMode,
+                        theme,
+                    );
+                }
+                _ => {
+                    Self::render_text_field(
+                        frame,
+                        chunks[row],
+                        form_state,
+                        *field,
+                        *field == ConnectionField::Password,
+                        theme,
+                    );
+                }
+            }
         }
 
-        // spacer row is `row`, notice is `row + 1`
+        // spacer row is `visible_fields.len()`, notice follows it
         let notice = "Note: Connection info is stored locally in plain text";
         let notice_para =
             Paragraph::new(notice).style(Style::default().fg(theme.component.feedback.note_text));
-        frame.render_widget(notice_para, chunks[row + 1]);
+        frame.render_widget(notice_para, chunks[visible_fields.len() + 1]);
 
         // Dropdowns (rendered last so they overlap fields below)
         if form_state.db_type_dropdown.is_open {
@@ -173,17 +119,19 @@ impl ConnectionSetup {
                 form_state.db_type_dropdown.selected_index,
                 theme,
             );
-        } else if !skip_ssl && form_state.ssl_dropdown.is_open {
-            Self::render_dropdown_items(
-                frame,
-                chunks[ssl_row],
-                SslMode::all_variants()
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect(),
-                form_state.ssl_dropdown.selected_index,
-                theme,
-            );
+        } else if let Some(ssl_row) = ssl_row {
+            if form_state.ssl_dropdown.is_open {
+                Self::render_dropdown_items(
+                    frame,
+                    chunks[ssl_row],
+                    SslMode::all_variants()
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect(),
+                    form_state.ssl_dropdown.selected_index,
+                    theme,
+                );
+            }
         }
     }
 
@@ -211,7 +159,7 @@ impl ConnectionSetup {
         } else {
             Style::default().fg(theme.semantic.text.secondary)
         };
-        let label_para = Paragraph::new(field.label()).style(label_style);
+        let label_para = Paragraph::new(field.label_for(state.database_type)).style(label_style);
         frame.render_widget(label_para, chunks[0]);
 
         let display_value = if mask {
