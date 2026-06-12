@@ -7,6 +7,7 @@ pub enum DatabaseType {
     #[default]
     PostgreSQL,
     MySQL,
+    SQLite,
 }
 
 impl fmt::Display for DatabaseType {
@@ -14,17 +15,20 @@ impl fmt::Display for DatabaseType {
         match self {
             Self::PostgreSQL => write!(f, "PostgreSQL"),
             Self::MySQL => write!(f, "MySQL"),
+            Self::SQLite => write!(f, "SQLite"),
         }
     }
 }
 
 impl DatabaseType {
-    pub const ALL: &'static [Self] = &[Self::PostgreSQL, Self::MySQL];
+    pub const ALL: &'static [Self] = &[Self::PostgreSQL, Self::MySQL, Self::SQLite];
 
     pub fn default_port(self) -> u16 {
         match self {
             Self::PostgreSQL => 5432,
             Self::MySQL => 3306,
+            // SQLite is file-based; no network port. 0 = "not applicable".
+            Self::SQLite => 0,
         }
     }
 }
@@ -42,17 +46,19 @@ mod tests {
     fn display_formats_correctly() {
         assert_eq!(DatabaseType::PostgreSQL.to_string(), "PostgreSQL");
         assert_eq!(DatabaseType::MySQL.to_string(), "MySQL");
+        assert_eq!(DatabaseType::SQLite.to_string(), "SQLite");
     }
 
     #[test]
     fn default_ports() {
         assert_eq!(DatabaseType::PostgreSQL.default_port(), 5432);
         assert_eq!(DatabaseType::MySQL.default_port(), 3306);
+        assert_eq!(DatabaseType::SQLite.default_port(), 0);
     }
 
     #[test]
-    fn all_contains_both_variants() {
-        assert_eq!(DatabaseType::ALL.len(), 2);
+    fn all_contains_every_variant() {
+        assert_eq!(DatabaseType::ALL.len(), 3);
     }
 
     #[test]
