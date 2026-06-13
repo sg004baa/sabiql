@@ -105,7 +105,7 @@ mod tests {
         use super::*;
 
         #[test]
-        fn explain_uses_query_plan() {
+        fn uses_query_plan() {
             let adapter = SqliteAdapter::new();
             assert_eq!(
                 adapter.build_explain_sql("SELECT 1"),
@@ -114,7 +114,7 @@ mod tests {
         }
 
         #[test]
-        fn explain_analyze_is_unsupported() {
+        fn analyze_is_unsupported() {
             let adapter = SqliteAdapter::new();
             assert_eq!(adapter.build_explain_analyze_sql("SELECT 1"), None);
         }
