@@ -287,10 +287,10 @@ pub fn resolve_walk_root(database_field: &str, home: Option<&Path>) -> PathBuf {
         } else {
             path.parent().map(Path::to_path_buf)
         };
-        if let Some(dir) = candidate {
-            if dir.is_dir() {
-                return dir;
-            }
+        if let Some(dir) = candidate
+            && dir.is_dir()
+        {
+            return dir;
         }
     }
 

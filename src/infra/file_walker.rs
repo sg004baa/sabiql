@@ -231,8 +231,10 @@ mod tests {
         fs::create_dir_all(&deep).unwrap();
         fs::write(deep.join("deep.db"), b"").unwrap();
 
-        let mut opts = WalkOptions::default();
-        opts.max_depth = 2; // root/a (1), root/a/b (2); c is depth 3
+        let opts = WalkOptions {
+            max_depth: 2,
+            ..WalkOptions::default()
+        };
         let actions = run_walk(root, opts).await;
         let paths = collect_paths(&actions);
 
@@ -247,8 +249,10 @@ mod tests {
             fs::write(root.join(format!("f{i}.db")), b"").unwrap();
         }
 
-        let mut opts = WalkOptions::default();
-        opts.max_results = 3;
+        let opts = WalkOptions {
+            max_results: 3,
+            ..WalkOptions::default()
+        };
         let actions = run_walk(root, opts).await;
         let paths = collect_paths(&actions);
 
