@@ -513,6 +513,93 @@ pub const QUERY_HISTORY_PICKER_ROWS: &[ModeRow] = &[
     },
 ];
 
+pub const FILE_PICKER_ROWS: &[ModeRow] = &[
+    ModeRow {
+        key_short: "Enter",
+        key: "Enter",
+        desc_short: "Select",
+        description: "Select file",
+        bindings: &[ExecBinding {
+            action: Action::FilePickerConfirmSelection,
+            combos: &[KeyCombo::plain(Key::Enter)],
+        }],
+    },
+    ModeRow {
+        key_short: "^N/^P/↑↓",
+        key: "Ctrl+N / Ctrl+P / ↑ / ↓",
+        desc_short: "Navigate",
+        description: "Navigate",
+        bindings: &[
+            ExecBinding {
+                action: Action::ListSelect {
+                    target: ListTarget::FilePicker,
+                    motion: ListMotion::Next,
+                },
+                combos: &[KeyCombo::plain(Key::Down), KeyCombo::ctrl(Key::Char('n'))],
+            },
+            ExecBinding {
+                action: Action::ListSelect {
+                    target: ListTarget::FilePicker,
+                    motion: ListMotion::Previous,
+                },
+                combos: &[KeyCombo::plain(Key::Up), KeyCombo::ctrl(Key::Char('p'))],
+            },
+        ],
+    },
+    ModeRow {
+        key_short: "type",
+        key: "type",
+        desc_short: "Filter",
+        description: "Type to filter",
+        bindings: &[
+            ExecBinding {
+                action: Action::TextBackspace {
+                    target: InputTarget::FilePickerFilter,
+                },
+                combos: &[KeyCombo::plain(Key::Backspace)],
+            },
+            ExecBinding {
+                action: Action::TextMoveCursor {
+                    target: InputTarget::FilePickerFilter,
+                    direction: CursorMove::Left,
+                },
+                combos: &[KeyCombo::plain(Key::Left)],
+            },
+            ExecBinding {
+                action: Action::TextMoveCursor {
+                    target: InputTarget::FilePickerFilter,
+                    direction: CursorMove::Right,
+                },
+                combos: &[KeyCombo::plain(Key::Right)],
+            },
+            ExecBinding {
+                action: Action::TextMoveCursor {
+                    target: InputTarget::FilePickerFilter,
+                    direction: CursorMove::Home,
+                },
+                combos: &[KeyCombo::plain(Key::Home)],
+            },
+            ExecBinding {
+                action: Action::TextMoveCursor {
+                    target: InputTarget::FilePickerFilter,
+                    direction: CursorMove::End,
+                },
+                combos: &[KeyCombo::plain(Key::End)],
+            },
+        ],
+    },
+    ModeRow {
+        key_short: "Esc",
+        key: "Esc",
+        desc_short: "Close",
+        description: "Close",
+        bindings: &[ExecBinding {
+            action: Action::CloseModal(ModalKind::FilePicker),
+            combos: &[KeyCombo::plain(Key::Esc)],
+        }],
+    },
+];
+
 // =============================================================================
 // Command Palette
 // =============================================================================

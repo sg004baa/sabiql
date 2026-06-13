@@ -31,6 +31,7 @@ insta = "1"
 lru = "0.16"
 mockall = "0.13"
 nucleo-matcher = "0.3"
+walkdir = "2"
 ratatui = "0.30"
 rstest = "0.19"
 serde = { version = "1", features = ["derive"] }

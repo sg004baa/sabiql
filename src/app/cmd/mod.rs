@@ -4,6 +4,7 @@ pub mod completion_engine;
 pub mod connection;
 pub mod effect;
 pub mod er;
+pub mod file_picker;
 pub mod render_schedule;
 pub mod runner;
 pub mod settings;

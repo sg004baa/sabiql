@@ -10,6 +10,7 @@ use crate::model::browse::result_interaction::ResultInteraction;
 use crate::model::browse::session::BrowseSession;
 use crate::model::connection::cache::ConnectionCacheStore;
 use crate::model::connection::error_state::ConnectionErrorState;
+use crate::model::connection::file_picker::FilePickerState;
 use crate::model::connection::list::ConnectionListItem;
 use crate::model::connection::setup::ConnectionSetupState;
 use crate::model::shared::confirm_dialog::ConfirmDialogState;
@@ -37,6 +38,7 @@ pub struct AppState {
     pub messages: MessageState,
     pub er_preparation: super::er_state::ErPreparationState,
     pub connection_setup: ConnectionSetupState,
+    pub file_picker: FilePickerState,
     pub connection_error: ConnectionErrorState,
     pub confirm_dialog: ConfirmDialogState,
     pub result_interaction: ResultInteraction,
@@ -67,6 +69,7 @@ impl AppState {
             messages: MessageState::default(),
             er_preparation: super::er_state::ErPreparationState::default(),
             connection_setup: ConnectionSetupState::default(),
+            file_picker: FilePickerState::default(),
             connection_error: ConnectionErrorState::default(),
             confirm_dialog: ConfirmDialogState::default(),
             result_interaction: ResultInteraction::default(),
