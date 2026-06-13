@@ -26,10 +26,11 @@ fn normalize_path(path: &str, home: Option<&Path>, cwd: Option<&Path>) -> String
         return home.join(rest).display().to_string();
     }
 
-    if !path.is_empty() && Path::new(path).is_relative() {
-        if let Some(cwd) = cwd {
-            return cwd.join(path).display().to_string();
-        }
+    if !path.is_empty()
+        && Path::new(path).is_relative()
+        && let Some(cwd) = cwd
+    {
+        return cwd.join(path).display().to_string();
     }
 
     path.to_string()

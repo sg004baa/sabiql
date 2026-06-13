@@ -45,7 +45,7 @@ impl Drop for TempDb {
     }
 }
 
-const SEED: &str = r#"
+const SEED: &str = r"
 CREATE TABLE users (
     id INTEGER PRIMARY KEY,
     name TEXT NOT NULL,
@@ -61,7 +61,7 @@ CREATE TRIGGER trg_orders_audit AFTER INSERT ON orders BEGIN SELECT 1; END;
 INSERT INTO users (id, name, email) VALUES (1, 'Alice', 'a@example.com');
 INSERT INTO users (id, name, email) VALUES (2, 'Bob', 'b@example.com');
 INSERT INTO orders (id, user_id, note) VALUES (10, 1, 'first');
-"#;
+";
 
 mod metadata {
     use super::*;

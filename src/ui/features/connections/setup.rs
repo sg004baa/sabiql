@@ -119,19 +119,19 @@ impl ConnectionSetup {
                 form_state.db_type_dropdown.selected_index,
                 theme,
             );
-        } else if let Some(ssl_row) = ssl_row {
-            if form_state.ssl_dropdown.is_open {
-                Self::render_dropdown_items(
-                    frame,
-                    chunks[ssl_row],
-                    SslMode::all_variants()
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect(),
-                    form_state.ssl_dropdown.selected_index,
-                    theme,
-                );
-            }
+        } else if let Some(ssl_row) = ssl_row
+            && form_state.ssl_dropdown.is_open
+        {
+            Self::render_dropdown_items(
+                frame,
+                chunks[ssl_row],
+                SslMode::all_variants()
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect(),
+                form_state.ssl_dropdown.selected_index,
+                theme,
+            );
         }
     }
 

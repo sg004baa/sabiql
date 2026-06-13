@@ -428,6 +428,10 @@ mod tests {
         }
 
         #[test]
+        #[allow(
+            clippy::field_reassign_with_default,
+            reason = "intentional partial override of Default for clarity"
+        )]
         fn switching_to_sqlite_clears_stale_hidden_field_error() {
             let mut state = ConnectionSetupState::default();
             state.host = TextInputState::default();
