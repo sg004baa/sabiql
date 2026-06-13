@@ -73,6 +73,9 @@ pub const ER_PICKER: ModeBindings = ModeBindings {
 pub const QUERY_HISTORY_PICKER: ModeBindings = ModeBindings {
     rows: QUERY_HISTORY_PICKER_ROWS,
 };
+pub const FILE_PICKER: ModeBindings = ModeBindings {
+    rows: FILE_PICKER_ROWS,
+};
 pub const COMMAND_PALETTE: ModeBindings = ModeBindings {
     rows: COMMAND_PALETTE_ROWS,
 };
@@ -95,6 +98,7 @@ pub const ALL_MODE_BINDINGS: &[(&str, &ModeBindings)] = &[
     ("TABLE_PICKER", &TABLE_PICKER),
     ("ER_PICKER", &ER_PICKER),
     ("QUERY_HISTORY_PICKER", &QUERY_HISTORY_PICKER),
+    ("FILE_PICKER", &FILE_PICKER),
     ("COMMAND_PALETTE", &COMMAND_PALETTE),
     ("SETTINGS", &SETTINGS),
     ("CONNECTION_SELECTOR", &CONNECTION_SELECTOR),
@@ -234,6 +238,13 @@ pub mod idx {
     }
 
     pub mod qh_picker {
+        pub const ENTER_SELECT: usize = 0;
+        pub const NAVIGATE: usize = 1;
+        pub const TYPE_FILTER: usize = 2;
+        pub const ESC_CLOSE: usize = 3;
+    }
+
+    pub mod file_picker {
         pub const ENTER_SELECT: usize = 0;
         pub const NAVIGATE: usize = 1;
         pub const TYPE_FILTER: usize = 2;
@@ -1220,7 +1231,7 @@ mod tests {
 
             #[test]
             fn all_mode_bindings_count() {
-                assert_eq!(ALL_MODE_BINDINGS.len(), 10);
+                assert_eq!(ALL_MODE_BINDINGS.len(), 11);
             }
         }
     }

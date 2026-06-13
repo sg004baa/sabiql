@@ -40,6 +40,19 @@ pub fn handle_query_history_picker_keys(combo: KeyCombo) -> Action {
     }
 }
 
+pub fn handle_file_picker_keys(combo: KeyCombo) -> Action {
+    if let Some(action) = keybindings::FILE_PICKER.resolve(&combo) {
+        return action;
+    }
+    match combo.key {
+        Key::Char(c) => Action::TextInput {
+            target: InputTarget::FilePickerFilter,
+            ch: c,
+        },
+        _ => Action::None,
+    }
+}
+
 pub fn handle_er_table_picker_keys(combo: KeyCombo) -> Action {
     if let Some(action) = keybindings::ER_PICKER.resolve(&combo) {
         return action;

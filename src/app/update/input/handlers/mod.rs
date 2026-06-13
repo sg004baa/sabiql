@@ -30,6 +30,7 @@ fn handle_paste_event(text: String, state: &AppState) -> Action {
         | InputMode::ConnectionSetup
         | InputMode::SqlModal
         | InputMode::QueryHistoryPicker
+        | InputMode::FilePicker
         | InputMode::JsonbEdit
         | InputMode::JsonbDetail => Action::Paste(text),
         _ => Action::None,
@@ -64,6 +65,7 @@ fn handle_key_event(combo: KeyCombo, state: &AppState, services: &AppServices) -
         InputMode::ConnectionSelector => connections::handle_connection_selector_keys(combo),
         InputMode::ErTablePicker => pickers::handle_er_table_picker_keys(combo),
         InputMode::QueryHistoryPicker => pickers::handle_query_history_picker_keys(combo),
+        InputMode::FilePicker => pickers::handle_file_picker_keys(combo),
         InputMode::JsonbDetail => {
             let is_searching = state.jsonb_detail.search().active;
             jsonb::handle_jsonb_detail_keys(

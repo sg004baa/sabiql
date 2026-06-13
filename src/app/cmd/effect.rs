@@ -1,11 +1,23 @@
 use crate::domain::Table;
 use crate::domain::connection::{ConnectionId, DatabaseType, SslMode};
+use crate::model::connection::file_picker::WalkOptions;
 use crate::model::shared::theme_id::ThemeId;
 use crate::update::action::Action;
 
 #[derive(Debug, Clone)]
 pub enum Effect {
     Render,
+
+    /// Recursively scan for SQLite database files, streaming results back as
+    /// `FilePickerChunk` actions tagged with `generation`.
+    ///
+    /// `field` is the raw `File:` input; the walk root is resolved from it (and
+    /// `$HOME`) on the async side, keeping the reducer free of env access.
+    StartFilePickerWalk {
+        field: String,
+        options: WalkOptions,
+        generation: u64,
+    },
 
     SaveAndConnect {
         id: Option<ConnectionId>,

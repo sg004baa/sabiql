@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::domain::connection::{ConnectionNameError, ConnectionProfile, ServiceEntry};
@@ -149,6 +150,7 @@ pub enum InputTarget {
     Filter,
     ErFilter,
     QueryHistoryFilter,
+    FilePickerFilter,
     JsonbEdit,
     JsonbSearch,
 }
@@ -175,6 +177,7 @@ pub enum ListTarget {
     TablePicker,
     ErTablePicker,
     CommandPalette,
+    FilePicker,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -200,6 +203,7 @@ pub enum ModalKind {
     JsonbDetail,
     ConnectionSetup,
     ConnectionSelector,
+    FilePicker,
 }
 
 #[derive(Debug, Clone)]
@@ -316,6 +320,18 @@ pub enum Action {
     ConnectionSaveFailed(ConnectionSaveError),
     ConnectionEditLoaded(Box<ConnectionProfile>),
     ConnectionEditLoadFailed(ConnectionStoreError),
+
+    // File Picker (SQLite "File:" field)
+    OpenFilePicker,
+    FilePickerConfirmSelection,
+    FilePickerChunk {
+        generation: u64,
+        paths: Vec<PathBuf>,
+    },
+    FilePickerWalkDone {
+        generation: u64,
+        truncated: bool,
+    },
 
     // Connection Error
     ShowConnectionError(ConnectionErrorInfo),

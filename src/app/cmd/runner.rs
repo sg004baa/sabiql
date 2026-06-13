@@ -14,6 +14,7 @@ use crate::cmd::completion_engine::CompletionEngine;
 use crate::cmd::connection as cmd_connection;
 use crate::cmd::effect::Effect;
 use crate::cmd::er::handler as cmd_er;
+use crate::cmd::file_picker as cmd_file_picker;
 use crate::cmd::settings as cmd_settings;
 use crate::cmd::sql_editor::completion as cmd_completion;
 use crate::cmd::sql_editor::query_history as cmd_query_history;
@@ -24,8 +25,8 @@ use crate::model::app_state::AppState;
 use crate::model::shared::ui_state::scroll_max_offset;
 use crate::ports::outbound::{
     ClipboardWriter, ConfigWriter, ConnectionStore, DsnBuilder, ErDiagramExporter, ErLogWriter,
-    FolderOpener, MetadataProvider, PgServiceEntryReader, QueryExecutor, QueryHistoryStore,
-    Renderer, SettingsStore,
+    FileSystemWalker, FolderOpener, MetadataProvider, PgServiceEntryReader, QueryExecutor,
+    QueryHistoryStore, Renderer, SettingsStore,
 };
 use crate::services::AppServices;
 use crate::update::action::Action;
@@ -50,6 +51,7 @@ struct ErDeps {
 struct UtilityDeps {
     clipboard: Arc<dyn ClipboardWriter>,
     folder_opener: Arc<dyn FolderOpener>,
+    file_system_walker: Arc<dyn FileSystemWalker>,
 }
 
 struct SettingsDeps {
@@ -79,6 +81,7 @@ pub struct EffectRunnerBuilder {
     pg_service_entry_reader: Option<Arc<dyn PgServiceEntryReader>>,
     clipboard: Option<Arc<dyn ClipboardWriter>>,
     folder_opener: Option<Arc<dyn FolderOpener>>,
+    file_system_walker: Option<Arc<dyn FileSystemWalker>>,
     query_history_store: Option<Arc<dyn QueryHistoryStore>>,
     settings_store: Option<Arc<dyn SettingsStore>>,
     metadata_cache: Option<TtlCache<String, Arc<DatabaseMetadata>>>,
@@ -138,6 +141,11 @@ impl EffectRunnerBuilder {
         self
     }
     #[must_use]
+    pub fn file_system_walker(mut self, v: Arc<dyn FileSystemWalker>) -> Self {
+        self.file_system_walker = Some(v);
+        self
+    }
+    #[must_use]
     pub fn query_history_store(mut self, v: Arc<dyn QueryHistoryStore>) -> Self {
         self.query_history_store = Some(v);
         self
@@ -187,6 +195,9 @@ impl EffectRunnerBuilder {
             utility: UtilityDeps {
                 clipboard: self.clipboard.expect("clipboard is required"),
                 folder_opener: self.folder_opener.expect("folder_opener is required"),
+                file_system_walker: self
+                    .file_system_walker
+                    .unwrap_or_else(|| Arc::new(crate::cmd::file_picker::NoopFileSystemWalker)),
             },
             settings: SettingsDeps {
                 settings_store: self.settings_store.expect("settings_store is required"),
@@ -215,6 +226,7 @@ impl EffectRunner {
             pg_service_entry_reader: None,
             clipboard: None,
             folder_opener: None,
+            file_system_walker: None,
             query_history_store: None,
             settings_store: None,
             metadata_cache: None,
@@ -306,6 +318,12 @@ impl EffectRunner {
                 }
                 if let Some(width) = output.query_history_picker_filter_visible_width {
                     state.query_history_picker.filter_visible_width = width;
+                }
+                if let Some(height) = output.file_picker_pane_height {
+                    state.file_picker.picker_mut().pane_height = height;
+                }
+                if let Some(width) = output.file_picker_filter_visible_width {
+                    state.file_picker.picker_mut().filter_visible_width = width;
                 }
                 if let Some(visible_rows) = output.jsonb_detail_editor_visible_rows {
                     state.ui.jsonb_detail_editor_visible_rows = visible_rows;
@@ -425,6 +443,11 @@ impl EffectRunner {
 
             e @ Effect::LoadQueryHistory { .. } => {
                 cmd_query_history::run(e, &self.action_tx, &self.query.query_history_store);
+                Ok(vec![])
+            }
+
+            e @ Effect::StartFilePickerWalk { .. } => {
+                cmd_file_picker::run(e, &self.action_tx, &self.utility.file_system_walker);
                 Ok(vec![])
             }
 

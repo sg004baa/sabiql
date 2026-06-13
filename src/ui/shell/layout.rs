@@ -21,6 +21,7 @@ use crate::features::overlays::help::HelpOverlay;
 use crate::features::overlays::settings::SettingsOverlay;
 use crate::features::pickers::command_palette::CommandPalette;
 use crate::features::pickers::er_table_picker::{ErTablePicker, ErTablePickerRenderMetrics};
+use crate::features::pickers::file_picker::{FilePicker, FilePickerRenderMetrics};
 use crate::features::pickers::query_history_picker::{
     QueryHistoryPicker, QueryHistoryPickerRenderMetrics,
 };
@@ -128,6 +129,17 @@ impl MainLayout {
                 _ => (None, None),
             };
 
+        let (file_picker_pane_height, file_picker_filter_visible_width) = match state.input_mode() {
+            InputMode::FilePicker => {
+                let FilePickerRenderMetrics {
+                    pane_height,
+                    filter_visible_width,
+                } = FilePicker::render(frame, state, theme);
+                (Some(pane_height), Some(filter_visible_width))
+            }
+            _ => (None, None),
+        };
+
         let (
             confirm_preview_viewport_height,
             confirm_preview_content_height,
@@ -179,6 +191,8 @@ impl MainLayout {
             er_picker_filter_visible_width,
             query_history_picker_pane_height,
             query_history_picker_filter_visible_width,
+            file_picker_pane_height,
+            file_picker_filter_visible_width,
             jsonb_detail_editor_visible_rows,
             confirm_preview_viewport_height,
             confirm_preview_content_height,
