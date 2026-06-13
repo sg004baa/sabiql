@@ -10,9 +10,9 @@ use crate::update::action::{Action, InputTarget, ListMotion, ListTarget, ModalKi
 /// parent reducer can fall through.
 pub fn reduce(state: &mut AppState, action: &Action) -> Option<Vec<Effect>> {
     match action {
-        // Open only for SQLite while the File field is focused. The lazy
-        // trigger means no walk Effect is emitted here — scanning starts on
-        // the first filter keystroke.
+        // Open only for SQLite while the File field is focused. Scanning starts
+        // eagerly here so the candidate list is already populating when the
+        // picker appears.
         Action::OpenFilePicker => {
             if state.connection_setup.database_type != DatabaseType::SQLite
                 || state.connection_setup.focused_field != ConnectionField::Database
@@ -21,7 +21,13 @@ pub fn reduce(state: &mut AppState, action: &Action) -> Option<Vec<Effect>> {
             }
             state.file_picker.open();
             state.modal.push_mode(InputMode::FilePicker);
-            Some(vec![])
+            let field = state.connection_setup.database.content().to_string();
+            let generation = state.file_picker.generation();
+            Some(vec![Effect::StartFilePickerWalk {
+                field,
+                options: WalkOptions::default(),
+                generation,
+            }])
         }
 
         Action::TextInput {
@@ -29,12 +35,12 @@ pub fn reduce(state: &mut AppState, action: &Action) -> Option<Vec<Effect>> {
             ch,
         } => {
             state.file_picker.insert_filter_char(*ch);
-            Some(maybe_start_walk(state))
+            Some(vec![])
         }
 
         Action::Paste(text) if state.modal.active_mode() == InputMode::FilePicker => {
             state.file_picker.insert_filter_str(text);
-            Some(maybe_start_walk(state))
+            Some(vec![])
         }
 
         Action::TextBackspace {
@@ -99,20 +105,6 @@ pub fn reduce(state: &mut AppState, action: &Action) -> Option<Vec<Effect>> {
     }
 }
 
-/// Emit the walk Effect once, on the first filter keystroke (lazy trigger).
-fn maybe_start_walk(state: &mut AppState) -> Vec<Effect> {
-    if state.file_picker.walk_started() {
-        return vec![];
-    }
-    let field = state.connection_setup.database.content().to_string();
-    let generation = state.file_picker.begin_walk();
-    vec![Effect::StartFilePickerWalk {
-        field,
-        options: WalkOptions::default(),
-        generation,
-    }]
-}
-
 /// Replace the `File:` field contents with `value`, cursor at the end.
 fn set_database_field(state: &mut AppState, value: &str) {
     use crate::model::shared::text_input::TextInputState;
@@ -140,15 +132,20 @@ mod tests {
     }
 
     #[test]
-    fn open_for_sqlite_file_field_pushes_mode_without_walk() {
+    fn open_for_sqlite_file_field_starts_walk() {
         let mut state = sqlite_setup_state();
 
         let effects = dispatch(&mut state, &Action::OpenFilePicker).unwrap();
 
         assert_eq!(state.modal.active_mode(), InputMode::FilePicker);
         assert_eq!(state.modal.return_destination(), InputMode::ConnectionSetup);
-        assert!(effects.is_empty(), "open must not start a walk (lazy)");
-        assert!(!state.file_picker.walk_started());
+        assert!(state.file_picker.is_scanning());
+        assert_eq!(effects.len(), 1);
+        assert!(matches!(
+            effects[0],
+            Effect::StartFilePickerWalk { generation, .. }
+                if generation == state.file_picker.generation()
+        ));
     }
 
     #[test]
@@ -172,7 +169,7 @@ mod tests {
     }
 
     #[test]
-    fn first_filter_char_starts_walk_once() {
+    fn filter_keystroke_does_not_emit_walk() {
         let mut state = sqlite_setup_state();
         dispatch(&mut state, &Action::OpenFilePicker);
 
@@ -185,37 +182,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(effects.len(), 1);
-        assert!(matches!(
-            effects[0],
-            Effect::StartFilePickerWalk { generation, .. }
-                if generation == state.file_picker.generation()
-        ));
-        assert!(state.file_picker.walk_started());
-    }
-
-    #[test]
-    fn second_filter_char_does_not_restart_walk() {
-        let mut state = sqlite_setup_state();
-        dispatch(&mut state, &Action::OpenFilePicker);
-        dispatch(
-            &mut state,
-            &Action::TextInput {
-                target: InputTarget::FilePickerFilter,
-                ch: 'a',
-            },
-        );
-
-        let effects = dispatch(
-            &mut state,
-            &Action::TextInput {
-                target: InputTarget::FilePickerFilter,
-                ch: 'b',
-            },
-        )
-        .unwrap();
-
-        assert!(effects.is_empty(), "walk must not restart on 2nd keystroke");
+        assert!(effects.is_empty(), "filtering reuses the eager walk's cache");
     }
 
     #[test]

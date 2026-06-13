@@ -18,14 +18,12 @@ pub struct FilteredPath<'a> {
 ///
 /// Walk results stream in via [`append_paths`](Self::append_paths) and
 /// accumulate in `all_paths`; filtering re-runs nucleo over that cache on every
-/// keystroke without re-walking. `walk_started` enforces the lazy trigger (walk
-/// begins only on the first filter character), and `generation` discards stale
+/// keystroke without re-walking. `generation` discards stale
 /// async chunks after the picker is reopened.
 #[derive(Debug, Clone, Default)]
 pub struct FilePickerState {
     picker: PickerState,
     all_paths: Vec<PathBuf>,
-    walk_started: bool,
     generation: u64,
     scanning: bool,
     truncated: bool,
@@ -44,10 +42,6 @@ impl FilePickerState {
         self.generation
     }
 
-    pub fn walk_started(&self) -> bool {
-        self.walk_started
-    }
-
     pub fn is_scanning(&self) -> bool {
         self.scanning
     }
@@ -64,14 +58,14 @@ impl FilePickerState {
         self.picker.filter_input().content()
     }
 
-    /// Reset for a fresh open: clear results/filter and bump the generation so
-    /// any in-flight walk chunks from a previous session are ignored.
+    /// Reset for a fresh open: clear results/filter, mark scanning, and bump the
+    /// generation so any in-flight walk chunks from a previous session are
+    /// ignored.
     pub fn open(&mut self) {
         self.all_paths.clear();
         self.picker.clear_filter_and_reset();
-        self.walk_started = false;
-        self.scanning = false;
         self.truncated = false;
+        self.scanning = true;
         self.generation = self.generation.wrapping_add(1);
     }
 
@@ -79,14 +73,6 @@ impl FilePickerState {
     pub fn invalidate(&mut self) {
         self.generation = self.generation.wrapping_add(1);
         self.scanning = false;
-    }
-
-    /// Mark the walk as started and scanning. Returns the generation that the
-    /// walk Effect should be tagged with.
-    pub fn begin_walk(&mut self) -> u64 {
-        self.walk_started = true;
-        self.scanning = true;
-        self.generation
     }
 
     /// Append a chunk of discovered paths (called as walk results stream in).
@@ -317,20 +303,8 @@ mod tests {
             state.open();
 
             assert_eq!(state.path_count(), 0);
-            assert!(!state.walk_started());
             assert!(!state.is_scanning());
             assert_eq!(state.generation(), gen_before + 1);
-        }
-
-        #[test]
-        fn begin_walk_sets_started_and_returns_generation() {
-            let mut state = FilePickerState::default();
-            state.open();
-            let g = state.begin_walk();
-
-            assert!(state.walk_started());
-            assert!(state.is_scanning());
-            assert_eq!(g, state.generation());
         }
 
         #[test]
@@ -344,7 +318,6 @@ mod tests {
         #[test]
         fn finish_walk_clears_scanning_and_sets_truncated() {
             let mut state = FilePickerState::default();
-            state.begin_walk();
             state.finish_walk(true);
             assert!(!state.is_scanning());
             assert!(state.is_truncated());
@@ -411,7 +384,6 @@ mod tests {
         #[test]
         fn invalidate_bumps_generation_and_stops_scanning() {
             let mut state = FilePickerState::default();
-            state.begin_walk();
             let g = state.generation();
 
             state.invalidate();
