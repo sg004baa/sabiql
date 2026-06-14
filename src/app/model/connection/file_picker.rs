@@ -303,7 +303,7 @@ mod tests {
             state.open();
 
             assert_eq!(state.path_count(), 0);
-            assert!(!state.is_scanning());
+            assert!(state.is_scanning());
             assert_eq!(state.generation(), gen_before + 1);
         }
 
