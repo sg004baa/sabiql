@@ -182,7 +182,10 @@ mod tests {
         )
         .unwrap();
 
-        assert!(effects.is_empty(), "filtering reuses the eager walk's cache");
+        assert!(
+            effects.is_empty(),
+            "filtering reuses the eager walk's cache"
+        );
     }
 
     #[test]
