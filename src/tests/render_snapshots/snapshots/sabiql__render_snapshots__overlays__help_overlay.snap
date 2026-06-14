@@ -13,8 +13,8 @@ test_project | test_db | - | no dsn | localhost:5432/test
 │                 │  Ctrl+K                               Open Settings                             ││                 │
 │                 │  :                                    Enter command line                        ││                 │
 │                 │  f                                    Toggle Focus                              ││                 │
-│                 │  1/2/3, < / >                         Switch or cycle pane focus                ││                 │
-│                 │  Tab/⇧Tab                             Inspector prev/next tab                   ││                 │
+│                 │  1/2/3, Tab/⇧Tab                      Switch or cycle pane focus                ││                 │
+│                 │  ← / →                                Inspector prev/next tab                   ││                 │
 │                 │  r                                    Reload metadata                           ││                 │
 │                 │  s                                    Open SQL Editor                           ││                 │
 │                 │  e                                    Open ER Diagram                           ││─────────────────┘
