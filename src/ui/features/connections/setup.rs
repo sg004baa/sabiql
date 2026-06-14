@@ -1,6 +1,7 @@
 use ratatui::prelude::*;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use unicode_width::UnicodeWidthStr;
 
 use crate::app::model::app_state::AppState;
 use crate::app::model::connection::setup::{
@@ -35,21 +36,36 @@ impl ConnectionSetup {
         let form_state = &state.connection_setup;
         let visible_fields = form_state.visible_fields();
 
-        let modal_width = LABEL_WIDTH + INPUT_WIDTH + ERROR_WIDTH + 8;
+        let show_file_picker_hint = form_state.database_type == DatabaseType::SQLite
+            && form_state.focused_field == ConnectionField::Database;
+        let (title, hint) = match (form_state.is_edit_mode(), show_file_picker_hint) {
+            (true, true) => (
+                " Edit Connection ",
+                " Tab: Next │ Shift+Tab: Prev │ Ctrl+F: Files │ Ctrl+S: Save │ Esc: Cancel ",
+            ),
+            (true, false) => (
+                " Edit Connection ",
+                " Tab: Next │ Shift+Tab: Prev │ Ctrl+S: Save │ Esc: Cancel ",
+            ),
+            (false, true) => (
+                " New Connection ",
+                " Tab: Next │ Shift+Tab: Prev │ Ctrl+F: Files │ Ctrl+S: Connect │ Esc: Cancel ",
+            ),
+            (false, false) => (
+                " New Connection ",
+                " Tab: Next │ Shift+Tab: Prev │ Ctrl+S: Connect │ Esc: Cancel ",
+            ),
+        };
+
+        let base_modal_width = LABEL_WIDTH + INPUT_WIDTH + ERROR_WIDTH + 8;
+        let modal_width = if show_file_picker_hint {
+            base_modal_width.max(UnicodeWidthStr::width(hint) as u16 + 2)
+        } else {
+            base_modal_width
+        };
         // fields + spacer + notice + modal chrome
         let modal_height = visible_fields.len() as u16 + 6;
 
-        let (title, hint) = if form_state.is_edit_mode() {
-            (
-                " Edit Connection ",
-                " Tab: Next │ Shift+Tab: Prev │ Ctrl+S: Save │ Esc: Cancel ",
-            )
-        } else {
-            (
-                " New Connection ",
-                " Tab: Next │ Shift+Tab: Prev │ Ctrl+S: Connect │ Esc: Cancel ",
-            )
-        };
         let (_, modal_inner) = render_modal(
             frame,
             Constraint::Length(modal_width),

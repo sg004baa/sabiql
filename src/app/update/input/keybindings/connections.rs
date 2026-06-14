@@ -65,6 +65,14 @@ pub const CONNECTION_SETUP_KEYS: &[KeyBinding] = &[
         action: Action::None,
         combos: &[],
     },
+    KeyBinding {
+        key_short: "^F",
+        key: "Ctrl+F",
+        desc_short: "Files",
+        description: "Open SQLite file picker",
+        action: Action::OpenFilePicker,
+        combos: &[KeyCombo::ctrl(Key::Char('f'))],
+    },
 ];
 
 // =============================================================================
