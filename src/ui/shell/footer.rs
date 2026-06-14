@@ -273,12 +273,23 @@ impl Footer {
                     hints
                 }
             }
-            InputMode::ConnectionSetup => vec![
-                CONNECTION_SETUP_KEYS[idx::conn_setup::SAVE].as_hint(),
-                CONNECTION_SETUP_KEYS[idx::conn_setup::TAB_NEXT].as_hint(),
-                CONNECTION_SETUP_KEYS[idx::conn_setup::TAB_PREV].as_hint(),
-                CONNECTION_SETUP_KEYS[idx::conn_setup::ESC_CANCEL].as_hint(),
-            ],
+            InputMode::ConnectionSetup => {
+                use crate::app::model::connection::setup::ConnectionField;
+                use crate::domain::connection::DatabaseType;
+
+                let mut hints = vec![
+                    CONNECTION_SETUP_KEYS[idx::conn_setup::SAVE].as_hint(),
+                    CONNECTION_SETUP_KEYS[idx::conn_setup::TAB_NEXT].as_hint(),
+                    CONNECTION_SETUP_KEYS[idx::conn_setup::TAB_PREV].as_hint(),
+                ];
+                if state.connection_setup.database_type == DatabaseType::SQLite
+                    && state.connection_setup.focused_field == ConnectionField::Database
+                {
+                    hints.push(CONNECTION_SETUP_KEYS[idx::conn_setup::FILE_PICKER].as_hint());
+                }
+                hints.push(CONNECTION_SETUP_KEYS[idx::conn_setup::ESC_CANCEL].as_hint());
+                hints
+            }
             InputMode::ConnectionError => {
                 let first = if state.session.is_service_connection() {
                     CONNECTION_ERROR_ROWS[idx::conn_error::RETRY].as_hint()
@@ -381,12 +392,14 @@ impl Footer {
 mod tests {
     use super::Footer;
     use crate::app::model::app_state::AppState;
+    use crate::app::model::connection::setup::ConnectionField;
     use crate::app::model::shared::db_capabilities::DbCapabilities;
     use crate::app::model::shared::focused_pane::FocusedPane;
     use crate::app::model::shared::input_mode::InputMode;
     use crate::app::model::shared::inspector_tab::InspectorTab;
     use crate::app::services::AppServices;
-    use crate::app::update::input::keybindings::{GLOBAL_KEYS, idx};
+    use crate::app::update::input::keybindings::{CONNECTION_SETUP_KEYS, GLOBAL_KEYS, idx};
+    use crate::domain::connection::DatabaseType;
     use rstest::rstest;
 
     fn inspector_state() -> AppState {
@@ -414,6 +427,28 @@ mod tests {
 
         assert_eq!(
             hints.contains(&GLOBAL_KEYS[idx::global::INSPECTOR_TABS].as_hint()),
+            expected_visible
+        );
+    }
+
+    #[rstest]
+    #[case(DatabaseType::SQLite, ConnectionField::Database, true)]
+    #[case(DatabaseType::SQLite, ConnectionField::Name, false)]
+    #[case(DatabaseType::PostgreSQL, ConnectionField::Database, false)]
+    fn sqlite_file_picker_hint_is_only_visible_when_available(
+        #[case] database_type: DatabaseType,
+        #[case] focused_field: ConnectionField,
+        #[case] expected_visible: bool,
+    ) {
+        let mut state = AppState::new("test".to_string());
+        state.modal.set_mode(InputMode::ConnectionSetup);
+        state.connection_setup.database_type = database_type;
+        state.connection_setup.focused_field = focused_field;
+
+        let hints = Footer::get_context_hints(&state, &AppServices::stub());
+
+        assert_eq!(
+            hints.contains(&CONNECTION_SETUP_KEYS[idx::conn_setup::FILE_PICKER].as_hint()),
             expected_visible
         );
     }

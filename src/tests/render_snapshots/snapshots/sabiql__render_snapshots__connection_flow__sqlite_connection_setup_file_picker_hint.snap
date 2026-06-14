@@ -1,15 +1,11 @@
 ---
-source: src/tests/render_snapshots/inspector.rs
+source: src/tests/render_snapshots/connection_flow.rs
 expression: output
 ---
-test_project | test_db | - | no dsn | localhost:5432/test                                                                                                            
+test_project | - | - | no dsn | localhost:5432/test                                                                                                                  
 ┌ [1] Explorer ─────────────────────────┐[Info] [Cols] [Idx] [FK] [RLS] [Trig] [DDL]                                                                                 
-│> public.users                         │┌ [2] Inspector ───────────────────────────────────────────────────────────────────────────────────────────────────────────┐
-│  public.posts                         ││Owner:   (none)                                                                                                           │
-│  public.comments                      ││Comment: (none)                                                                                                           │
-│                                       ││Rows:    (none)                                                                                                           │
-│                                       ││Schema:  public                                                                                                           │
-│                                       ││Table:   users                                                                                                            │
+│ Press 'r' to load metadata            │┌ [2] Inspector ───────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                       ││(select a table)                                                                                                          │
 │                                       ││                                                                                                                          │
 │                                       ││                                                                                                                          │
 │                                       ││                                                                                                                          │
@@ -26,12 +22,16 @@ test_project | test_db | - | no dsn | localhost:5432/test
 │                                       ││                                                                                                                          │
 │                                       ││                                                                                                                          │
 │                                       ││                                                                                                                          │
-│                                       │└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-│                                       │┌ [3] Result ──────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
-│                                       ││(select a table to preview)                                                                                               │
 │                                       ││                                                                                                                          │
-│                                       ││                                                                                                                          │
-│                                       ││                                                                                                                          │
+│                                       ││ ╭ New Connection ─────────────────────────────────────────────────────────────╮                                          │
+│                                       ││ │                                                                             │                                          │
+│                                       ││ │  Type:       [ SQLite                   ▼ ]                                 │                                          │
+│                                       │└─│  Name:       [                            ]                                 │──────────────────────────────────────────┘
+│                                       │┌ │  File:       [ /tmp/app.db                ]                                 │──────────────────────────────────────────┐
+│                                       ││(│                                                                             │                                          │
+│                                       ││ │  Note: Connection info is stored locally in plain text                      │                                          │
+│                                       ││ │                                                                             │                                          │
+│                                       ││ ╰ Tab: Next │ Shift+Tab: Prev │ Ctrl+F: Files │ Ctrl+S: Connect │ Esc: Cancel ╯                                          │
 │                                       ││                                                                                                                          │
 │                                       ││                                                                                                                          │
 │                                       ││                                                                                                                          │
@@ -51,4 +51,4 @@ test_project | test_db | - | no dsn | localhost:5432/test
 │                                       ││                                                                                                                          │
 │                                       ││                                                                                                                          │
 └───────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-r:Reload  s:SQL  e:ER Diagram  / ^P:Tables  ^O:History  ^R:Read-Only  f:Focus  Tab/⇧Tab:Pane  ←/→:InsTabs  ?:Help  ^K:Settings  q:Quit
+^S:Connect  Tab:Next  ⇧Tab:Prev  ^F:Files  Esc:Cancel

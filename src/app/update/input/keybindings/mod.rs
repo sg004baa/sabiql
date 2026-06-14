@@ -202,6 +202,7 @@ pub mod idx {
         pub const ESC_CANCEL: usize = 4;
         pub const ENTER_DROPDOWN: usize = 5;
         pub const DROPDOWN_NAV: usize = 6;
+        pub const FILE_PICKER: usize = 7;
     }
 
     pub mod conn_error {
@@ -666,6 +667,7 @@ mod tests {
             assert!(idx::conn_setup::ESC_CANCEL < CONNECTION_SETUP_KEYS.len());
             assert!(idx::conn_setup::ENTER_DROPDOWN < CONNECTION_SETUP_KEYS.len());
             assert!(idx::conn_setup::DROPDOWN_NAV < CONNECTION_SETUP_KEYS.len());
+            assert!(idx::conn_setup::FILE_PICKER < CONNECTION_SETUP_KEYS.len());
 
             // CONNECTION_ERROR_ROWS
             assert!(idx::conn_error::EDIT < CONNECTION_ERROR_ROWS.len());

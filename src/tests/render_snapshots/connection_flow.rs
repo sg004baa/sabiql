@@ -1,4 +1,5 @@
 use super::*;
+use sabiql_domain::connection::DatabaseType;
 
 #[test]
 fn connection_setup_form() {
@@ -14,6 +15,24 @@ fn connection_setup_form() {
         .connection_setup
         .user
         .set_content("postgres".to_string());
+
+    let output = render_to_string(&mut terminal, &mut state);
+
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn sqlite_connection_setup_file_picker_hint() {
+    let mut state = create_test_state();
+    let mut terminal = create_test_terminal();
+
+    state.modal.set_mode(InputMode::ConnectionSetup);
+    state.connection_setup.database_type = DatabaseType::SQLite;
+    state.connection_setup.focused_field = ConnectionField::Database;
+    state
+        .connection_setup
+        .database
+        .set_content("/tmp/app.db".to_string());
 
     let output = render_to_string(&mut terminal, &mut state);
 

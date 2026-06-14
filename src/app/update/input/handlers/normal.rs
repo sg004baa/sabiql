@@ -114,6 +114,13 @@ pub fn handle_normal_mode(combo: KeyCombo, state: &AppState) -> Action {
     {
         return Action::ConfirmSelection;
     }
+    if inspector_navigation && combo.modifiers.is_empty() {
+        match combo.key {
+            Key::Left => return Action::InspectorPrevTab,
+            Key::Right => return Action::InspectorNextTab,
+            _ => {}
+        }
+    }
 
     // Shared vim semantics (navigation, mode, operators)
     if let Some(action) = action_for_key(&combo, VimSurfaceContext::Browse(browse_ctx)) {
@@ -146,25 +153,21 @@ pub fn handle_normal_mode(combo: KeyCombo, state: &AppState) -> Action {
             }
         }
 
-        // Pane cycling: < / > move focus backward / forward through panes
-        Key::Char('>') => {
+        // Pane cycling: Tab / Shift+Tab move focus forward / backward through panes
+        Key::Tab => {
             if state.ui.is_focus_mode() {
                 Action::ToggleFocus
             } else {
                 Action::FocusNextPane
             }
         }
-        Key::Char('<') => {
+        Key::BackTab => {
             if state.ui.is_focus_mode() {
                 Action::ToggleFocus
             } else {
                 Action::FocusPrevPane
             }
         }
-
-        // Inspector sub-tab navigation (Tab/Shift+Tab, only when Inspector focused)
-        Key::Tab if inspector_navigation => Action::InspectorNextTab,
-        Key::BackTab if inspector_navigation => Action::InspectorPrevTab,
 
         Key::Char('u')
             if result_navigation && !state.result_interaction.staged_delete_rows().is_empty() =>
@@ -465,64 +468,34 @@ mod tests {
             }
 
             #[test]
-            fn tab_switches_inspector_tab_when_inspector_focused() {
+            fn right_switches_to_next_inspector_tab_when_inspector_focused() {
                 let mut state = browse_state();
                 state.ui.focused_pane = FocusedPane::Inspector;
 
-                let result = handle_normal_mode(combo(Key::Tab), &state);
+                let result = handle_normal_mode(combo(Key::Right), &state);
 
                 assert!(matches!(result, Action::InspectorNextTab));
             }
 
             #[test]
-            fn shift_tab_prev_when_inspector_focused() {
+            fn left_switches_to_previous_inspector_tab_when_inspector_focused() {
                 let mut state = browse_state();
                 state.ui.focused_pane = FocusedPane::Inspector;
 
-                let result = handle_normal_mode(combo(Key::BackTab), &state);
+                let result = handle_normal_mode(combo(Key::Left), &state);
 
                 assert!(matches!(result, Action::InspectorPrevTab));
-            }
-
-            #[test]
-            fn tab_noop_when_explorer_focused() {
-                let mut state = browse_state();
-                state.ui.focused_pane = FocusedPane::Explorer;
-
-                let result = handle_normal_mode(combo(Key::Tab), &state);
-
-                assert!(matches!(result, Action::None));
-            }
-
-            #[test]
-            fn tab_noop_when_result_focused() {
-                let mut state = browse_state();
-                state.ui.focused_pane = FocusedPane::Result;
-
-                let result = handle_normal_mode(combo(Key::Tab), &state);
-
-                assert!(matches!(result, Action::None));
-            }
-
-            #[test]
-            fn backtab_noop_when_explorer_focused() {
-                let mut state = browse_state();
-                state.ui.focused_pane = FocusedPane::Explorer;
-
-                let result = handle_normal_mode(combo(Key::BackTab), &state);
-
-                assert!(matches!(result, Action::None));
             }
 
             #[rstest]
             #[case(FocusedPane::Explorer)]
             #[case(FocusedPane::Inspector)]
             #[case(FocusedPane::Result)]
-            fn gt_cycles_focus_forward(#[case] from: FocusedPane) {
+            fn tab_cycles_focus_forward(#[case] from: FocusedPane) {
                 let mut state = browse_state();
                 state.ui.focused_pane = from;
 
-                let result = handle_normal_mode(combo(Key::Char('>')), &state);
+                let result = handle_normal_mode(combo(Key::Tab), &state);
 
                 assert!(matches!(result, Action::FocusNextPane));
             }
@@ -531,33 +504,44 @@ mod tests {
             #[case(FocusedPane::Explorer)]
             #[case(FocusedPane::Inspector)]
             #[case(FocusedPane::Result)]
-            fn lt_cycles_focus_backward(#[case] from: FocusedPane) {
+            fn shift_tab_cycles_focus_backward(#[case] from: FocusedPane) {
                 let mut state = browse_state();
                 state.ui.focused_pane = from;
 
-                let result = handle_normal_mode(combo(Key::Char('<')), &state);
+                let result = handle_normal_mode(combo(Key::BackTab), &state);
 
                 assert!(matches!(result, Action::FocusPrevPane));
             }
 
             #[test]
-            fn gt_toggles_focus_mode_when_focus_mode_active() {
+            fn tab_toggles_focus_mode_when_focus_mode_active() {
                 let mut state = browse_state();
                 state.ui.focus_mode = FocusMode::focused(FocusedPane::Explorer);
 
-                let result = handle_normal_mode(combo(Key::Char('>')), &state);
+                let result = handle_normal_mode(combo(Key::Tab), &state);
 
                 assert!(matches!(result, Action::ToggleFocus));
             }
 
             #[test]
-            fn lt_toggles_focus_mode_when_focus_mode_active() {
+            fn shift_tab_toggles_focus_mode_when_focus_mode_active() {
                 let mut state = browse_state();
                 state.ui.focus_mode = FocusMode::focused(FocusedPane::Explorer);
 
-                let result = handle_normal_mode(combo(Key::Char('<')), &state);
+                let result = handle_normal_mode(combo(Key::BackTab), &state);
 
                 assert!(matches!(result, Action::ToggleFocus));
+            }
+
+            #[rstest]
+            #[case('<')]
+            #[case('>')]
+            fn angle_brackets_are_unbound(#[case] key: char) {
+                let state = browse_state();
+
+                let result = handle_normal_mode(combo(Key::Char(key)), &state);
+
+                assert!(matches!(result, Action::None));
             }
         }
     }
