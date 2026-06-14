@@ -11,15 +11,18 @@ use crate::domain::{DatabaseMetadata, QueryResult, Table, TableSignature, WriteE
 
 use super::mysql::MySqlAdapter;
 use super::postgres::PostgresAdapter;
+use super::sqlite::SqliteAdapter;
 
 const DB_TYPE_POSTGRESQL: u8 = 0;
 const DB_TYPE_MYSQL: u8 = 1;
+const DB_TYPE_SQLITE: u8 = 2;
 
 /// Routes port trait calls to the appropriate database adapter based on
 /// DSN scheme (for async traits) or an atomic active-type flag (for sync traits).
 pub struct DispatchAdapter {
     postgres: PostgresAdapter,
     mysql: MySqlAdapter,
+    sqlite: SqliteAdapter,
     active_type: AtomicU8,
 }
 
@@ -28,6 +31,7 @@ impl DispatchAdapter {
         Self {
             postgres: PostgresAdapter::new(),
             mysql: MySqlAdapter::new(),
+            sqlite: SqliteAdapter::new(),
             active_type: AtomicU8::new(DB_TYPE_POSTGRESQL),
         }
     }
@@ -38,6 +42,7 @@ impl DispatchAdapter {
         let val = match db_type {
             DatabaseType::PostgreSQL => DB_TYPE_POSTGRESQL,
             DatabaseType::MySQL => DB_TYPE_MYSQL,
+            DatabaseType::SQLite => DB_TYPE_SQLITE,
         };
         self.active_type.store(val, Ordering::Relaxed);
     }
@@ -45,12 +50,45 @@ impl DispatchAdapter {
     fn active_type(&self) -> DatabaseType {
         match self.active_type.load(Ordering::Relaxed) {
             DB_TYPE_MYSQL => DatabaseType::MySQL,
+            DB_TYPE_SQLITE => DatabaseType::SQLite,
             _ => DatabaseType::PostgreSQL,
         }
     }
 
     fn is_mysql(dsn: &str) -> bool {
         dsn.starts_with("mysql://")
+    }
+
+    fn is_sqlite(dsn: &str) -> bool {
+        dsn.starts_with("sqlite://")
+    }
+
+    fn metadata_provider_for(&self, dsn: &str) -> &dyn MetadataProvider {
+        if Self::is_mysql(dsn) {
+            &self.mysql
+        } else if Self::is_sqlite(dsn) {
+            &self.sqlite
+        } else {
+            &self.postgres
+        }
+    }
+
+    fn query_executor_for(&self, dsn: &str) -> &dyn QueryExecutor {
+        if Self::is_mysql(dsn) {
+            &self.mysql
+        } else if Self::is_sqlite(dsn) {
+            &self.sqlite
+        } else {
+            &self.postgres
+        }
+    }
+
+    fn sql_dialect_for_active_type(&self) -> &dyn SqlDialect {
+        match self.active_type() {
+            DatabaseType::MySQL => &self.mysql,
+            DatabaseType::SQLite => &self.sqlite,
+            DatabaseType::PostgreSQL => &self.postgres,
+        }
     }
 }
 
@@ -64,6 +102,7 @@ impl DatabaseCapabilityProvider for DispatchAdapter {
     fn capabilities(&self) -> DatabaseCapabilities {
         match self.active_type() {
             DatabaseType::MySQL => self.mysql.capabilities(),
+            DatabaseType::SQLite => self.sqlite.capabilities(),
             DatabaseType::PostgreSQL => self.postgres.capabilities(),
         }
     }
@@ -76,22 +115,16 @@ impl DatabaseCapabilityProvider for DispatchAdapter {
 #[async_trait]
 impl MetadataProvider for DispatchAdapter {
     async fn fetch_metadata(&self, dsn: &str) -> Result<DatabaseMetadata, DbOperationError> {
-        if Self::is_mysql(dsn) {
-            self.mysql.fetch_metadata(dsn).await
-        } else {
-            self.postgres.fetch_metadata(dsn).await
-        }
+        self.metadata_provider_for(dsn).fetch_metadata(dsn).await
     }
 
     async fn fetch_table_signatures(
         &self,
         dsn: &str,
     ) -> Result<Vec<TableSignature>, DbOperationError> {
-        if Self::is_mysql(dsn) {
-            self.mysql.fetch_table_signatures(dsn).await
-        } else {
-            self.postgres.fetch_table_signatures(dsn).await
-        }
+        self.metadata_provider_for(dsn)
+            .fetch_table_signatures(dsn)
+            .await
     }
 
     async fn fetch_table_detail(
@@ -100,11 +133,9 @@ impl MetadataProvider for DispatchAdapter {
         schema: &str,
         table: &str,
     ) -> Result<Table, DbOperationError> {
-        if Self::is_mysql(dsn) {
-            self.mysql.fetch_table_detail(dsn, schema, table).await
-        } else {
-            self.postgres.fetch_table_detail(dsn, schema, table).await
-        }
+        self.metadata_provider_for(dsn)
+            .fetch_table_detail(dsn, schema, table)
+            .await
     }
 
     async fn fetch_table_columns_and_fks(
@@ -113,15 +144,9 @@ impl MetadataProvider for DispatchAdapter {
         schema: &str,
         table: &str,
     ) -> Result<Table, DbOperationError> {
-        if Self::is_mysql(dsn) {
-            self.mysql
-                .fetch_table_columns_and_fks(dsn, schema, table)
-                .await
-        } else {
-            self.postgres
-                .fetch_table_columns_and_fks(dsn, schema, table)
-                .await
-        }
+        self.metadata_provider_for(dsn)
+            .fetch_table_columns_and_fks(dsn, schema, table)
+            .await
     }
 }
 
@@ -136,15 +161,9 @@ impl QueryExecutor for DispatchAdapter {
         offset: usize,
         read_only: bool,
     ) -> Result<QueryResult, DbOperationError> {
-        if Self::is_mysql(dsn) {
-            self.mysql
-                .execute_preview(dsn, schema, table, limit, offset, read_only)
-                .await
-        } else {
-            self.postgres
-                .execute_preview(dsn, schema, table, limit, offset, read_only)
-                .await
-        }
+        self.query_executor_for(dsn)
+            .execute_preview(dsn, schema, table, limit, offset, read_only)
+            .await
     }
 
     async fn execute_adhoc(
@@ -153,11 +172,9 @@ impl QueryExecutor for DispatchAdapter {
         query: &str,
         read_only: bool,
     ) -> Result<QueryResult, DbOperationError> {
-        if Self::is_mysql(dsn) {
-            self.mysql.execute_adhoc(dsn, query, read_only).await
-        } else {
-            self.postgres.execute_adhoc(dsn, query, read_only).await
-        }
+        self.query_executor_for(dsn)
+            .execute_adhoc(dsn, query, read_only)
+            .await
     }
 
     async fn execute_write(
@@ -166,11 +183,9 @@ impl QueryExecutor for DispatchAdapter {
         query: &str,
         read_only: bool,
     ) -> Result<WriteExecutionResult, DbOperationError> {
-        if Self::is_mysql(dsn) {
-            self.mysql.execute_write(dsn, query, read_only).await
-        } else {
-            self.postgres.execute_write(dsn, query, read_only).await
-        }
+        self.query_executor_for(dsn)
+            .execute_write(dsn, query, read_only)
+            .await
     }
 
     async fn count_query_rows(
@@ -179,11 +194,9 @@ impl QueryExecutor for DispatchAdapter {
         query: &str,
         read_only: bool,
     ) -> Result<usize, DbOperationError> {
-        if Self::is_mysql(dsn) {
-            self.mysql.count_query_rows(dsn, query, read_only).await
-        } else {
-            self.postgres.count_query_rows(dsn, query, read_only).await
-        }
+        self.query_executor_for(dsn)
+            .count_query_rows(dsn, query, read_only)
+            .await
     }
 
     async fn export_to_csv(
@@ -193,13 +206,9 @@ impl QueryExecutor for DispatchAdapter {
         path: &std::path::Path,
         read_only: bool,
     ) -> Result<usize, DbOperationError> {
-        if Self::is_mysql(dsn) {
-            self.mysql.export_to_csv(dsn, query, path, read_only).await
-        } else {
-            self.postgres
-                .export_to_csv(dsn, query, path, read_only)
-                .await
-        }
+        self.query_executor_for(dsn)
+            .export_to_csv(dsn, query, path, read_only)
+            .await
     }
 }
 
@@ -211,6 +220,7 @@ impl DsnBuilder for DispatchAdapter {
     fn build_dsn(&self, profile: &ConnectionProfile) -> String {
         match profile.database_type {
             DatabaseType::MySQL => self.mysql.build_dsn(profile),
+            DatabaseType::SQLite => self.sqlite.build_dsn(profile),
             DatabaseType::PostgreSQL => self.postgres.build_dsn(profile),
         }
     }
@@ -218,17 +228,12 @@ impl DsnBuilder for DispatchAdapter {
 
 impl SqlDialect for DispatchAdapter {
     fn build_explain_sql(&self, query: &str) -> Option<String> {
-        match self.active_type() {
-            DatabaseType::MySQL => self.mysql.build_explain_sql(query),
-            DatabaseType::PostgreSQL => self.postgres.build_explain_sql(query),
-        }
+        self.sql_dialect_for_active_type().build_explain_sql(query)
     }
 
     fn build_explain_analyze_sql(&self, query: &str) -> Option<String> {
-        match self.active_type() {
-            DatabaseType::MySQL => self.mysql.build_explain_analyze_sql(query),
-            DatabaseType::PostgreSQL => self.postgres.build_explain_analyze_sql(query),
-        }
+        self.sql_dialect_for_active_type()
+            .build_explain_analyze_sql(query)
     }
 
     fn build_update_sql(
@@ -239,14 +244,8 @@ impl SqlDialect for DispatchAdapter {
         new_value: &str,
         pk_pairs: &[(String, String)],
     ) -> String {
-        match self.active_type() {
-            DatabaseType::MySQL => self
-                .mysql
-                .build_update_sql(schema, table, column, new_value, pk_pairs),
-            DatabaseType::PostgreSQL => self
-                .postgres
-                .build_update_sql(schema, table, column, new_value, pk_pairs),
-        }
+        self.sql_dialect_for_active_type()
+            .build_update_sql(schema, table, column, new_value, pk_pairs)
     }
 
     fn build_bulk_delete_sql(
@@ -255,16 +254,8 @@ impl SqlDialect for DispatchAdapter {
         table: &str,
         pk_pairs_per_row: &[Vec<(String, String)>],
     ) -> String {
-        match self.active_type() {
-            DatabaseType::MySQL => {
-                self.mysql
-                    .build_bulk_delete_sql(schema, table, pk_pairs_per_row)
-            }
-            DatabaseType::PostgreSQL => {
-                self.postgres
-                    .build_bulk_delete_sql(schema, table, pk_pairs_per_row)
-            }
-        }
+        self.sql_dialect_for_active_type()
+            .build_bulk_delete_sql(schema, table, pk_pairs_per_row)
     }
 }
 
@@ -272,6 +263,7 @@ impl DdlGenerator for DispatchAdapter {
     fn generate_ddl(&self, table: &Table) -> String {
         match self.active_type() {
             DatabaseType::MySQL => self.mysql.generate_ddl(table),
+            DatabaseType::SQLite => self.sqlite.generate_ddl(table),
             DatabaseType::PostgreSQL => self.postgres.generate_ddl(table),
         }
     }
@@ -302,6 +294,20 @@ mod tests {
         }
 
         #[test]
+        fn is_sqlite_detects_sqlite_scheme() {
+            assert!(DispatchAdapter::is_sqlite("sqlite:///home/me/app.db"));
+        }
+
+        #[test]
+        fn is_sqlite_rejects_other_schemes() {
+            assert!(!DispatchAdapter::is_sqlite(
+                "postgres://user:pass@host:5432/db"
+            ));
+            assert!(!DispatchAdapter::is_sqlite("mysql://user:pass@host/db"));
+            assert!(!DispatchAdapter::is_sqlite("service=mydb"));
+        }
+
+        #[test]
         fn default_active_type_is_postgresql() {
             let adapter = DispatchAdapter::new();
             assert_eq!(adapter.active_type(), DatabaseType::PostgreSQL);
@@ -312,6 +318,13 @@ mod tests {
             let adapter = DispatchAdapter::new();
             adapter.set_active_type(DatabaseType::MySQL);
             assert_eq!(adapter.active_type(), DatabaseType::MySQL);
+        }
+
+        #[test]
+        fn set_active_type_switches_to_sqlite() {
+            let adapter = DispatchAdapter::new();
+            adapter.set_active_type(DatabaseType::SQLite);
+            assert_eq!(adapter.active_type(), DatabaseType::SQLite);
         }
 
         #[test]
@@ -365,6 +378,25 @@ mod tests {
             let dsn = adapter.build_dsn(&profile);
             assert!(dsn.starts_with("mysql://"));
         }
+
+        #[test]
+        fn routes_to_sqlite_for_sqlite_profile() {
+            let adapter = DispatchAdapter::new();
+            let profile = ConnectionProfile::new(
+                "Test",
+                "",
+                0,
+                "/home/me/app.db",
+                "",
+                "",
+                SslMode::Prefer,
+                DatabaseType::SQLite,
+            )
+            .unwrap();
+
+            let dsn = adapter.build_dsn(&profile);
+            assert_eq!(dsn, "sqlite:///home/me/app.db");
+        }
     }
 
     mod sync_trait_dispatch {
@@ -411,6 +443,17 @@ mod tests {
         }
 
         #[test]
+        fn ddl_uses_double_quotes_and_no_comments_for_sqlite() {
+            let adapter = DispatchAdapter::new();
+            adapter.set_active_type(DatabaseType::SQLite);
+            let mut table = make_table();
+            table.comment = Some("note".to_string());
+            let ddl = adapter.generate_ddl(&table);
+            assert!(ddl.contains('"'), "SQLite DDL should use double quotes");
+            assert!(!ddl.contains("COMMENT"), "SQLite DDL has no COMMENT syntax");
+        }
+
+        #[test]
         fn update_sql_uses_double_quotes_for_postgresql() {
             let adapter = DispatchAdapter::new();
             let sql = adapter.build_update_sql(
@@ -438,6 +481,17 @@ mod tests {
         }
 
         #[test]
+        fn explain_analyze_is_none_for_sqlite() {
+            let adapter = DispatchAdapter::new();
+            adapter.set_active_type(DatabaseType::SQLite);
+            assert_eq!(adapter.build_explain_analyze_sql("SELECT 1"), None);
+            assert_eq!(
+                adapter.build_explain_sql("SELECT 1"),
+                Some("EXPLAIN QUERY PLAN SELECT 1".to_string())
+            );
+        }
+
+        #[test]
         fn bulk_delete_routes_by_active_type() {
             let adapter = DispatchAdapter::new();
             let rows = vec![vec![("id".to_string(), "1".to_string())]];
@@ -448,6 +502,10 @@ mod tests {
             adapter.set_active_type(DatabaseType::MySQL);
             let my_sql = adapter.build_bulk_delete_sql("mydb", "users", &rows);
             assert!(my_sql.contains('`'));
+
+            adapter.set_active_type(DatabaseType::SQLite);
+            let lite_sql = adapter.build_bulk_delete_sql("main", "users", &rows);
+            assert!(lite_sql.contains('"'));
         }
     }
 }

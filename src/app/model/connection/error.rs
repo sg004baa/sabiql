@@ -20,6 +20,7 @@ impl ConnectionErrorKind {
         if stderr_lower.contains("command not found")
             || stderr_lower.contains("not found: psql")
             || stderr_lower.contains("not found: mysql")
+            || stderr_lower.contains("not found: sqlite3")
             || stderr_lower.contains("not recognized")
         {
             return Self::CliNotFound;
@@ -77,7 +78,9 @@ impl ConnectionErrorKind {
 
     pub fn hint(self) -> &'static str {
         match self {
-            Self::CliNotFound => "Install the database CLI (psql or mysql) and add it to PATH",
+            Self::CliNotFound => {
+                "Install the database CLI (psql, mysql, or sqlite3) and add it to PATH"
+            }
             Self::HostUnreachable => "Check the hostname",
             Self::AuthFailed => "Check username and password",
             Self::DatabaseNotFound => "Check database name",
@@ -171,6 +174,7 @@ mod tests {
         #[case("/bin/sh: psql: command not found")]
         #[case("zsh: command not found: psql")]
         #[case("not found: mysql")]
+        #[case("not found: sqlite3")]
         fn stderr_as_cli_not_found(#[case] stderr: &str) {
             assert_eq!(
                 ConnectionErrorKind::classify(stderr),
@@ -305,7 +309,7 @@ mod tests {
             assert_eq!(info.summary(), "Database CLI not found");
             assert_eq!(
                 info.hint(),
-                "Install the database CLI (psql or mysql) and add it to PATH"
+                "Install the database CLI (psql, mysql, or sqlite3) and add it to PATH"
             );
         }
     }

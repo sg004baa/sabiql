@@ -38,6 +38,7 @@ use sabiql_infra::adapters::{
 };
 use sabiql_infra::config::project_root::{find_project_root, get_project_name};
 use sabiql_infra::export::DotExporter;
+use sabiql_infra::file_walker::WalkdirFileWalker;
 use sabiql_ui::adapters::TuiAdapter;
 use sabiql_ui::tui::TuiRunner;
 
@@ -112,6 +113,7 @@ async fn main() -> Result<()> {
         .pg_service_entry_reader(Arc::clone(&pg_service_entry_reader))
         .clipboard(Arc::new(ArboardClipboard))
         .folder_opener(Arc::new(NativeFolderOpener))
+        .file_system_walker(Arc::new(WalkdirFileWalker::new()))
         .query_history_store(Arc::new(FileQueryHistoryStore::new()))
         .settings_store(Arc::clone(&settings_store) as _)
         .metadata_cache(metadata_cache.clone())

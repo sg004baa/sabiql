@@ -30,6 +30,11 @@ pub fn handle_connection_setup_keys(combo: KeyCombo, state: &AppState) -> Action
         return Action::ConnectionSetupSave;
     }
 
+    // Ctrl+F: open file picker (reducer no-ops unless SQLite + File field focused)
+    if ctrl_only && combo.key == Key::Char('f') {
+        return Action::OpenFilePicker;
+    }
+
     match combo.key {
         Key::Tab => Action::ConnectionSetupNextField,
         Key::BackTab => Action::ConnectionSetupPrevField,

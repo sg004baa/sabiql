@@ -207,6 +207,11 @@ pub fn char_to_byte_index(s: &str, char_idx: usize) -> usize {
 pub fn validate_field(state: &mut ConnectionSetupState, field: ConnectionField) {
     state.validation_errors.remove(&field);
 
+    // Hidden fields (e.g. Host/Port/User for SQLite) are never validated.
+    if !field.is_visible_for(state.database_type) {
+        return;
+    }
+
     match field {
         ConnectionField::Host => {
             if state.host.content().trim().is_empty() {
@@ -381,6 +386,62 @@ mod tests {
                     .validation_errors
                     .contains_key(&ConnectionField::Database)
             );
+        }
+
+        #[test]
+        fn sqlite_empty_database_sets_required_error() {
+            let mut state = ConnectionSetupState {
+                database_type: DatabaseType::SQLite,
+                ..Default::default()
+            };
+
+            validate_field(&mut state, ConnectionField::Database);
+
+            assert_eq!(
+                state.validation_errors.get(&ConnectionField::Database),
+                Some(&"Required".to_string())
+            );
+        }
+    }
+
+    mod validate_field_hidden_fields {
+        use super::*;
+        use crate::model::shared::text_input::TextInputState;
+        use rstest::rstest;
+
+        #[rstest]
+        #[case(ConnectionField::Host)]
+        #[case(ConnectionField::Port)]
+        #[case(ConnectionField::User)]
+        fn sqlite_hidden_fields_are_not_validated(#[case] field: ConnectionField) {
+            let mut state = ConnectionSetupState {
+                database_type: DatabaseType::SQLite,
+                ..Default::default()
+            };
+            state.host = TextInputState::default();
+            state.port = TextInputState::default();
+            state.user = TextInputState::default();
+
+            validate_field(&mut state, field);
+
+            assert!(!state.validation_errors.contains_key(&field));
+        }
+
+        #[test]
+        #[allow(
+            clippy::field_reassign_with_default,
+            reason = "intentional partial override of Default for clarity"
+        )]
+        fn switching_to_sqlite_clears_stale_hidden_field_error() {
+            let mut state = ConnectionSetupState::default();
+            state.host = TextInputState::default();
+            validate_field(&mut state, ConnectionField::Host);
+            assert!(state.validation_errors.contains_key(&ConnectionField::Host));
+
+            state.database_type = DatabaseType::SQLite;
+            validate_field(&mut state, ConnectionField::Host);
+
+            assert!(!state.validation_errors.contains_key(&ConnectionField::Host));
         }
     }
 

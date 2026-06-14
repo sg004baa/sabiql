@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What is sabiql
 
-A fast, driver-less TUI for browsing, querying, and editing PostgreSQL databases. It wraps the `psql` CLI (no Rust database drivers). MySQL support is being added using the same CLI-subprocess pattern with `mysql`.
+A fast, driver-less TUI for browsing, querying, and editing PostgreSQL databases. It wraps the `psql` CLI (no Rust database drivers). MySQL and SQLite are supported via the same CLI-subprocess pattern (`mysql` / `sqlite3`). SQLite connects through a `sqlite://<path>` pseudo-DSN (file path, no host/credentials).
 
 ## Build & Test Commands
 

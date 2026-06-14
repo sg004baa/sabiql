@@ -1,4 +1,5 @@
 mod error;
+mod file_picker;
 mod helpers;
 mod lifecycle;
 mod selector;
@@ -19,6 +20,7 @@ pub fn reduce_connection(
 ) -> Option<Vec<Effect>> {
     lifecycle::reduce(state, action, now, services)
         .or_else(|| setup::reduce(state, action, now))
+        .or_else(|| file_picker::reduce(state, action))
         .or_else(|| error::reduce(state, action, now))
         .or_else(|| selector::reduce(state, action, now))
 }

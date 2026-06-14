@@ -36,6 +36,8 @@ pub struct RenderOutput {
     pub er_picker_filter_visible_width: Option<usize>,
     pub query_history_picker_pane_height: Option<u16>,
     pub query_history_picker_filter_visible_width: Option<usize>,
+    pub file_picker_pane_height: Option<u16>,
+    pub file_picker_filter_visible_width: Option<usize>,
     pub jsonb_detail_editor_visible_rows: Option<usize>,
     pub confirm_preview_viewport_height: Option<u16>,
     pub confirm_preview_content_height: Option<u16>,

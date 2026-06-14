@@ -88,6 +88,7 @@ Open Settings with `Ctrl+K` to switch between Sabiql Dark and Light themes.
 ## Requirements
 
 - `psql` CLI (PostgreSQL client)
+- `sqlite3` CLI (optional, for SQLite connections)
 - Graphviz (optional, for ER diagrams): `brew install graphviz`
 
 ## Development
@@ -124,7 +125,7 @@ nix develop
 - [x] JSON/JSONB support (tree view, editing, validation)
 - [x] Theme switching (Sabiql Dark / Light)
 - [ ] Neovim integration (`sabiql.nvim`)
-- [ ] SQLite support
+- [x] SQLite support
 - [ ] Zero-config connection (env vars, `.pgpass`, URI auto-detect)
 - [ ] Google Cloud SQL / AlloyDB support
 - [x] MySQL support
