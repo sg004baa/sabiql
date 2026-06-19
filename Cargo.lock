@@ -2652,6 +2652,7 @@ dependencies = [
  "nucleo-matcher",
  "rstest",
  "sabiql-domain",
+ "sabiql-tui-kit",
  "serde",
  "serde_json",
  "tempfile",
@@ -2696,6 +2697,10 @@ dependencies = [
  "urlencoding",
  "walkdir",
 ]
+
+[[package]]
+name = "sabiql-tui-kit"
+version = "1.12.6"
 
 [[package]]
 name = "sabiql-ui"

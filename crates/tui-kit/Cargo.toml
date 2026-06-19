@@ -1,0 +1,10 @@
+[package]
+name = "sabiql-tui-kit"
+version.workspace = true
+edition.workspace = true
+description = "Shared TUI building blocks for sabiql"
+license.workspace = true
+repository.workspace = true
+
+[lib]
+path = "lib.rs"

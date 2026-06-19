@@ -32,6 +32,7 @@ urlencoding.workspace = true
 uuid.workspace = true
 dirs.workspace = true
 sabiql-domain.workspace = true
+sabiql-tui-kit.workspace = true
 
 [dev-dependencies]
 mockall.workspace = true

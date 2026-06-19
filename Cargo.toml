@@ -4,6 +4,7 @@ members = [
     "crates/domain",
     "crates/app",
     "crates/infra",
+    "crates/tui-kit",
     "crates/ui",
 ]
 resolver = "2"
@@ -18,6 +19,7 @@ repository = "https://github.com/sg004baa/sabiql"
 sabiql-domain = { path = "crates/domain", version = "1.12.0" }
 sabiql-app = { path = "crates/app", version = "1.12.0" }
 sabiql-infra = { path = "crates/infra", version = "1.12.0" }
+sabiql-tui-kit = { path = "crates/tui-kit", version = "1.12.0" }
 sabiql-ui = { path = "crates/ui", version = "1.12.0" }
 arboard = "3"
 async-trait = "0.1"
