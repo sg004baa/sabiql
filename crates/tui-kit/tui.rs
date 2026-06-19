@@ -17,7 +17,7 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::app::ports::inbound::InputEvent;
+use crate::input::InputEvent;
 
 pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 
@@ -87,7 +87,7 @@ impl TuiRunner {
                         match crossterm_event {
                             Some(Ok(evt)) => match evt {
                                 CrosstermEvent::Key(key) if key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat => {
-                                    InputEvent::Key(super::event::key_translator::translate(key))
+                                    InputEvent::Key(crate::event::key_translator::translate(key))
                                 }
                                 CrosstermEvent::Resize(x, y) => InputEvent::Resize(x, y),
                                 CrosstermEvent::Paste(text) => InputEvent::Paste(text),

@@ -2701,6 +2701,16 @@ dependencies = [
 [[package]]
 name = "sabiql-tui-kit"
 version = "1.12.6"
+dependencies = [
+ "color-eyre",
+ "crossterm",
+ "futures",
+ "ratatui",
+ "rstest",
+ "tokio",
+ "tokio-util",
+ "unicode-width",
+]
 
 [[package]]
 name = "sabiql-ui"
@@ -2714,6 +2724,7 @@ dependencies = [
  "rstest",
  "sabiql-app",
  "sabiql-domain",
+ "sabiql-tui-kit",
  "tokio",
  "tokio-util",
  "unicode-width",

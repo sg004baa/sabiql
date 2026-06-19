@@ -8,3 +8,18 @@ repository.workspace = true
 
 [lib]
 path = "lib.rs"
+
+[features]
+test-support = []
+
+[dependencies]
+color-eyre.workspace = true
+crossterm.workspace = true
+futures.workspace = true
+ratatui.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+unicode-width.workspace = true
+
+[dev-dependencies]
+rstest.workspace = true

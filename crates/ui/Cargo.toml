@@ -10,7 +10,7 @@ repository.workspace = true
 path = "lib.rs"
 
 [features]
-test-support = ["sabiql-app/test-support"]
+test-support = ["sabiql-app/test-support", "sabiql-tui-kit/test-support"]
 
 [dependencies]
 color-eyre.workspace = true
@@ -22,6 +22,7 @@ tokio-util.workspace = true
 unicode-width.workspace = true
 sabiql-app.workspace = true
 sabiql-domain.workspace = true
+sabiql-tui-kit.workspace = true
 
 [dev-dependencies]
 insta.workspace = true
