@@ -2699,6 +2699,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "sabiql-redis"
+version = "1.12.6"
+dependencies = [
+ "async-trait",
+ "clap",
+ "color-eyre",
+ "mockall",
+ "ratatui",
+ "sabiql-tui-kit",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "sabiql-tui-kit"
 version = "1.12.6"
 dependencies = [
