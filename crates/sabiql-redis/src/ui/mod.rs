@@ -1,28 +1,36 @@
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Cell, Paragraph};
 use sabiql_tui_kit::primitives::molecules::{StripedTableConfig, render_striped_table};
 use sabiql_tui_kit::theme::{DEFAULT_THEME, StatusTone};
 
-use crate::app::{AppState, ConnectionStatus};
+use crate::app::{AppState, ConnectionStatus, ValueState};
+use crate::domain::{RedisValue, redis_value_table};
 
 pub fn render(frame: &mut Frame<'_>, state: &AppState) {
     let area = frame.area();
-    let chunks = Layout::vertical([
+    let vertical = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(1),
         Constraint::Length(1),
     ])
     .split(area);
+    let body = Layout::horizontal([
+        Constraint::Percentage(38),
+        Constraint::Length(1),
+        Constraint::Min(20),
+    ])
+    .split(vertical[1]);
 
-    render_status(frame, chunks[0], state);
-    render_keys(frame, chunks[1], state);
-    render_footer(frame, chunks[2]);
+    render_status(frame, vertical[0], state);
+    render_keys(frame, body[0], state);
+    render_value_pane(frame, body[2], state);
+    render_footer(frame, vertical[2]);
 }
 
-fn render_status(frame: &mut Frame<'_>, area: ratatui::layout::Rect, state: &AppState) {
+fn render_status(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let theme = DEFAULT_THEME;
     let (text, style) = match &state.connection_status {
         ConnectionStatus::Disconnected => (
@@ -52,7 +60,7 @@ fn render_status(frame: &mut Frame<'_>, area: ratatui::layout::Rect, state: &App
     frame.render_widget(Paragraph::new(Line::from(text)).style(style), area);
 }
 
-fn render_keys(frame: &mut Frame<'_>, area: ratatui::layout::Rect, state: &AppState) {
+fn render_keys(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let theme = DEFAULT_THEME;
     let headers = ["key", "type"];
     let widths = [Constraint::Min(10), Constraint::Length(10)];
@@ -87,7 +95,91 @@ fn render_keys(frame: &mut Frame<'_>, area: ratatui::layout::Rect, state: &AppSt
     );
 }
 
-fn render_footer(frame: &mut Frame<'_>, area: ratatui::layout::Rect) {
+fn render_value_pane(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+    let chunks = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(area);
+    match &state.value_state {
+        ValueState::Empty => {
+            render_value_title(frame, chunks[0], "value | no key selected");
+            frame.render_widget(Paragraph::new("No key selected"), chunks[1]);
+        }
+        ValueState::Loading { key } => {
+            render_value_title(frame, chunks[0], &format!("value | {key} | loading"));
+            frame.render_widget(Paragraph::new("Loading..."), chunks[1]);
+        }
+        ValueState::Failed { key, message } => {
+            render_value_title(frame, chunks[0], &format!("value | {key} | failed"));
+            frame.render_widget(
+                Paragraph::new(message.clone())
+                    .style(DEFAULT_THEME.status_style(StatusTone::Error)),
+                chunks[1],
+            );
+        }
+        ValueState::Loaded {
+            key,
+            kind,
+            ttl,
+            value,
+        } => {
+            render_value_title(
+                frame,
+                chunks[0],
+                &format!("value | {key} | type {kind} | {}", ttl_label(*ttl)),
+            );
+            render_value_table(frame, chunks[1], value);
+        }
+    }
+}
+
+fn render_value_title(frame: &mut Frame<'_>, area: Rect, title: &str) {
+    let theme = DEFAULT_THEME;
+    frame.render_widget(
+        Paragraph::new(Line::from(title.to_string()))
+            .style(Style::default().fg(theme.semantic.text.secondary)),
+        area,
+    );
+}
+
+fn render_value_table(frame: &mut Frame<'_>, area: Rect, value: &RedisValue) {
+    let theme = DEFAULT_THEME;
+    let table = redis_value_table(value);
+    let widths = value_widths(table.headers.len());
+
+    render_striped_table(
+        frame,
+        area,
+        &StripedTableConfig {
+            headers: &table.headers,
+            widths: &widths,
+            total_items: table.rows.len(),
+            empty_message: "No value rows",
+        },
+        0,
+        &theme,
+        |index| {
+            table.rows[index]
+                .iter()
+                .map(|value| Cell::from(value.clone()))
+                .collect()
+        },
+    );
+}
+
+fn value_widths(column_count: usize) -> Vec<Constraint> {
+    match column_count {
+        0 | 1 => vec![Constraint::Min(10)],
+        2 => vec![Constraint::Percentage(35), Constraint::Percentage(65)],
+        _ => vec![Constraint::Min(10); column_count],
+    }
+}
+
+fn ttl_label(ttl: Option<u64>) -> String {
+    match ttl {
+        Some(seconds) => format!("ttl {seconds}s"),
+        None => "ttl none".to_string(),
+    }
+}
+
+fn render_footer(frame: &mut Frame<'_>, area: Rect) {
     let theme = DEFAULT_THEME;
     frame.render_widget(
         Paragraph::new(Line::from("j/k or arrows move | q quit"))

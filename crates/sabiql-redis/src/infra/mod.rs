@@ -4,7 +4,11 @@ use async_trait::async_trait;
 use tokio::process::Command;
 use tokio::time::timeout;
 
-use crate::domain::RedisKey;
+use crate::domain::{RedisKey, RedisKind, RedisValue};
+
+// Mirrors crates/app/model/browse/query_execution.rs::PREVIEW_PAGE_SIZE
+// without depending on the RDB app crate.
+pub const REDIS_VALUE_PREVIEW_LIMIT: usize = 500;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RedisCliError {
@@ -24,6 +28,8 @@ pub trait RedisCli: Send + Sync {
     async fn ping(&self) -> Result<(), RedisCliError>;
     async fn dbsize(&self) -> Result<usize, RedisCliError>;
     async fn scan_keys(&self) -> Result<Vec<RedisKey>, RedisCliError>;
+    async fn key_type_and_ttl(&self, key: &str) -> Result<(RedisKind, Option<u64>), RedisCliError>;
+    async fn fetch_value(&self, key: &str, kind: RedisKind) -> Result<RedisValue, RedisCliError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -122,6 +128,168 @@ pub fn scan_is_complete(page: &ScanPage) -> bool {
     page.next_cursor == "0"
 }
 
+pub fn parse_type_reply(stdout: &str) -> Result<RedisKind, RedisCliError> {
+    match stdout.trim() {
+        "string" => Ok(RedisKind::String),
+        "list" => Ok(RedisKind::List),
+        "set" => Ok(RedisKind::Set),
+        "hash" => Ok(RedisKind::Hash),
+        "zset" => Ok(RedisKind::ZSet),
+        "stream" => Ok(RedisKind::Stream),
+        "none" => Ok(RedisKind::Unknown),
+        other => Err(RedisCliError::Parse(format!(
+            "invalid TYPE reply: {other:?}"
+        ))),
+    }
+}
+
+pub fn parse_ttl_reply(stdout: &str) -> Result<Option<u64>, RedisCliError> {
+    let reply = stdout.trim();
+    let ttl = reply
+        .parse::<i64>()
+        .map_err(|_| RedisCliError::Parse(format!("invalid TTL reply: {reply:?}")))?;
+    if ttl < 0 {
+        Ok(None)
+    } else {
+        Ok(Some(ttl as u64))
+    }
+}
+
+pub fn parse_string_value(stdout: &str) -> Result<RedisValue, RedisCliError> {
+    Ok(RedisValue::String(trim_command_newline(stdout).to_string()))
+}
+
+pub fn parse_list_value(stdout: &str, cap: usize) -> Result<RedisValue, RedisCliError> {
+    Ok(RedisValue::List(capped_lines(stdout, cap)))
+}
+
+pub fn parse_set_value(stdout: &str, cap: usize) -> Result<RedisValue, RedisCliError> {
+    Ok(RedisValue::Set(capped_lines(stdout, cap)))
+}
+
+pub fn parse_hash_value(stdout: &str, cap: usize) -> Result<RedisValue, RedisCliError> {
+    parse_line_pairs(stdout, cap, "hash").map(RedisValue::Hash)
+}
+
+pub fn parse_zset_value(stdout: &str, cap: usize) -> Result<RedisValue, RedisCliError> {
+    parse_line_pairs(stdout, cap, "zset").map(RedisValue::ZSet)
+}
+
+pub fn parse_stream_value(stdout: &str, cap: usize) -> Result<RedisValue, RedisCliError> {
+    let mut rows = Vec::new();
+    let mut current_id: Option<String> = None;
+    let mut current_fields: Vec<(String, String)> = Vec::new();
+    let mut pending_field: Option<String> = None;
+
+    for line in stdout.lines().map(clean_line) {
+        if is_stream_id(&line) {
+            flush_stream_row(&mut rows, &mut current_id, &mut current_fields);
+            if rows.len() >= cap {
+                break;
+            }
+            current_id = Some(line);
+            pending_field = None;
+        } else if current_id.is_none() {
+            return Err(RedisCliError::Parse(format!(
+                "XRANGE reply started with non-id line: {line:?}"
+            )));
+        } else if let Some(field) = pending_field.take() {
+            current_fields.push((field, line));
+        } else {
+            pending_field = Some(line);
+        }
+    }
+
+    if let Some(field) = pending_field.take() {
+        current_fields.push((field, String::new()));
+    }
+    flush_stream_row(&mut rows, &mut current_id, &mut current_fields);
+    rows.truncate(cap);
+
+    Ok(RedisValue::Stream(rows))
+}
+
+fn flush_stream_row(
+    rows: &mut Vec<(String, String)>,
+    current_id: &mut Option<String>,
+    current_fields: &mut Vec<(String, String)>,
+) {
+    if let Some(id) = current_id.take() {
+        let fields = current_fields
+            .drain(..)
+            .map(|(field, value)| {
+                if value.is_empty() {
+                    field
+                } else {
+                    format!("{field}={value}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        rows.push((id, fields));
+    }
+}
+
+fn is_stream_id(line: &str) -> bool {
+    let Some((ms, seq)) = line.split_once('-') else {
+        return false;
+    };
+    !ms.is_empty()
+        && !seq.is_empty()
+        && ms.bytes().all(|b| b.is_ascii_digit())
+        && seq.bytes().all(|b| b.is_ascii_digit())
+}
+
+fn trim_command_newline(stdout: &str) -> &str {
+    stdout
+        .strip_suffix("\r\n")
+        .or_else(|| stdout.strip_suffix('\n'))
+        .unwrap_or(stdout)
+}
+
+fn clean_line(line: &str) -> String {
+    line.trim_end_matches('\r').to_string()
+}
+
+fn capped_lines(stdout: &str, cap: usize) -> Vec<String> {
+    stdout.lines().take(cap).map(clean_line).collect()
+}
+
+fn parse_line_pairs(
+    stdout: &str,
+    cap: usize,
+    label: &str,
+) -> Result<Vec<(String, String)>, RedisCliError> {
+    // Why not: redis-cli --raw line-pairing breaks when fields or values contain
+    // embedded newlines. That is an accepted driver-less subprocess tradeoff for
+    // this phase, similar to the RDB CSV parsing constraints.
+    let lines = capped_lines(stdout, cap.saturating_mul(2));
+    if !lines.len().is_multiple_of(2) {
+        return Err(RedisCliError::Parse(format!(
+            "{label} reply had an odd number of lines"
+        )));
+    }
+
+    Ok(lines
+        .chunks_exact(2)
+        .map(|chunk| (chunk[0].clone(), chunk[1].clone()))
+        .collect())
+}
+
+fn scan_values_body(stdout: &str) -> Result<String, RedisCliError> {
+    let mut lines = stdout.lines();
+    let cursor = lines
+        .next()
+        .map(str::trim)
+        .ok_or_else(|| RedisCliError::Parse("SCAN-family reply was empty".to_string()))?;
+    if cursor.is_empty() || !cursor.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(RedisCliError::Parse(format!(
+            "invalid SCAN-family cursor: {cursor:?}"
+        )));
+    }
+    Ok(lines.collect::<Vec<_>>().join("\n"))
+}
+
 #[derive(Debug, Clone)]
 pub struct RedisCliSubprocess {
     dsn: RedisDsn,
@@ -218,6 +386,95 @@ impl RedisCli for RedisCliSubprocess {
 
         Ok(keys)
     }
+
+    async fn key_type_and_ttl(&self, key: &str) -> Result<(RedisKind, Option<u64>), RedisCliError> {
+        let kind = parse_type_reply(
+            &self
+                .run_command(&["TYPE".to_string(), key.to_string()])
+                .await?,
+        )?;
+        let ttl = parse_ttl_reply(
+            &self
+                .run_command(&["TTL".to_string(), key.to_string()])
+                .await?,
+        )?;
+        Ok((kind, ttl))
+    }
+
+    async fn fetch_value(&self, key: &str, kind: RedisKind) -> Result<RedisValue, RedisCliError> {
+        let cap = REDIS_VALUE_PREVIEW_LIMIT;
+        match kind {
+            RedisKind::String => {
+                let stdout = self
+                    .run_command(&["GET".to_string(), key.to_string()])
+                    .await?;
+                parse_string_value(&stdout)
+            }
+            RedisKind::List => {
+                let stdout = self
+                    .run_command(&[
+                        "LRANGE".to_string(),
+                        key.to_string(),
+                        "0".to_string(),
+                        cap.saturating_sub(1).to_string(),
+                    ])
+                    .await?;
+                parse_list_value(&stdout, cap)
+            }
+            RedisKind::Set => {
+                let stdout = self
+                    .run_command(&[
+                        "SSCAN".to_string(),
+                        key.to_string(),
+                        "0".to_string(),
+                        "COUNT".to_string(),
+                        cap.to_string(),
+                    ])
+                    .await?;
+                parse_set_value(&scan_values_body(&stdout)?, cap)
+            }
+            RedisKind::Hash => {
+                let stdout = self
+                    .run_command(&[
+                        "HSCAN".to_string(),
+                        key.to_string(),
+                        "0".to_string(),
+                        "COUNT".to_string(),
+                        cap.to_string(),
+                    ])
+                    .await?;
+                parse_hash_value(&scan_values_body(&stdout)?, cap)
+            }
+            RedisKind::ZSet => {
+                let stdout = self
+                    .run_command(&[
+                        "ZRANGE".to_string(),
+                        key.to_string(),
+                        "0".to_string(),
+                        cap.saturating_sub(1).to_string(),
+                        "WITHSCORES".to_string(),
+                    ])
+                    .await?;
+                parse_zset_value(&stdout, cap)
+            }
+            RedisKind::Stream => {
+                let stdout = self
+                    .run_command(&[
+                        "XRANGE".to_string(),
+                        key.to_string(),
+                        "-".to_string(),
+                        "+".to_string(),
+                        "COUNT".to_string(),
+                        cap.to_string(),
+                    ])
+                    .await?;
+                parse_stream_value(&stdout, cap)
+            }
+            RedisKind::Unknown => Err(RedisCliError::Parse(format!(
+                "unsupported Redis key type for {key:?}"
+            ))),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -290,6 +547,89 @@ mod tests {
         assert_eq!(page.next_cursor, "0");
         assert_eq!(page.keys, vec!["settings".to_string()]);
         assert!(scan_is_complete(&page));
+    }
+
+    #[test]
+    fn parses_type_replies() {
+        assert_eq!(parse_type_reply("string\n"), Ok(RedisKind::String));
+        assert_eq!(parse_type_reply("list\n"), Ok(RedisKind::List));
+        assert_eq!(parse_type_reply("set\n"), Ok(RedisKind::Set));
+        assert_eq!(parse_type_reply("hash\n"), Ok(RedisKind::Hash));
+        assert_eq!(parse_type_reply("zset\n"), Ok(RedisKind::ZSet));
+        assert_eq!(parse_type_reply("stream\n"), Ok(RedisKind::Stream));
+        assert_eq!(parse_type_reply("none\n"), Ok(RedisKind::Unknown));
+    }
+
+    #[test]
+    fn parses_ttl_replies() {
+        assert_eq!(parse_ttl_reply("-1\n"), Ok(None));
+        assert_eq!(parse_ttl_reply("-2\n"), Ok(None));
+        assert_eq!(parse_ttl_reply("120\n"), Ok(Some(120)));
+    }
+
+    #[test]
+    fn parses_string_value() {
+        assert_eq!(
+            parse_string_value("hello\n"),
+            Ok(RedisValue::String("hello".to_string()))
+        );
+    }
+
+    #[test]
+    fn parses_list_value_with_cap() {
+        assert_eq!(
+            parse_list_value("a\nb\nc\n", 2),
+            Ok(RedisValue::List(vec!["a".to_string(), "b".to_string()]))
+        );
+    }
+
+    #[test]
+    fn parses_set_value_with_cap() {
+        assert_eq!(
+            parse_set_value("a\nb\nc\n", 2),
+            Ok(RedisValue::Set(vec!["a".to_string(), "b".to_string()]))
+        );
+    }
+
+    #[test]
+    fn parses_hash_value_from_flat_field_value_lines() {
+        assert_eq!(
+            parse_hash_value("field1\nvalue1\nfield2\nvalue2\n", 500),
+            Ok(RedisValue::Hash(vec![
+                ("field1".to_string(), "value1".to_string()),
+                ("field2".to_string(), "value2".to_string()),
+            ]))
+        );
+    }
+
+    #[test]
+    fn rejects_odd_hash_field_value_lines() {
+        assert!(matches!(
+            parse_hash_value("field1\nvalue1\nfield2\n", 500),
+            Err(RedisCliError::Parse(_))
+        ));
+    }
+
+    #[test]
+    fn parses_zset_value_from_flat_member_score_lines() {
+        assert_eq!(
+            parse_zset_value("member1\n1\nmember2\n2.5\n", 500),
+            Ok(RedisValue::ZSet(vec![
+                ("member1".to_string(), "1".to_string()),
+                ("member2".to_string(), "2.5".to_string()),
+            ]))
+        );
+    }
+
+    #[test]
+    fn parses_stream_value_by_detecting_entry_ids() {
+        assert_eq!(
+            parse_stream_value("1-0\nname\nalice\nrole\nadmin\n2-0\nstatus\nactive\n", 500),
+            Ok(RedisValue::Stream(vec![
+                ("1-0".to_string(), "name=alice, role=admin".to_string()),
+                ("2-0".to_string(), "status=active".to_string()),
+            ]))
+        );
     }
 
     #[tokio::test]
