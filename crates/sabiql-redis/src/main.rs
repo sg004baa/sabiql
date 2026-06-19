@@ -48,7 +48,7 @@ async fn main() -> Result<()> {
         loop {
             tokio::select! {
                 Some(event) = tui.next_event() => {
-                    if let Some(action) = handle_event(event) {
+                    if let Some(action) = handle_event(event, &state) {
                         process_action(action, &mut state, &mut tui, &effect_runner).await?;
                     }
                 }
@@ -85,9 +85,13 @@ async fn process_action(
     Ok(())
 }
 
-fn handle_event(event: InputEvent) -> Option<Action> {
+fn handle_event(event: InputEvent, state: &AppState) -> Option<Action> {
     match event {
+        InputEvent::Key(combo) if state.command_modal.is_open => handle_modal_key(combo),
         InputEvent::Resize(width, height) => Some(Action::Resize(width, height)),
+        InputEvent::Key(combo) if combo == KeyCombo::plain(Key::Char(':')) => {
+            Some(Action::OpenCommandModal)
+        }
         InputEvent::Key(combo) if combo == KeyCombo::plain(Key::Char('q')) => Some(Action::Quit),
         InputEvent::Key(combo) if combo == KeyCombo::ctrl(Key::Char('c')) => Some(Action::Quit),
         InputEvent::Key(combo)
@@ -101,5 +105,77 @@ fn handle_event(event: InputEvent) -> Option<Action> {
             Some(Action::SelectPrev)
         }
         InputEvent::Init | InputEvent::Paste(_) | InputEvent::Key(_) => None,
+    }
+}
+
+fn handle_modal_key(combo: KeyCombo) -> Option<Action> {
+    match combo {
+        combo if combo == KeyCombo::plain(Key::Enter) => Some(Action::SubmitCommand),
+        combo if combo == KeyCombo::plain(Key::Esc) => Some(Action::CloseCommandModal),
+        combo if combo == KeyCombo::plain(Key::Backspace) => Some(Action::CommandBackspace),
+        KeyCombo {
+            key: Key::Char(c), ..
+        } => Some(Action::CommandInput(c)),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sabiql_tui_kit::input::Modifiers;
+
+    #[test]
+    fn colon_opens_command_modal_when_closed() {
+        let state = AppState::new("redis://localhost");
+
+        let action = handle_event(InputEvent::Key(KeyCombo::plain(Key::Char(':'))), &state);
+
+        assert_eq!(action, Some(Action::OpenCommandModal));
+    }
+
+    #[test]
+    fn modal_captures_q_as_command_input_instead_of_quit() {
+        let mut state = AppState::new("redis://localhost");
+        state.command_modal.is_open = true;
+
+        let action = handle_event(InputEvent::Key(KeyCombo::plain(Key::Char('q'))), &state);
+
+        assert_eq!(action, Some(Action::CommandInput('q')));
+    }
+
+    #[test]
+    fn modal_routes_enter_backspace_and_escape() {
+        let mut state = AppState::new("redis://localhost");
+        state.command_modal.is_open = true;
+
+        assert_eq!(
+            handle_event(InputEvent::Key(KeyCombo::plain(Key::Enter)), &state),
+            Some(Action::SubmitCommand)
+        );
+        assert_eq!(
+            handle_event(InputEvent::Key(KeyCombo::plain(Key::Backspace)), &state),
+            Some(Action::CommandBackspace)
+        );
+        assert_eq!(
+            handle_event(InputEvent::Key(KeyCombo::plain(Key::Esc)), &state),
+            Some(Action::CloseCommandModal)
+        );
+    }
+
+    #[test]
+    fn modal_captures_modified_char_input() {
+        let mut state = AppState::new("redis://localhost");
+        state.command_modal.is_open = true;
+
+        let action = handle_event(
+            InputEvent::Key(KeyCombo {
+                key: Key::Char(' '),
+                modifiers: Modifiers::SHIFT,
+            }),
+            &state,
+        );
+
+        assert_eq!(action, Some(Action::CommandInput(' ')));
     }
 }

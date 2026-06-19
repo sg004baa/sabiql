@@ -33,6 +33,31 @@ pub enum ValueState {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandStatus {
+    Idle,
+    Running,
+    Success(String),
+    Error(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandModalState {
+    pub is_open: bool,
+    pub input: String,
+    pub status: CommandStatus,
+}
+
+impl CommandModalState {
+    fn new() -> Self {
+        Self {
+            is_open: false,
+            input: String::new(),
+            status: CommandStatus::Idle,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AppState {
     pub dsn: String,
@@ -43,6 +68,7 @@ pub struct AppState {
     pub table_visible_rows: usize,
     pub dbsize: Option<usize>,
     pub value_state: ValueState,
+    pub command_modal: CommandModalState,
     pub should_quit: bool,
 }
 
@@ -57,6 +83,7 @@ impl AppState {
             table_visible_rows: DEFAULT_TABLE_VISIBLE_ROWS,
             dbsize: None,
             value_state: ValueState::Empty,
+            command_modal: CommandModalState::new(),
             should_quit: false,
         }
     }
@@ -74,6 +101,17 @@ pub enum Action {
     SelectPrev,
     Quit,
     Resize(u16, u16),
+    OpenCommandModal,
+    CloseCommandModal,
+    CommandInput(char),
+    CommandBackspace,
+    SubmitCommand,
+    CommandSucceeded {
+        output: String,
+    },
+    CommandFailed {
+        message: String,
+    },
     ValueLoaded {
         key: String,
         kind: RedisKind,
@@ -90,6 +128,7 @@ pub enum Action {
 pub enum Effect {
     Connect { dsn: String },
     FetchValue { key: String },
+    ExecuteCommand { command: String },
 }
 
 pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
@@ -150,6 +189,56 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
         Action::Resize(_, height) => {
             state.table_visible_rows = table_visible_rows_for_height(height);
             clamp_selection_and_scroll(state);
+            Vec::new()
+        }
+        Action::OpenCommandModal => {
+            state.command_modal.is_open = true;
+            state.command_modal.input.clear();
+            state.command_modal.status = CommandStatus::Idle;
+            Vec::new()
+        }
+        Action::CloseCommandModal => {
+            state.command_modal.is_open = false;
+            Vec::new()
+        }
+        Action::CommandInput(ch) => {
+            if state.command_modal.is_open
+                && !matches!(state.command_modal.status, CommandStatus::Running)
+            {
+                state.command_modal.input.push(ch);
+            }
+            Vec::new()
+        }
+        Action::CommandBackspace => {
+            if state.command_modal.is_open
+                && !matches!(state.command_modal.status, CommandStatus::Running)
+            {
+                state.command_modal.input.pop();
+            }
+            Vec::new()
+        }
+        Action::SubmitCommand => {
+            if !state.command_modal.is_open {
+                return Vec::new();
+            }
+            let command = state.command_modal.input.trim().to_string();
+            if command.is_empty() {
+                state.command_modal.status =
+                    CommandStatus::Error("Enter a Redis command.".to_string());
+                return Vec::new();
+            }
+            state.command_modal.status = CommandStatus::Running;
+            vec![Effect::ExecuteCommand { command }]
+        }
+        Action::CommandSucceeded { output } => {
+            state.command_modal.input.clear();
+            state.command_modal.status = CommandStatus::Success(output);
+            vec![Effect::Connect {
+                dsn: state.dsn.clone(),
+            }]
+        }
+        Action::CommandFailed { message } => {
+            state.command_modal.status = CommandStatus::Error(message);
             Vec::new()
         }
         Action::ValueLoaded {
@@ -265,6 +354,15 @@ impl EffectRunner {
                         },
                         Err(e) => Action::ValueFetchFailed {
                             key,
+                            message: e.to_string(),
+                        },
+                    };
+                    let _ = self.action_tx.send(action).await;
+                }
+                Effect::ExecuteCommand { command } => {
+                    let action = match self.cli.execute_command(&command).await {
+                        Ok(output) => Action::CommandSucceeded { output },
+                        Err(e) => Action::CommandFailed {
                             message: e.to_string(),
                         },
                     };
@@ -527,6 +625,105 @@ mod tests {
                 }
             );
         }
+
+        #[test]
+        fn command_modal_open_input_backspace_and_close_updates_state_only() {
+            let mut state = AppState::new("redis://localhost");
+
+            assert!(reduce(&mut state, Action::OpenCommandModal).is_empty());
+            assert!(state.command_modal.is_open);
+            assert_eq!(state.command_modal.input, "");
+            assert_eq!(state.command_modal.status, CommandStatus::Idle);
+
+            assert!(reduce(&mut state, Action::CommandInput('s')).is_empty());
+            assert!(reduce(&mut state, Action::CommandInput('e')).is_empty());
+            assert!(reduce(&mut state, Action::CommandInput('t')).is_empty());
+            assert_eq!(state.command_modal.input, "set");
+
+            assert!(reduce(&mut state, Action::CommandBackspace).is_empty());
+            assert_eq!(state.command_modal.input, "se");
+
+            assert!(reduce(&mut state, Action::CloseCommandModal).is_empty());
+            assert!(!state.command_modal.is_open);
+        }
+
+        #[test]
+        fn submit_command_emits_execute_command_and_sets_running() {
+            let mut state = AppState::new("redis://localhost");
+            state.command_modal.is_open = true;
+            state.command_modal.input = " set k v ".to_string();
+
+            let effects = reduce(&mut state, Action::SubmitCommand);
+
+            assert_eq!(
+                effects,
+                vec![Effect::ExecuteCommand {
+                    command: "set k v".to_string(),
+                }]
+            );
+            assert_eq!(state.command_modal.status, CommandStatus::Running);
+        }
+
+        #[test]
+        fn submit_empty_command_stores_error_without_effect() {
+            let mut state = AppState::new("redis://localhost");
+            state.command_modal.is_open = true;
+            state.command_modal.input = "   ".to_string();
+
+            let effects = reduce(&mut state, Action::SubmitCommand);
+
+            assert!(effects.is_empty());
+            assert_eq!(
+                state.command_modal.status,
+                CommandStatus::Error("Enter a Redis command.".to_string())
+            );
+        }
+
+        #[test]
+        fn successful_command_stores_output_and_refreshes_keys() {
+            let mut state = AppState::new("redis://localhost");
+            state.command_modal.is_open = true;
+            state.command_modal.input = "set k v".to_string();
+            state.command_modal.status = CommandStatus::Running;
+
+            let effects = reduce(
+                &mut state,
+                Action::CommandSucceeded {
+                    output: "OK\n".to_string(),
+                },
+            );
+
+            assert_eq!(state.command_modal.input, "");
+            assert_eq!(
+                state.command_modal.status,
+                CommandStatus::Success("OK\n".to_string())
+            );
+            assert_eq!(
+                effects,
+                vec![Effect::Connect {
+                    dsn: "redis://localhost".to_string(),
+                }]
+            );
+        }
+
+        #[test]
+        fn failed_command_stores_error_without_refresh() {
+            let mut state = AppState::new("redis://localhost");
+            state.command_modal.status = CommandStatus::Running;
+
+            let effects = reduce(
+                &mut state,
+                Action::CommandFailed {
+                    message: "ERR unknown command".to_string(),
+                },
+            );
+
+            assert!(effects.is_empty());
+            assert_eq!(
+                state.command_modal.status,
+                CommandStatus::Error("ERR unknown command".to_string())
+            );
+        }
     }
 
     mod effect_runner {
@@ -657,6 +854,65 @@ mod tests {
                 Action::ValueFetchFailed {
                     key: "gone".to_string(),
                     message: "redis-cli failed: missing".to_string(),
+                }
+            );
+        }
+
+        #[tokio::test]
+        async fn execute_command_effect_dispatches_success() {
+            let mut cli = MockRedisCli::new();
+            cli.expect_execute_command()
+                .once()
+                .withf(|command| command == "set k v")
+                .returning(|_| Ok("OK\n".to_string()));
+
+            let (tx, mut rx) = mpsc::channel(4);
+            let runner = EffectRunner::new(Arc::new(cli), tx);
+
+            runner
+                .run(vec![Effect::ExecuteCommand {
+                    command: "set k v".to_string(),
+                }])
+                .await;
+
+            let action = tokio::time::timeout(Duration::from_millis(500), rx.recv())
+                .await
+                .expect("action timeout")
+                .expect("channel closed");
+            assert_eq!(
+                action,
+                Action::CommandSucceeded {
+                    output: "OK\n".to_string(),
+                }
+            );
+        }
+
+        #[tokio::test]
+        async fn execute_command_effect_dispatches_failure() {
+            let mut cli = MockRedisCli::new();
+            cli.expect_execute_command().once().returning(|_| {
+                Err(crate::infra::RedisCliError::CommandDenied(
+                    "DEL is blocked".to_string(),
+                ))
+            });
+
+            let (tx, mut rx) = mpsc::channel(4);
+            let runner = EffectRunner::new(Arc::new(cli), tx);
+
+            runner
+                .run(vec![Effect::ExecuteCommand {
+                    command: "DEL key".to_string(),
+                }])
+                .await;
+
+            let action = tokio::time::timeout(Duration::from_millis(500), rx.recv())
+                .await
+                .expect("action timeout")
+                .expect("channel closed");
+            assert_eq!(
+                action,
+                Action::CommandFailed {
+                    message: "DEL is blocked".to_string(),
                 }
             );
         }

@@ -1,12 +1,15 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::text::Line;
-use ratatui::widgets::{Cell, Paragraph};
-use sabiql_tui_kit::primitives::molecules::{StripedTableConfig, render_striped_table};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Cell, Paragraph, Wrap};
+use sabiql_tui_kit::primitives::atoms::text_cursor_spans;
+use sabiql_tui_kit::primitives::molecules::{
+    StripedTableConfig, render_modal, render_striped_table,
+};
 use sabiql_tui_kit::theme::{DEFAULT_THEME, StatusTone};
 
-use crate::app::{AppState, ConnectionStatus, ValueState};
+use crate::app::{AppState, CommandStatus, ConnectionStatus, ValueState};
 use crate::domain::{RedisValue, redis_value_table};
 
 pub fn render(frame: &mut Frame<'_>, state: &AppState) {
@@ -28,6 +31,9 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
     render_keys(frame, body[0], state);
     render_value_pane(frame, body[2], state);
     render_footer(frame, vertical[2]);
+    if state.command_modal.is_open {
+        render_command_modal(frame, state);
+    }
 }
 
 fn render_status(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
@@ -182,8 +188,88 @@ fn ttl_label(ttl: Option<u64>) -> String {
 fn render_footer(frame: &mut Frame<'_>, area: Rect) {
     let theme = DEFAULT_THEME;
     frame.render_widget(
-        Paragraph::new(Line::from("j/k or arrows move | q quit"))
+        Paragraph::new(Line::from("j/k or arrows move | : command | q quit"))
             .style(Style::default().fg(theme.semantic.text.muted)),
+        area,
+    );
+}
+
+fn render_command_modal(frame: &mut Frame<'_>, state: &AppState) {
+    let theme = DEFAULT_THEME;
+    let (_, inner) = render_modal(
+        frame,
+        Constraint::Percentage(80),
+        Constraint::Percentage(45),
+        "Redis Command",
+        " Enter run | Esc close ",
+        &theme,
+    );
+    let chunks = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(1),
+    ])
+    .split(inner);
+
+    render_command_input(frame, chunks[0], state);
+    render_command_status(frame, chunks[1], state);
+    render_command_output(frame, chunks[2], state);
+}
+
+fn render_command_input(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+    let theme = DEFAULT_THEME;
+    let prompt = "> ";
+    let visible_width = area
+        .width
+        .saturating_sub(prompt.len() as u16)
+        .saturating_sub(1) as usize;
+    let cursor_spans = text_cursor_spans(
+        &state.command_modal.input,
+        state.command_modal.input.chars().count(),
+        0,
+        visible_width,
+        &theme,
+    );
+    let mut spans = vec![Span::styled(
+        prompt,
+        Style::default().fg(theme.semantic.text.accent),
+    )];
+    spans.extend(cursor_spans);
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+fn render_command_status(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+    let theme = DEFAULT_THEME;
+    let (text, style) = match &state.command_modal.status {
+        CommandStatus::Idle => (
+            "Blocked: FLUSHALL, FLUSHDB, DEL, UNLINK".to_string(),
+            Style::default().fg(theme.semantic.text.muted),
+        ),
+        CommandStatus::Running => (
+            "Running...".to_string(),
+            Style::default().fg(theme.semantic.status.pending),
+        ),
+        CommandStatus::Success(_) => ("OK".to_string(), theme.status_style(StatusTone::Success)),
+        CommandStatus::Error(_) => ("Error".to_string(), theme.status_style(StatusTone::Error)),
+    };
+    frame.render_widget(Paragraph::new(Line::from(text)).style(style), area);
+}
+
+fn render_command_output(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+    let theme = DEFAULT_THEME;
+    let (text, style) = match &state.command_modal.status {
+        CommandStatus::Idle | CommandStatus::Running => (
+            "Output appears here after a command runs.".to_string(),
+            Style::default().fg(theme.semantic.text.secondary),
+        ),
+        CommandStatus::Success(output) => (
+            output.clone(),
+            Style::default().fg(theme.semantic.text.primary),
+        ),
+        CommandStatus::Error(message) => (message.clone(), theme.status_style(StatusTone::Error)),
+    };
+    frame.render_widget(
+        Paragraph::new(text).style(style).wrap(Wrap { trim: false }),
         area,
     );
 }

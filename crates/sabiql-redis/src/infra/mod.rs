@@ -14,6 +14,8 @@ pub const REDIS_VALUE_PREVIEW_LIMIT: usize = 500;
 pub enum RedisCliError {
     #[error("redis-cli not found: {0}")]
     CommandNotFound(String),
+    #[error("{0}")]
+    CommandDenied(String),
     #[error("redis-cli failed: {0}")]
     CommandFailed(String),
     #[error("redis-cli timed out: {0}")]
@@ -30,6 +32,7 @@ pub trait RedisCli: Send + Sync {
     async fn scan_keys(&self) -> Result<Vec<RedisKey>, RedisCliError>;
     async fn key_type_and_ttl(&self, key: &str) -> Result<(RedisKind, Option<u64>), RedisCliError>;
     async fn fetch_value(&self, key: &str, kind: RedisKind) -> Result<RedisValue, RedisCliError>;
+    async fn execute_command(&self, command: &str) -> Result<String, RedisCliError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -126,6 +129,31 @@ pub fn parse_scan_page(stdout: &str) -> Result<ScanPage, RedisCliError> {
 
 pub fn scan_is_complete(page: &ScanPage) -> bool {
     page.next_cursor == "0"
+}
+
+pub fn ensure_command_allowed(command: &str) -> Result<(), RedisCliError> {
+    let Some(first_token) = command.split_whitespace().next() else {
+        return Err(RedisCliError::CommandDenied(
+            "Enter a Redis command.".to_string(),
+        ));
+    };
+
+    let upper = first_token.to_ascii_uppercase();
+    match upper.as_str() {
+        "FLUSHALL" | "FLUSHDB" | "DEL" | "UNLINK" => Err(RedisCliError::CommandDenied(format!(
+            "{upper} is blocked by the destructive-command guard"
+        ))),
+        _ => Ok(()),
+    }
+}
+
+fn command_args(command: &str) -> Vec<String> {
+    // Whitespace splitting is intentionally simple for 2c. Quoted values with
+    // spaces need a later parser slice.
+    command
+        .split_whitespace()
+        .map(ToString::to_string)
+        .collect()
 }
 
 pub fn parse_type_reply(stdout: &str) -> Result<RedisKind, RedisCliError> {
@@ -475,6 +503,11 @@ impl RedisCli for RedisCliSubprocess {
             ))),
         }
     }
+
+    async fn execute_command(&self, command: &str) -> Result<String, RedisCliError> {
+        ensure_command_allowed(command)?;
+        self.run_command(&command_args(command)).await
+    }
 }
 
 #[cfg(test)]
@@ -630,6 +663,47 @@ mod tests {
                 ("2-0".to_string(), "status=active".to_string()),
             ]))
         );
+    }
+
+    #[test]
+    fn command_guard_rejects_required_destructive_commands() {
+        for command in ["flushall", "  FLUSHDB  ", "Del key1", "\tDeL\tkey1\n"] {
+            assert!(
+                matches!(
+                    ensure_command_allowed(command),
+                    Err(RedisCliError::CommandDenied(_))
+                ),
+                "expected command to be denied: {command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn command_guard_rejects_destructive_sibling_unlink() {
+        assert!(matches!(
+            ensure_command_allowed("UNLINK key1"),
+            Err(RedisCliError::CommandDenied(_))
+        ));
+    }
+
+    #[test]
+    fn command_guard_rejects_empty_or_whitespace_only_input() {
+        for command in ["", "   ", "\n\t"] {
+            assert!(
+                matches!(
+                    ensure_command_allowed(command),
+                    Err(RedisCliError::CommandDenied(_))
+                ),
+                "expected command to be denied: {command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn command_guard_allows_non_destructive_reads_and_writes() {
+        for command in ["GET foo", "set k v", "  LPUSH list value  "] {
+            assert_eq!(ensure_command_allowed(command), Ok(()));
+        }
     }
 
     #[tokio::test]
