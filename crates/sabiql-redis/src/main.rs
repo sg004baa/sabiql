@@ -88,9 +88,16 @@ async fn process_action(
 fn handle_event(event: InputEvent, state: &AppState) -> Option<Action> {
     match event {
         InputEvent::Key(combo) if state.command_modal.is_open => handle_modal_key(combo),
+        InputEvent::Key(combo) if state.filter_active => handle_filter_key(combo),
         InputEvent::Resize(width, height) => Some(Action::Resize(width, height)),
         InputEvent::Key(combo) if combo == KeyCombo::plain(Key::Char(':')) => {
             Some(Action::OpenCommandModal)
+        }
+        InputEvent::Key(combo) if combo == KeyCombo::plain(Key::Char('/')) => {
+            Some(Action::OpenFilter)
+        }
+        InputEvent::Key(combo) if combo == KeyCombo::plain(Key::Char('e')) => {
+            Some(Action::RequestExportCsv)
         }
         InputEvent::Key(combo) if combo == KeyCombo::plain(Key::Char('q')) => Some(Action::Quit),
         InputEvent::Key(combo) if combo == KeyCombo::ctrl(Key::Char('c')) => Some(Action::Quit),
@@ -105,6 +112,18 @@ fn handle_event(event: InputEvent, state: &AppState) -> Option<Action> {
             Some(Action::SelectPrev)
         }
         InputEvent::Init | InputEvent::Paste(_) | InputEvent::Key(_) => None,
+    }
+}
+
+fn handle_filter_key(combo: KeyCombo) -> Option<Action> {
+    match combo {
+        combo if combo == KeyCombo::plain(Key::Enter) => Some(Action::CommitFilter),
+        combo if combo == KeyCombo::plain(Key::Esc) => Some(Action::ClearFilter),
+        combo if combo == KeyCombo::plain(Key::Backspace) => Some(Action::FilterBackspace),
+        KeyCombo {
+            key: Key::Char(c), ..
+        } => Some(Action::FilterInput(c)),
+        _ => None,
     }
 }
 
@@ -132,6 +151,24 @@ mod tests {
         let action = handle_event(InputEvent::Key(KeyCombo::plain(Key::Char(':'))), &state);
 
         assert_eq!(action, Some(Action::OpenCommandModal));
+    }
+
+    #[test]
+    fn slash_opens_filter_when_closed() {
+        let state = AppState::new("redis://localhost");
+
+        let action = handle_event(InputEvent::Key(KeyCombo::plain(Key::Char('/'))), &state);
+
+        assert_eq!(action, Some(Action::OpenFilter));
+    }
+
+    #[test]
+    fn export_key_requests_csv_export() {
+        let state = AppState::new("redis://localhost");
+
+        let action = handle_event(InputEvent::Key(KeyCombo::plain(Key::Char('e'))), &state);
+
+        assert_eq!(action, Some(Action::RequestExportCsv));
     }
 
     #[test]
@@ -177,5 +214,28 @@ mod tests {
         );
 
         assert_eq!(action, Some(Action::CommandInput(' ')));
+    }
+
+    #[test]
+    fn filter_mode_routes_text_backspace_enter_and_escape() {
+        let mut state = AppState::new("redis://localhost");
+        state.filter_active = true;
+
+        assert_eq!(
+            handle_event(InputEvent::Key(KeyCombo::plain(Key::Char('u'))), &state),
+            Some(Action::FilterInput('u'))
+        );
+        assert_eq!(
+            handle_event(InputEvent::Key(KeyCombo::plain(Key::Backspace)), &state),
+            Some(Action::FilterBackspace)
+        );
+        assert_eq!(
+            handle_event(InputEvent::Key(KeyCombo::plain(Key::Enter)), &state),
+            Some(Action::CommitFilter)
+        );
+        assert_eq!(
+            handle_event(InputEvent::Key(KeyCombo::plain(Key::Esc)), &state),
+            Some(Action::ClearFilter)
+        );
     }
 }

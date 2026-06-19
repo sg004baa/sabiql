@@ -5,11 +5,11 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Cell, Paragraph, Wrap};
 use sabiql_tui_kit::primitives::atoms::text_cursor_spans;
 use sabiql_tui_kit::primitives::molecules::{
-    StripedTableConfig, render_modal, render_striped_table,
+    StripedTableConfig, hint_line, render_modal, render_striped_table,
 };
 use sabiql_tui_kit::theme::{DEFAULT_THEME, StatusTone};
 
-use crate::app::{AppState, CommandStatus, ConnectionStatus, ValueState};
+use crate::app::{AppState, CommandStatus, ConnectionStatus, StatusMessage, ValueState};
 use crate::domain::{RedisValue, redis_value_table};
 
 pub fn render(frame: &mut Frame<'_>, state: &AppState) {
@@ -38,7 +38,7 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
 
 fn render_status(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let theme = DEFAULT_THEME;
-    let (text, style) = match &state.connection_status {
+    let (mut text, mut style) = match &state.connection_status {
         ConnectionStatus::Disconnected => (
             format!("disconnected | {}", state.dsn),
             Style::default().fg(theme.semantic.text.secondary),
@@ -48,9 +48,14 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             Style::default().fg(theme.semantic.status.pending),
         ),
         ConnectionStatus::Connected => {
+            let visible_count = if state.filter_query.is_empty() {
+                state.keys.len().to_string()
+            } else {
+                format!("{}/{}", state.filtered_indices.len(), state.keys.len())
+            };
             let count = match state.dbsize {
-                Some(dbsize) => format!("{} scanned keys | dbsize {dbsize}", state.keys.len()),
-                None => format!("{} scanned keys", state.keys.len()),
+                Some(dbsize) => format!("{visible_count} scanned keys | dbsize {dbsize}"),
+                None => format!("{visible_count} scanned keys"),
             };
             (
                 format!("connected | {count} | {}", state.dsn),
@@ -62,6 +67,27 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             theme.status_style(StatusTone::Error),
         ),
     };
+
+    if state.filter_active || !state.filter_query.is_empty() {
+        text.push_str(" | filter /");
+        text.push_str(&state.filter_query);
+    }
+
+    if let Some(status_message) = &state.status_message {
+        let status_text = match status_message {
+            StatusMessage::Info(message) => message,
+            StatusMessage::Success(message) => {
+                style = theme.status_style(StatusTone::Success);
+                message
+            }
+            StatusMessage::Error(message) => {
+                style = theme.status_style(StatusTone::Error);
+                message
+            }
+        };
+        text.push_str(" | ");
+        text.push_str(status_text);
+    }
 
     frame.render_widget(Paragraph::new(Line::from(text)).style(style), area);
 }
@@ -81,13 +107,23 @@ fn render_keys(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         &StripedTableConfig {
             headers: &headers,
             widths: &widths,
-            total_items: state.keys.len(),
-            empty_message: "No keys found",
+            total_items: state.filtered_indices.len(),
+            empty_message: if state.keys.is_empty() {
+                "No keys found"
+            } else {
+                "No matching keys"
+            },
         },
         state.scroll_offset,
         &theme,
         |index| {
-            let redis_key = &state.keys[index];
+            let Some(redis_key) = state
+                .filtered_indices
+                .get(index)
+                .and_then(|full_index| state.keys.get(*full_index))
+            else {
+                return vec![Cell::from(""), Cell::from("")];
+            };
             let style = if index == state.selected_index {
                 selected_style
             } else {
@@ -179,16 +215,41 @@ fn value_widths(column_count: usize) -> Vec<Constraint> {
 }
 
 fn ttl_label(ttl: Option<u64>) -> String {
-    match ttl {
-        Some(seconds) => format!("ttl {seconds}s"),
-        None => "ttl none".to_string(),
+    let Some(seconds) = ttl else {
+        return "no expiry".to_string();
+    };
+
+    let days = seconds / 86_400;
+    let hours = (seconds % 86_400) / 3_600;
+    let minutes = (seconds % 3_600) / 60;
+    let seconds = seconds % 60;
+    let mut parts = Vec::new();
+    if days > 0 {
+        parts.push(format!("{days}d"));
     }
+    if hours > 0 {
+        parts.push(format!("{hours}h"));
+    }
+    if minutes > 0 {
+        parts.push(format!("{minutes}m"));
+    }
+    if seconds > 0 || parts.is_empty() {
+        parts.push(format!("{seconds}s"));
+    }
+    parts.join(" ")
 }
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect) {
     let theme = DEFAULT_THEME;
+    let hints = [
+        ("j/k", "navigate"),
+        ("/", "filter"),
+        (":", "command"),
+        ("e", "export"),
+        ("q", "quit"),
+    ];
     frame.render_widget(
-        Paragraph::new(Line::from("j/k or arrows move | : command | q quit"))
+        Paragraph::new(hint_line(&hints, &theme))
             .style(Style::default().fg(theme.semantic.text.muted)),
         area,
     );
@@ -272,4 +333,18 @@ fn render_command_output(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         Paragraph::new(text).style(style).wrap(Wrap { trim: false }),
         area,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ttl_label_formats_compact_human_readable_values() {
+        assert_eq!(ttl_label(None), "no expiry");
+        assert_eq!(ttl_label(Some(45)), "45s");
+        assert_eq!(ttl_label(Some(3_600)), "1h");
+        assert_eq!(ttl_label(Some(5_025)), "1h 23m 45s");
+        assert_eq!(ttl_label(Some(172_801)), "2d 1s");
+    }
 }

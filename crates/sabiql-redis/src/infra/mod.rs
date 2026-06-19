@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -22,6 +23,8 @@ pub enum RedisCliError {
     Timeout(String),
     #[error("failed to parse redis-cli output: {0}")]
     Parse(String),
+    #[error("CSV export failed: {0}")]
+    CsvExport(String),
 }
 
 #[cfg_attr(test, mockall::automock)]
@@ -154,6 +157,32 @@ fn command_args(command: &str) -> Vec<String> {
         .split_whitespace()
         .map(ToString::to_string)
         .collect()
+}
+
+pub fn serialize_csv(headers: &[String], rows: &[Vec<String>]) -> Result<Vec<u8>, RedisCliError> {
+    let mut writer = csv::WriterBuilder::new()
+        .terminator(csv::Terminator::Any(b'\n'))
+        .from_writer(Vec::new());
+    writer
+        .write_record(headers)
+        .map_err(|e| RedisCliError::CsvExport(e.to_string()))?;
+    for row in rows {
+        writer
+            .write_record(row)
+            .map_err(|e| RedisCliError::CsvExport(e.to_string()))?;
+    }
+    writer
+        .into_inner()
+        .map_err(|e| RedisCliError::CsvExport(e.to_string()))
+}
+
+pub fn write_csv_file(
+    path: &Path,
+    headers: &[String],
+    rows: &[Vec<String>],
+) -> Result<(), RedisCliError> {
+    let csv = serialize_csv(headers, rows)?;
+    std::fs::write(path, csv).map_err(|e| RedisCliError::CsvExport(e.to_string()))
 }
 
 pub fn parse_type_reply(stdout: &str) -> Result<RedisKind, RedisCliError> {
@@ -662,6 +691,23 @@ mod tests {
                 ("1-0".to_string(), "name=alice, role=admin".to_string()),
                 ("2-0".to_string(), "status=active".to_string()),
             ]))
+        );
+    }
+
+    #[test]
+    fn csv_serialization_quotes_commas_quotes_and_newlines() {
+        let csv = serialize_csv(
+            &["name".to_string(), "note".to_string()],
+            &[vec![
+                "alice, admin".to_string(),
+                "line 1\n\"line 2\"".to_string(),
+            ]],
+        )
+        .unwrap();
+
+        assert_eq!(
+            String::from_utf8(csv).unwrap(),
+            "name,note\n\"alice, admin\",\"line 1\n\"\"line 2\"\"\"\n"
         );
     }
 
