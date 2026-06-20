@@ -1,4 +1,6 @@
-use std::path::Path;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -177,12 +179,44 @@ pub fn serialize_csv(headers: &[String], rows: &[Vec<String>]) -> Result<Vec<u8>
 }
 
 pub fn write_csv_file(
-    path: &Path,
+    stem: &str,
     headers: &[String],
     rows: &[Vec<String>],
-) -> Result<(), RedisCliError> {
+) -> Result<PathBuf, RedisCliError> {
+    let dir = std::env::current_dir().map_err(|e| {
+        RedisCliError::CsvExport(format!("failed to resolve current directory: {e}"))
+    })?;
+    let path = unique_csv_path(&dir, stem);
     let csv = serialize_csv(headers, rows)?;
-    std::fs::write(path, csv).map_err(|e| RedisCliError::CsvExport(e.to_string()))
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(|e| {
+            RedisCliError::CsvExport(format!("failed to create {}: {e}", path.display()))
+        })?;
+    file.write_all(&csv).map_err(|e| {
+        RedisCliError::CsvExport(format!("failed to write {}: {e}", path.display()))
+    })?;
+    Ok(path)
+}
+
+fn unique_csv_path(dir: &Path, stem: &str) -> PathBuf {
+    let mut suffix = 0usize;
+    loop {
+        let filename = if suffix == 0 {
+            format!("{stem}.csv")
+        } else {
+            format!("{stem}-{suffix}.csv")
+        };
+        let path = dir.join(filename);
+        if !path.exists() {
+            return path;
+        }
+        suffix = suffix
+            .checked_add(1)
+            .expect("exhausted usize suffix space for CSV export path");
+    }
 }
 
 pub fn parse_type_reply(stdout: &str) -> Result<RedisKind, RedisCliError> {
@@ -709,6 +743,25 @@ mod tests {
             String::from_utf8(csv).unwrap(),
             "name,note\n\"alice, admin\",\"line 1\n\"\"line 2\"\"\"\n"
         );
+    }
+
+    #[test]
+    fn unique_csv_path_uses_base_name_when_available() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let path = unique_csv_path(dir.path(), "user_1");
+
+        assert_eq!(path, dir.path().join("user_1.csv"));
+    }
+
+    #[test]
+    fn unique_csv_path_uses_next_suffix_when_base_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("user_1.csv"), "").unwrap();
+
+        let path = unique_csv_path(dir.path(), "user_1");
+
+        assert_eq!(path, dir.path().join("user_1-1.csv"));
     }
 
     #[test]

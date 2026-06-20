@@ -2710,6 +2710,7 @@ dependencies = [
  "nucleo-matcher",
  "ratatui",
  "sabiql-tui-kit",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
 ]

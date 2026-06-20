@@ -166,7 +166,7 @@ pub enum Effect {
         command: String,
     },
     ExportCsv {
-        path: PathBuf,
+        stem: String,
         headers: Vec<String>,
         rows: Vec<Vec<String>>,
     },
@@ -438,22 +438,14 @@ fn request_export_csv(state: &mut AppState) -> Vec<Effect> {
 
     let table = redis_value_table(value);
     let headers = table.headers.into_iter().map(ToString::to_string).collect();
-    let path = export_path_for_key(key);
-    state.status_message = Some(StatusMessage::Info(format!(
-        "Exporting CSV to {}",
-        path.display()
-    )));
+    let stem = sanitize_export_file_stem(key);
+    state.status_message = Some(StatusMessage::Info(format!("Exporting CSV for {stem}.csv")));
 
     vec![Effect::ExportCsv {
-        path,
+        stem,
         headers,
         rows: table.rows,
     }]
-}
-
-fn export_path_for_key(key: &str) -> PathBuf {
-    let stem = sanitize_export_file_stem(key);
-    PathBuf::from(format!("{stem}.csv"))
 }
 
 fn sanitize_export_file_stem(key: &str) -> String {
@@ -551,12 +543,12 @@ impl EffectRunner {
                     let _ = self.action_tx.send(action).await;
                 }
                 Effect::ExportCsv {
-                    path,
+                    stem,
                     headers,
                     rows,
                 } => {
-                    let action = match crate::infra::write_csv_file(&path, &headers, &rows) {
-                        Ok(()) => Action::ExportSucceeded { path },
+                    let action = match crate::infra::write_csv_file(&stem, &headers, &rows) {
+                        Ok(path) => Action::ExportSucceeded { path },
                         Err(e) => Action::ExportFailed {
                             message: e.to_string(),
                         },
@@ -1137,7 +1129,7 @@ mod tests {
                 assert_eq!(
                     effects,
                     vec![Effect::ExportCsv {
-                        path: std::path::PathBuf::from("user_1_profile.csv"),
+                        stem: "user_1_profile".to_string(),
                         headers,
                         rows,
                     }]
@@ -1392,10 +1384,8 @@ mod tests {
         #[tokio::test]
         async fn export_csv_effect_writes_file_and_dispatches_success() {
             let cli = MockRedisCli::new();
-            let path = std::env::temp_dir().join(format!(
-                "sabiql_redis_export_{}_success.csv",
-                std::process::id()
-            ));
+            let stem = format!("sabiql_redis_export_{}_success", std::process::id());
+            let path = std::env::current_dir().unwrap().join(format!("{stem}.csv"));
             let _ = std::fs::remove_file(&path);
 
             let (tx, mut rx) = mpsc::channel(4);
@@ -1403,7 +1393,7 @@ mod tests {
 
             runner
                 .run(vec![Effect::ExportCsv {
-                    path: path.clone(),
+                    stem,
                     headers: vec!["name".to_string(), "note".to_string()],
                     rows: vec![vec!["alice".to_string(), "hello, world".to_string()]],
                 }])
