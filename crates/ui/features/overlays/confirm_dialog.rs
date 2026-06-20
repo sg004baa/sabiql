@@ -7,9 +7,9 @@ use crate::app::model::shared::confirm_dialog::ConfirmIntent;
 use crate::app::policy::json::json_diff::JsonDiffLine;
 use crate::app::policy::write::write_guardrails::{RiskLevel, WriteOperation};
 use crate::app::policy::write::write_update::escape_preview_value;
-use crate::primitives::atoms::highlight_sql;
 use crate::primitives::molecules::{render_modal, render_modal_with_border_color};
 use crate::primitives::utils::text_utils::wrapped_line_count;
+use crate::sql_highlight::highlight_sql;
 use crate::theme::ThemePalette;
 
 pub struct ConfirmDialog;
@@ -18,6 +18,14 @@ pub struct ConfirmPreviewMetrics {
     pub viewport_height: Option<u16>,
     pub content_height: Option<u16>,
     pub scroll: u16,
+}
+
+fn risk_color(theme: &ThemePalette, level: RiskLevel) -> Color {
+    match level {
+        RiskLevel::Low => theme.semantic.status.warning,
+        RiskLevel::Medium => theme.semantic.status.medium_risk,
+        RiskLevel::High => theme.semantic.status.error,
+    }
 }
 
 impl ConfirmDialog {
@@ -114,7 +122,7 @@ impl ConfirmDialog {
             .pending_write_preview()
             .expect("write preview must be set");
 
-        let border_color = theme.risk_color(preview.guardrail.risk_level);
+        let border_color = risk_color(theme, preview.guardrail.risk_level);
         let blocked = preview.guardrail.blocked;
         let title = format!(" {} ", state.confirm_dialog.title());
 

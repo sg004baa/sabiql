@@ -2652,6 +2652,7 @@ dependencies = [
  "nucleo-matcher",
  "rstest",
  "sabiql-domain",
+ "sabiql-tui-kit",
  "serde",
  "serde_json",
  "tempfile",
@@ -2698,6 +2699,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "sabiql-redis"
+version = "1.12.6"
+dependencies = [
+ "async-trait",
+ "clap",
+ "color-eyre",
+ "csv",
+ "mockall",
+ "nucleo-matcher",
+ "ratatui",
+ "sabiql-tui-kit",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
+name = "sabiql-tui-kit"
+version = "1.12.6"
+dependencies = [
+ "color-eyre",
+ "crossterm",
+ "futures",
+ "ratatui",
+ "rstest",
+ "tokio",
+ "tokio-util",
+ "unicode-width",
+]
+
+[[package]]
 name = "sabiql-ui"
 version = "1.12.6"
 dependencies = [
@@ -2709,6 +2741,7 @@ dependencies = [
  "rstest",
  "sabiql-app",
  "sabiql-domain",
+ "sabiql-tui-kit",
  "tokio",
  "tokio-util",
  "unicode-width",

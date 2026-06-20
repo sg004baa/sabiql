@@ -1,8 +1,8 @@
 [package]
-name = "sabiql-ui"
+name = "sabiql-tui-kit"
 version.workspace = true
 edition.workspace = true
-description = "UI layer for sabiql"
+description = "Shared TUI building blocks for sabiql"
 license.workspace = true
 repository.workspace = true
 
@@ -10,7 +10,7 @@ repository.workspace = true
 path = "lib.rs"
 
 [features]
-test-support = ["sabiql-app/test-support"]
+test-support = []
 
 [dependencies]
 color-eyre.workspace = true
@@ -20,10 +20,6 @@ ratatui.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 unicode-width.workspace = true
-sabiql-app.workspace = true
-sabiql-domain.workspace = true
 
 [dev-dependencies]
-insta.workspace = true
 rstest.workspace = true
-sabiql-app = { workspace = true, features = ["test-support"] }

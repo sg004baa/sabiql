@@ -32,11 +32,11 @@ Feature flags: `self-update` (GitHub release updater), `test-support` (enables `
 Hexagonal architecture (ports & adapters) with four layers:
 
 ```
-main.rs            Wiring: creates adapters, injects into EffectRunner
-src/domain/        Pure domain models (Table, Column, QueryResult, ConnectionProfile, etc.)
-src/app/           Application logic (ports, state, reducers, effects)
-src/infra/         Infrastructure adapters (PostgresAdapter, MySqlAdapter, file I/O)
-src/ui/            Ratatui-based TUI rendering
+crates/sabiql/src/main.rs  Wiring: creates adapters, injects into EffectRunner
+crates/domain/             Pure domain models (Table, Column, QueryResult, ConnectionProfile, etc.)
+crates/app/                Application logic (ports, state, reducers, effects)
+crates/infra/              Infrastructure adapters (PostgresAdapter, MySqlAdapter, file I/O)
+crates/ui/                 Ratatui-based TUI rendering
 ```
 
 ### Data flow: Action → Reducer → Effect → EffectRunner
@@ -47,7 +47,7 @@ src/ui/            Ratatui-based TUI rendering
 
 The reducer is strictly pure: no `Instant::now()`, no I/O, no async. Time is passed as a parameter.
 
-### Port traits (src/app/ports/)
+### Port traits (crates/app/ports/)
 
 All database operations go through trait-based ports, enabling mock-based testing:
 
@@ -59,7 +59,7 @@ All database operations go through trait-based ports, enabling mock-based testin
 | `DdlGenerator` | Generate CREATE TABLE DDL |
 | `DsnBuilder` | Build connection strings from `ConnectionProfile` |
 
-### PostgreSQL adapter (src/infra/adapters/postgres/)
+### PostgreSQL adapter (crates/infra/adapters/postgres/)
 
 Implements all port traits by spawning `psql` as a subprocess:
 - **Metadata**: queries `pg_catalog` system tables, returns JSON via `json_agg(row_to_json(...))`
@@ -70,25 +70,25 @@ Implements all port traits by spawning `psql` as a subprocess:
 
 ### Key state types
 
-- `AppState` (src/app/model/app_state.rs): root application state
-- `BrowseSession` (src/app/model/browse/session.rs): connection lifecycle, selected table, metadata
-- `ConnectionSetupState` (src/app/model/connection/setup.rs): connection form fields
-- `AppServices` (src/app/services.rs): holds `Arc<dyn DdlGenerator>` + `Arc<dyn SqlDialect>` for sync access in reducers
+- `AppState` (crates/app/model/app_state.rs): root application state
+- `BrowseSession` (crates/app/model/browse/session.rs): connection lifecycle, selected table, metadata
+- `ConnectionSetupState` (crates/app/model/connection/setup.rs): connection form fields
+- `AppServices` (crates/app/services.rs): holds `Arc<dyn DdlGenerator>` + `Arc<dyn SqlDialect>` for sync access in reducers
 
 ### Testing patterns
 
 - **Reducers**: test directly with `AppState::new()` + `AppServices::stub()` (requires `test-support` feature)
 - **Effects**: use `mockall` mocks for port traits (`MockMetadataProvider`, `MockQueryExecutor`, etc.)
-- **Render snapshots**: `insta` crate, under `tests/render_snapshots/` (require `test-support` feature)
+- **Render snapshots**: `insta` crate, under `crates/sabiql/src/tests/render_snapshots/` (require `test-support` feature)
 - **Test naming lint**: CI enforces test name conventions via `scripts/lint_test_names.sh`
 
 ## Clippy Configuration
 
-Strict: `clippy::all = deny`, `clippy::pedantic = warn`, `clippy::nursery = warn`. Restriction lints `dbg_macro`, `todo`, `print_stdout`, `print_stderr`, `allow_attributes_without_reason` are denied. See `Cargo.toml [lints.clippy]` for suppressed pedantic/nursery lints.
+Strict: `clippy::all = deny`, `clippy::pedantic = warn`, `clippy::nursery = warn`. Restriction lints `dbg_macro`, `todo`, `print_stdout`, `print_stderr`, `allow_attributes_without_reason` are denied. See `crates/sabiql/Cargo.toml [lints.clippy]` for suppressed pedantic/nursery lints.
 
 ## Adding a new database backend
 
-1. Create adapter module under `src/infra/adapters/<db>/` mirroring the postgres structure
+1. Create adapter module under `crates/infra/adapters/<db>/` mirroring the postgres structure
 2. Implement all 5 port traits (`MetadataProvider`, `QueryExecutor`, `SqlDialect`, `DdlGenerator`, `DsnBuilder`)
-3. Add `DatabaseType` variant in `src/domain/connection/database_type.rs`
+3. Add `DatabaseType` variant in `crates/domain/connection/database_type.rs`
 4. Wire into adapter selection in `main.rs`

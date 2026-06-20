@@ -1,9 +1,12 @@
 [workspace]
 members = [
-    "src/app",
-    "src/domain",
-    "src/infra",
-    "src/ui",
+    "crates/sabiql",
+    "crates/domain",
+    "crates/app",
+    "crates/infra",
+    "crates/tui-kit",
+    "crates/ui",
+    "crates/sabiql-redis",
 ]
 resolver = "2"
 
@@ -14,10 +17,11 @@ license = "MIT"
 repository = "https://github.com/sg004baa/sabiql"
 
 [workspace.dependencies]
-sabiql-domain = { path = "src/domain", version = "1.12.0" }
-sabiql-app = { path = "src/app", version = "1.12.0" }
-sabiql-infra = { path = "src/infra", version = "1.12.0" }
-sabiql-ui = { path = "src/ui", version = "1.12.0" }
+sabiql-domain = { path = "crates/domain", version = "1.12.0" }
+sabiql-app = { path = "crates/app", version = "1.12.0" }
+sabiql-infra = { path = "crates/infra", version = "1.12.0" }
+sabiql-tui-kit = { path = "crates/tui-kit", version = "1.12.0" }
+sabiql-ui = { path = "crates/ui", version = "1.12.0" }
 arboard = "3"
 async-trait = "0.1"
 clap = { version = "4", features = ["derive"] }
@@ -47,44 +51,6 @@ unicode-width = "0.2"
 urlencoding = "2"
 uuid = { version = "1", features = ["v4"] }
 
-[package]
-name = "sabiql"
-version.workspace = true
-edition.workspace = true
-description = "A fast, driver-less TUI for browsing and editing PostgreSQL databases"
-license.workspace = true
-repository.workspace = true
-homepage = "https://github.com/sg004baa/sabiql"
-readme = "README.md"
-keywords = ["postgresql", "tui", "database", "cli", "sql"]
-categories = ["command-line-utilities", "database"]
-
-[dependencies]
-crossterm.workspace = true
-tokio.workspace = true
-color-eyre.workspace = true
-clap.workspace = true
-dotenvy.workspace = true
-self_update = { workspace = true, optional = true }
-sabiql-app.workspace = true
-sabiql-infra.workspace = true
-sabiql-ui.workspace = true
-
-[features]
-default = []
-self-update = ["dep:self_update"]
-
-[dev-dependencies]
-sabiql-domain.workspace = true
-sabiql-app = { workspace = true, features = ["test-support"] }
-sabiql-ui = { workspace = true, features = ["test-support"] }
-ratatui.workspace = true
-rstest.workspace = true
-tempfile.workspace = true
-insta.workspace = true
-mockall.workspace = true
-tokio = { workspace = true, features = ["test-util"] }
-
 [profile.release]
 lto = true
 codegen-units = 1
@@ -93,49 +59,3 @@ codegen-units = 1
 [profile.dist]
 inherits = "release"
 lto = "thin"
-
-[lints.clippy]
-# Groups
-all = { level = "deny", priority = -1 }
-pedantic = { level = "warn", priority = -1 }
-nursery = { level = "warn", priority = -1 }
-
-# Pedantic suppressions
-must_use_candidate = "allow"
-missing_errors_doc = "allow"
-missing_panics_doc = "allow"
-module_name_repetitions = "allow"
-doc_markdown = "allow"
-similar_names = "allow"
-too_many_lines = "allow"
-cast_possible_truncation = "allow"
-cast_possible_wrap = "allow"
-cast_sign_loss = "allow"
-cast_precision_loss = "allow"
-cast_lossless = "allow"
-items_after_statements = "allow"
-needless_pass_by_value = "allow"  # Action/Command/PathBuf by-value in core APIs; refactor is out of scope
-unused_self = "allow"
-implicit_hasher = "allow"
-match_wildcard_for_single_variants = "allow"
-struct_field_names = "allow"
-
-# Nursery suppressions
-missing_const_for_fn = "allow"
-significant_drop_tightening = "allow"
-option_if_let_else = "allow"
-future_not_send = "allow"
-branches_sharing_code = "allow"
-iter_with_drain = "allow"  # drain(..) inside loops where Vec is reused between iterations
-collection_is_never_read = "allow"  # false positive: Vec used for sorting + hashing, not element-wise reads
-used_underscore_binding = "allow"  # rstest #[case] doc params use _prefix convention; macro uses bindings internally
-
-# Pedantic suppressions (continued)
-naive_bytecount = "allow"  # bytecount crate would be an unnecessary dependency
-
-# Restriction lints (opt-in)
-dbg_macro = "deny"
-todo = "deny"
-print_stdout = "deny"
-print_stderr = "deny"
-allow_attributes_without_reason = "deny"

@@ -1,7 +1,6 @@
 use ratatui::style::{Color, Modifier, Style};
 
-use crate::app::model::shared::theme_id::ThemeId;
-use crate::app::policy::write::write_guardrails::RiskLevel;
+use crate::theme_id::ThemeId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusTone {
@@ -121,14 +120,6 @@ pub struct SyntaxTokens {
 }
 
 impl ThemePalette {
-    pub fn risk_color(&self, level: RiskLevel) -> Color {
-        match level {
-            RiskLevel::Low => self.semantic.status.warning,
-            RiskLevel::Medium => self.semantic.status.medium_risk,
-            RiskLevel::High => self.semantic.status.error,
-        }
-    }
-
     pub fn modal_title_style(&self) -> Style {
         Style::default()
             .fg(self.component.modal.title)

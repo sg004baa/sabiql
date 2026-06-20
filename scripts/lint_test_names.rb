@@ -3,8 +3,7 @@
 
 ROOT = File.expand_path("..", __dir__)
 DEFAULT_PATHS = [
-  "src",
-  "tests",
+  "crates",
 ].freeze
 
 # This lint only checks mechanically detectable anti-patterns.
