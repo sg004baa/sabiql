@@ -39,7 +39,7 @@ pub trait RedisCli: Send + Sync {
     async fn dbsize(&self) -> Result<usize, RedisCliError>;
     fn select_db(&self, db: u8);
     async fn db_overview(&self) -> Result<Vec<(u8, usize)>, RedisCliError>;
-    async fn scan_keys(&self) -> Result<Vec<RedisKey>, RedisCliError>;
+    async fn scan_keys(&self, pattern: &str) -> Result<Vec<RedisKey>, RedisCliError>;
     async fn key_type_and_ttl(&self, key: &str) -> Result<(RedisKind, Option<u64>), RedisCliError>;
     async fn fetch_value(&self, key: &str, kind: RedisKind) -> Result<RedisValue, RedisCliError>;
     async fn execute_command(&self, command: &str) -> Result<String, RedisCliError>;
@@ -215,6 +215,17 @@ pub fn parse_scan_page(stdout: &str) -> Result<ScanPage, RedisCliError> {
 
 pub fn scan_is_complete(page: &ScanPage) -> bool {
     page.next_cursor == "0"
+}
+
+fn scan_keys_command_args(cursor: &str, pattern: &str) -> [String; 6] {
+    [
+        "SCAN".to_string(),
+        cursor.to_string(),
+        "MATCH".to_string(),
+        pattern.to_string(),
+        "COUNT".to_string(),
+        "1000".to_string(),
+    ]
 }
 
 const DESTRUCTIVE_COMMANDS: &[&str] = &["FLUSHALL", "FLUSHDB", "DEL", "UNLINK"];
@@ -713,19 +724,13 @@ impl RedisCli for RedisCliSubprocess {
             .collect())
     }
 
-    async fn scan_keys(&self) -> Result<Vec<RedisKey>, RedisCliError> {
+    async fn scan_keys(&self, pattern: &str) -> Result<Vec<RedisKey>, RedisCliError> {
         let mut cursor = "0".to_string();
         let mut keys = Vec::new();
 
         loop {
-            let stdout = self
-                .run_command(&[
-                    "SCAN".to_string(),
-                    cursor,
-                    "COUNT".to_string(),
-                    "1000".to_string(),
-                ])
-                .await?;
+            let args = scan_keys_command_args(&cursor, pattern);
+            let stdout = self.run_command(&args).await?;
             let page = parse_scan_page(&stdout)?;
             let is_complete = scan_is_complete(&page);
             keys.extend(page.keys.into_iter().map(RedisKey::unknown));
@@ -935,6 +940,21 @@ mod tests {
         assert_eq!(page.next_cursor, "0");
         assert_eq!(page.keys, vec!["settings".to_string()]);
         assert!(scan_is_complete(&page));
+    }
+
+    #[test]
+    fn scan_keys_args_pass_match_pattern_as_single_argv_element() {
+        assert_eq!(
+            scan_keys_command_args("42", "user:* [ab]?"),
+            [
+                "SCAN".to_string(),
+                "42".to_string(),
+                "MATCH".to_string(),
+                "user:* [ab]?".to_string(),
+                "COUNT".to_string(),
+                "1000".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -1272,6 +1292,6 @@ mod tests {
 
         cli.ping().await.unwrap();
         let _dbsize = cli.dbsize().await.unwrap();
-        let _keys = cli.scan_keys().await.unwrap();
+        let _keys = cli.scan_keys("*").await.unwrap();
     }
 }

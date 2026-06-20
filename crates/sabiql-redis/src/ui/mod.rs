@@ -57,14 +57,9 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             Style::default().fg(theme.semantic.status.pending),
         ),
         ConnectionStatus::Connected => {
-            let visible_count = if state.filter_query.is_empty() {
-                state.keys.len().to_string()
-            } else {
-                format!("{}/{}", state.filtered_indices.len(), state.keys.len())
-            };
             let count = match state.dbsize {
-                Some(dbsize) => format!("{visible_count} scanned keys | dbsize {dbsize}"),
-                None => format!("{visible_count} scanned keys"),
+                Some(dbsize) => format!("{} scanned keys | dbsize {dbsize}", state.keys.len()),
+                None => format!("{} scanned keys", state.keys.len()),
             };
             (
                 format!("connected | {count} | {}", state.dsn),
@@ -77,9 +72,9 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         ),
     };
 
-    if state.filter_active || !state.filter_query.is_empty() {
-        text.push_str(" | filter /");
-        text.push_str(&state.filter_query);
+    if state.filter_active || matches!(&state.connection_status, ConnectionStatus::Connected) {
+        text.push_str(" | search /");
+        text.push_str(&state.search_pattern);
     }
 
     if let Some(status_message) = &state.status_message {
@@ -105,6 +100,11 @@ fn render_keys(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let theme = DEFAULT_THEME;
     let headers = ["key", "type"];
     let widths = [Constraint::Min(10), Constraint::Length(10)];
+    let empty_message = if state.search_pattern == "*" {
+        "No keys found".to_string()
+    } else {
+        format!("No keys match pattern {}", state.search_pattern)
+    };
     let selected_style = Style::default()
         .bg(theme.component.table.result_row_active_bg)
         .fg(theme.semantic.text.primary)
@@ -116,21 +116,13 @@ fn render_keys(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         &StripedTableConfig {
             headers: &headers,
             widths: &widths,
-            total_items: state.filtered_indices.len(),
-            empty_message: if state.keys.is_empty() {
-                "No keys found"
-            } else {
-                "No matching keys"
-            },
+            total_items: state.keys.len(),
+            empty_message: empty_message.as_str(),
         },
         state.scroll_offset,
         &theme,
         |index| {
-            let Some(redis_key) = state
-                .filtered_indices
-                .get(index)
-                .and_then(|full_index| state.keys.get(*full_index))
-            else {
+            let Some(redis_key) = state.keys.get(index) else {
                 return vec![Cell::from(""), Cell::from("")];
             };
             let style = if index == state.selected_index {
@@ -176,7 +168,7 @@ fn render_value_pane(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                 chunks[0],
                 &format!("value | {key} | type {kind} | {}", ttl_label(*ttl)),
             );
-            render_value_table(frame, chunks[1], value);
+            render_value_table(frame, chunks[1], value, state.value_scroll_offset);
         }
     }
 }
@@ -190,7 +182,7 @@ fn render_value_title(frame: &mut Frame<'_>, area: Rect, title: &str) {
     );
 }
 
-fn render_value_table(frame: &mut Frame<'_>, area: Rect, value: &RedisValue) {
+fn render_value_table(frame: &mut Frame<'_>, area: Rect, value: &RedisValue, offset: usize) {
     let theme = DEFAULT_THEME;
     let table = redis_value_table(value);
     let widths = value_widths(table.headers.len());
@@ -204,7 +196,7 @@ fn render_value_table(frame: &mut Frame<'_>, area: Rect, value: &RedisValue) {
             total_items: table.rows.len(),
             empty_message: "No value rows",
         },
-        0,
+        offset,
         &theme,
         |index| {
             table.rows[index]
@@ -258,7 +250,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     }
     hints.extend([
         ("j/k", "navigate"),
-        ("/", "filter"),
+        ("/", "search"),
         (":", "command"),
         ("c", "connect"),
         ("e", "export"),
@@ -589,5 +581,39 @@ mod tests {
         let rendered = render_to_string(&state);
 
         assert!(rendered.contains("Read-only mode blocks writes"));
+    }
+
+    #[test]
+    fn key_list_renders_state_keys_directly_and_shows_search_pattern() {
+        let mut state = AppState::new("redis://localhost");
+        state.connection_status = ConnectionStatus::Connected;
+        state.search_pattern = "user:*".to_string();
+        state.keys = vec![
+            crate::domain::RedisKey::unknown("user:1"),
+            crate::domain::RedisKey {
+                key: "session:1".to_string(),
+                kind: crate::domain::RedisKind::String,
+                ttl: None,
+            },
+        ];
+        state.selected_index = 1;
+
+        let rendered = render_to_string(&state);
+
+        assert!(rendered.contains("search /user:*"));
+        assert!(rendered.contains("user:1"));
+        assert!(rendered.contains("session:1"));
+        assert!(rendered.contains("string"));
+    }
+
+    #[test]
+    fn empty_search_result_mentions_active_pattern() {
+        let mut state = AppState::new("redis://localhost");
+        state.connection_status = ConnectionStatus::Connected;
+        state.search_pattern = "missing:*".to_string();
+
+        let rendered = render_to_string(&state);
+
+        assert!(rendered.contains("No keys match pattern missing:*"));
     }
 }
