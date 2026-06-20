@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -143,6 +144,36 @@ pub fn parse_config_databases_reply(stdout: &str) -> Result<u8, RedisCliError> {
 
 fn config_databases_or_default(stdout: &str) -> u8 {
     parse_config_databases_reply(stdout).unwrap_or(DEFAULT_REDIS_DATABASES)
+}
+
+pub fn parse_info_keyspace(stdout: &str) -> HashMap<u8, usize> {
+    let mut key_counts = HashMap::new();
+    for line in stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        let Some((db_part, fields)) = line
+            .strip_prefix("db")
+            .and_then(|rest| rest.split_once(':'))
+        else {
+            continue;
+        };
+        let Ok(db) = db_part.parse::<u8>() else {
+            continue;
+        };
+        let Some(keys) = fields
+            .split(',')
+            .find_map(|field| field.strip_prefix("keys="))
+        else {
+            continue;
+        };
+        let Ok(count) = keys.parse::<usize>() else {
+            continue;
+        };
+        key_counts.insert(db, count);
+    }
+    key_counts
 }
 
 pub fn parse_scan_page(stdout: &str) -> Result<ScanPage, RedisCliError> {
@@ -653,18 +684,17 @@ impl RedisCli for RedisCliSubprocess {
             Ok(stdout) => config_databases_or_default(&stdout),
             Err(_) => DEFAULT_REDIS_DATABASES,
         };
-        let mut entries = Vec::with_capacity(usize::from(database_count));
+        let key_counts = match self
+            .run_command(&["INFO".to_string(), "keyspace".to_string()])
+            .await
+        {
+            Ok(stdout) => parse_info_keyspace(&stdout),
+            Err(_) => HashMap::new(),
+        };
 
-        for db in 0..database_count {
-            let count = self
-                .run_command_in_db(db, &["DBSIZE".to_string()])
-                .await
-                .and_then(|stdout| parse_dbsize_reply(&stdout))
-                .unwrap_or_default();
-            entries.push((db, count));
-        }
-
-        Ok(entries)
+        Ok((0..database_count)
+            .map(|db| (db, key_counts.get(&db).copied().unwrap_or_default()))
+            .collect())
     }
 
     async fn scan_keys(&self) -> Result<Vec<RedisKey>, RedisCliError> {
@@ -834,6 +864,38 @@ mod tests {
         assert_eq!(config_databases_or_default("unexpected\n"), 16);
         assert_eq!(config_databases_or_default("databases\nnot-a-number\n"), 16);
         assert_eq!(config_databases_or_default("databases\n0\n"), 16);
+    }
+
+    #[test]
+    fn parses_info_keyspace_with_multiple_dbs_and_crlf() {
+        let key_counts = parse_info_keyspace(
+            "# Keyspace\r\n\
+             db0:keys=1234,expires=10,avg_ttl=0\r\n\
+             db1:keys=56,expires=0,avg_ttl=0\r\n",
+        );
+
+        assert_eq!(key_counts, HashMap::from([(0, 1234), (1, 56)]));
+    }
+
+    #[test]
+    fn parse_info_keyspace_skips_headers_empty_lines_and_invalid_rows() {
+        let key_counts = parse_info_keyspace(
+            "# Keyspace\n\
+             \n\
+             db0:keys=7,expires=0,avg_ttl=0\n\
+             ignored\n\
+             dbx:keys=9,expires=0,avg_ttl=0\n\
+             db1:expires=0,avg_ttl=0\n\
+             db2:keys=not-a-number,expires=0,avg_ttl=0\n\
+             db3:keys=4\n",
+        );
+
+        assert_eq!(key_counts, HashMap::from([(0, 7), (3, 4)]));
+    }
+
+    #[test]
+    fn parse_info_keyspace_returns_empty_map_for_empty_input() {
+        assert!(parse_info_keyspace("").is_empty());
     }
 
     #[test]
