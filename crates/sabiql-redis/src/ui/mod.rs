@@ -172,7 +172,7 @@ fn render_value_pane(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                 chunks[0],
                 &format!("value | {key} | type {kind} | {}", ttl_label(*ttl)),
             );
-            render_value_table(frame, chunks[1], value);
+            render_value_table(frame, chunks[1], value, state.value_scroll_offset);
         }
     }
 }
@@ -186,7 +186,7 @@ fn render_value_title(frame: &mut Frame<'_>, area: Rect, title: &str) {
     );
 }
 
-fn render_value_table(frame: &mut Frame<'_>, area: Rect, value: &RedisValue) {
+fn render_value_table(frame: &mut Frame<'_>, area: Rect, value: &RedisValue, offset: usize) {
     let theme = DEFAULT_THEME;
     let table = redis_value_table(value);
     let widths = value_widths(table.headers.len());
@@ -200,7 +200,7 @@ fn render_value_table(frame: &mut Frame<'_>, area: Rect, value: &RedisValue) {
             total_items: table.rows.len(),
             empty_message: "No value rows",
         },
-        0,
+        offset,
         &theme,
         |index| {
             table.rows[index]

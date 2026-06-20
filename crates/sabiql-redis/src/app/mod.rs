@@ -87,6 +87,7 @@ pub struct AppState {
     pub filter_active: bool,
     pub selected_index: usize,
     pub scroll_offset: usize,
+    pub value_scroll_offset: usize,
     pub table_visible_rows: usize,
     pub dbsize: Option<usize>,
     pub value_state: ValueState,
@@ -115,6 +116,7 @@ impl AppState {
             filter_active: false,
             selected_index: 0,
             scroll_offset: 0,
+            value_scroll_offset: 0,
             table_visible_rows: DEFAULT_TABLE_VISIBLE_ROWS,
             dbsize: None,
             value_state: ValueState::Empty,
@@ -136,6 +138,8 @@ pub enum Action {
     ConnectFailed(String),
     SelectNext,
     SelectPrev,
+    ValueScrollDown,
+    ValueScrollUp,
     Quit,
     Resize(u16, u16),
     OpenFilter,
@@ -229,6 +233,7 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             state.dbsize = None;
             state.selected_index = 0;
             state.scroll_offset = 0;
+            state.value_scroll_offset = 0;
             state.value_state = ValueState::Empty;
             Vec::new()
         }
@@ -260,6 +265,20 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             } else {
                 fetch_selected_key(state)
             }
+        }
+        Action::ValueScrollDown => {
+            let ValueState::Loaded { value, .. } = &state.value_state else {
+                return Vec::new();
+            };
+            let max_scroll = value_row_count(value).saturating_sub(1);
+            state.value_scroll_offset = state.value_scroll_offset.saturating_add(1).min(max_scroll);
+            Vec::new()
+        }
+        Action::ValueScrollUp => {
+            if matches!(state.value_state, ValueState::Loaded { .. }) {
+                state.value_scroll_offset = state.value_scroll_offset.saturating_sub(1);
+            }
+            Vec::new()
         }
         Action::Quit => {
             state.should_quit = true;
@@ -436,12 +455,14 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
                 ttl,
                 value,
             };
+            state.value_scroll_offset = 0;
             Vec::new()
         }
         Action::ValueFetchFailed { key, message } => {
             if !is_current_key(state, &key) {
                 return Vec::new();
             }
+            state.value_scroll_offset = 0;
             state.value_state = ValueState::Failed { key, message };
             Vec::new()
         }
@@ -475,6 +496,7 @@ fn reset_for_connect(state: &mut AppState) {
     state.dbsize = None;
     state.selected_index = 0;
     state.scroll_offset = 0;
+    state.value_scroll_offset = 0;
     state.value_state = ValueState::Empty;
 }
 
@@ -521,7 +543,16 @@ fn is_current_key(state: &AppState, key: &str) -> bool {
     selected_key(state).as_deref() == Some(key)
 }
 
+fn value_row_count(value: &RedisValue) -> usize {
+    match value {
+        RedisValue::String(_) => 1,
+        RedisValue::List(rows) | RedisValue::Set(rows) => rows.len(),
+        RedisValue::Hash(rows) | RedisValue::ZSet(rows) | RedisValue::Stream(rows) => rows.len(),
+    }
+}
+
 fn fetch_selected_key(state: &mut AppState) -> Vec<Effect> {
+    state.value_scroll_offset = 0;
     let Some(key) = selected_key(state) else {
         state.value_state = ValueState::Empty;
         return Vec::new();
@@ -969,6 +1000,106 @@ mod tests {
                     message: "wrong type".to_string(),
                 }
             );
+        }
+
+        #[test]
+        fn value_scroll_down_clamps_at_last_row() {
+            let mut state = AppState::new("redis://localhost");
+            state.value_state = ValueState::Loaded {
+                key: "items".to_string(),
+                kind: RedisKind::List,
+                ttl: None,
+                value: RedisValue::List(vec!["a".to_string(), "b".to_string(), "c".to_string()]),
+            };
+
+            assert!(reduce(&mut state, Action::ValueScrollDown).is_empty());
+            assert_eq!(state.value_scroll_offset, 1);
+            assert!(reduce(&mut state, Action::ValueScrollDown).is_empty());
+            assert_eq!(state.value_scroll_offset, 2);
+            assert!(reduce(&mut state, Action::ValueScrollDown).is_empty());
+            assert_eq!(state.value_scroll_offset, 2);
+        }
+
+        #[test]
+        fn value_scroll_up_saturates_at_zero() {
+            let mut state = AppState::new("redis://localhost");
+            state.value_state = ValueState::Loaded {
+                key: "items".to_string(),
+                kind: RedisKind::List,
+                ttl: None,
+                value: RedisValue::List(vec!["a".to_string()]),
+            };
+            state.value_scroll_offset = 1;
+
+            assert!(reduce(&mut state, Action::ValueScrollUp).is_empty());
+            assert_eq!(state.value_scroll_offset, 0);
+            assert!(reduce(&mut state, Action::ValueScrollUp).is_empty());
+            assert_eq!(state.value_scroll_offset, 0);
+        }
+
+        #[test]
+        fn value_scroll_offset_resets_when_value_loaded_and_selection_changes() {
+            let mut state = AppState::new("redis://localhost");
+            state.keys = vec![key("a"), key("b")];
+            sync_filter(&mut state);
+            state.value_scroll_offset = 3;
+            state.value_state = ValueState::Loading {
+                key: "a".to_string(),
+            };
+
+            assert!(
+                reduce(
+                    &mut state,
+                    Action::ValueLoaded {
+                        key: "a".to_string(),
+                        kind: RedisKind::List,
+                        ttl: None,
+                        value: RedisValue::List(vec!["a".to_string(), "b".to_string()]),
+                    },
+                )
+                .is_empty()
+            );
+            assert_eq!(state.value_scroll_offset, 0);
+
+            state.value_scroll_offset = 1;
+            let effects = reduce(&mut state, Action::SelectNext);
+
+            assert_eq!(
+                effects,
+                vec![Effect::FetchValue {
+                    key: "b".to_string()
+                }]
+            );
+            assert_eq!(state.value_scroll_offset, 0);
+            assert_eq!(
+                state.value_state,
+                ValueState::Loading {
+                    key: "b".to_string()
+                }
+            );
+        }
+
+        #[test]
+        fn value_scroll_actions_are_noops_when_value_not_loaded() {
+            for value_state in [
+                ValueState::Empty,
+                ValueState::Loading {
+                    key: "a".to_string(),
+                },
+                ValueState::Failed {
+                    key: "a".to_string(),
+                    message: "missing".to_string(),
+                },
+            ] {
+                let mut state = AppState::new("redis://localhost");
+                state.value_state = value_state;
+                state.value_scroll_offset = 3;
+
+                assert!(reduce(&mut state, Action::ValueScrollDown).is_empty());
+                assert_eq!(state.value_scroll_offset, 3);
+                assert!(reduce(&mut state, Action::ValueScrollUp).is_empty());
+                assert_eq!(state.value_scroll_offset, 3);
+            }
         }
 
         #[test]

@@ -118,6 +118,12 @@ fn handle_event(event: InputEvent, state: &AppState) -> Option<Action> {
         }
         InputEvent::Key(combo) if combo == KeyCombo::plain(Key::Char('q')) => Some(Action::Quit),
         InputEvent::Key(combo) if combo == KeyCombo::ctrl(Key::Char('c')) => Some(Action::Quit),
+        InputEvent::Key(combo) if combo == KeyCombo::plain(Key::Char('J')) => {
+            Some(Action::ValueScrollDown)
+        }
+        InputEvent::Key(combo) if combo == KeyCombo::plain(Key::Char('K')) => {
+            Some(Action::ValueScrollUp)
+        }
         InputEvent::Key(combo)
             if combo == KeyCombo::plain(Key::Down) || combo == KeyCombo::plain(Key::Char('j')) =>
         {
@@ -235,6 +241,20 @@ mod tests {
         let action = handle_event(InputEvent::Key(KeyCombo::plain(Key::Char('d'))), &state);
 
         assert_eq!(action, Some(Action::OpenDbOverlay));
+    }
+
+    #[test]
+    fn uppercase_j_and_k_scroll_value_pane() {
+        let state = AppState::new("redis://localhost");
+
+        assert_eq!(
+            handle_event(InputEvent::Key(KeyCombo::plain(Key::Char('J'))), &state),
+            Some(Action::ValueScrollDown)
+        );
+        assert_eq!(
+            handle_event(InputEvent::Key(KeyCombo::plain(Key::Char('K'))), &state),
+            Some(Action::ValueScrollUp)
+        );
     }
 
     #[test]
