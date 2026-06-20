@@ -1,8 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
-use nucleo_matcher::{Config, Matcher};
 use tokio::sync::mpsc;
 
 use crate::domain::{RedisKey, RedisKind, RedisValue, redis_value_table};
@@ -82,8 +80,7 @@ pub struct AppState {
     pub current_db: u8,
     pub connection_status: ConnectionStatus,
     pub keys: Vec<RedisKey>,
-    pub filtered_indices: Vec<usize>,
-    pub filter_query: String,
+    pub search_pattern: String,
     pub filter_active: bool,
     pub selected_index: usize,
     pub scroll_offset: usize,
@@ -110,8 +107,7 @@ impl AppState {
             current_db,
             connection_status: ConnectionStatus::Disconnected,
             keys: Vec::new(),
-            filtered_indices: Vec::new(),
-            filter_query: String::new(),
+            search_pattern: "*".to_string(),
             filter_active: false,
             selected_index: 0,
             scroll_offset: 0,
@@ -134,6 +130,12 @@ pub enum Action {
         dbsize: Option<usize>,
     },
     ConnectFailed(String),
+    KeysScanned {
+        keys: Vec<RedisKey>,
+    },
+    KeysScanFailed {
+        message: String,
+    },
     SelectNext,
     SelectPrev,
     Quit,
@@ -192,6 +194,9 @@ pub enum Effect {
     FetchValue {
         key: String,
     },
+    SearchKeys {
+        pattern: String,
+    },
     ExecuteCommand {
         command: String,
     },
@@ -218,18 +223,29 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             state.connection_status = ConnectionStatus::Connected;
             state.keys = keys;
             state.dbsize = dbsize;
-            recompute_filtered_indices(state);
+            state.search_pattern = "*".to_string();
             clamp_selection_and_scroll(state);
             fetch_selected_key(state)
         }
         Action::ConnectFailed(message) => {
             state.connection_status = ConnectionStatus::Error(message);
             state.keys.clear();
-            recompute_filtered_indices(state);
             state.dbsize = None;
             state.selected_index = 0;
             state.scroll_offset = 0;
             state.value_state = ValueState::Empty;
+            Vec::new()
+        }
+        Action::KeysScanned { keys } => {
+            state.keys = keys;
+            state.selected_index = 0;
+            state.scroll_offset = 0;
+            fetch_selected_key(state)
+        }
+        Action::KeysScanFailed { message } => {
+            state.status_message = Some(StatusMessage::Error(format!(
+                "Redis key search failed: {message}"
+            )));
             Vec::new()
         }
         Action::SelectNext => {
@@ -237,7 +253,7 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
                 return Vec::new();
             }
             let previous_index = state.selected_index;
-            let count = filtered_count(state);
+            let count = key_count(state);
             if count > 0 {
                 state.selected_index = (state.selected_index + 1).min(count - 1);
                 keep_selection_visible(state);
@@ -274,6 +290,9 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             if state.db_overlay.is_some() || state.command_modal.is_open {
                 return Vec::new();
             }
+            if state.search_pattern == "*" {
+                state.search_pattern.clear();
+            }
             state.filter_active = true;
             Vec::new()
         }
@@ -281,29 +300,29 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             if !state.filter_active {
                 return Vec::new();
             }
-            state.filter_query.push(ch);
-            apply_filter_change(state)
+            state.search_pattern.push(ch);
+            Vec::new()
         }
         Action::FilterBackspace => {
             if !state.filter_active {
                 return Vec::new();
             }
-            if state.filter_query.pop().is_none() {
-                return Vec::new();
-            }
-            apply_filter_change(state)
+            state.search_pattern.pop();
+            Vec::new()
         }
         Action::ClearFilter => {
             state.filter_active = false;
-            if state.filter_query.is_empty() {
-                return Vec::new();
-            }
-            state.filter_query.clear();
-            apply_filter_change(state)
+            state.search_pattern = "*".to_string();
+            vec![Effect::SearchKeys {
+                pattern: state.search_pattern.clone(),
+            }]
         }
         Action::CommitFilter => {
             state.filter_active = false;
-            Vec::new()
+            state.search_pattern = normalized_search_pattern(&state.search_pattern);
+            vec![Effect::SearchKeys {
+                pattern: state.search_pattern.clone(),
+            }]
         }
         Action::OpenCommandModal => {
             if state.db_overlay.is_some() || state.filter_active {
@@ -424,9 +443,7 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             if !is_current_key(state, &key) {
                 return Vec::new();
             }
-            if let Some(redis_key) =
-                selected_full_index(state).and_then(|index| state.keys.get_mut(index))
-            {
+            if let Some(redis_key) = state.keys.get_mut(state.selected_index) {
                 redis_key.kind = kind;
                 redis_key.ttl = ttl;
             }
@@ -471,7 +488,7 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
 fn reset_for_connect(state: &mut AppState) {
     state.connection_status = ConnectionStatus::Connecting;
     state.keys.clear();
-    recompute_filtered_indices(state);
+    state.search_pattern = "*".to_string();
     state.dbsize = None;
     state.selected_index = 0;
     state.scroll_offset = 0;
@@ -503,17 +520,14 @@ fn submit_db_selection(state: &mut AppState) -> Vec<Effect> {
     ]
 }
 
-pub fn filtered_count(state: &AppState) -> usize {
-    state.filtered_indices.len()
-}
-
-fn selected_full_index(state: &AppState) -> Option<usize> {
-    state.filtered_indices.get(state.selected_index).copied()
+pub fn key_count(state: &AppState) -> usize {
+    state.keys.len()
 }
 
 fn selected_key(state: &AppState) -> Option<String> {
-    selected_full_index(state)
-        .and_then(|index| state.keys.get(index))
+    state
+        .keys
+        .get(state.selected_index)
         .map(|redis_key| redis_key.key.clone())
 }
 
@@ -530,40 +544,12 @@ fn fetch_selected_key(state: &mut AppState) -> Vec<Effect> {
     vec![Effect::FetchValue { key }]
 }
 
-fn apply_filter_change(state: &mut AppState) -> Vec<Effect> {
-    recompute_filtered_indices(state);
-    clamp_selection_and_scroll(state);
-    fetch_selected_key(state)
-}
-
-fn recompute_filtered_indices(state: &mut AppState) {
-    if state.filter_query.is_empty() {
-        state.filtered_indices = (0..state.keys.len()).collect();
-        return;
+fn normalized_search_pattern(pattern: &str) -> String {
+    if pattern.is_empty() {
+        "*".to_string()
+    } else {
+        pattern.to_string()
     }
-
-    // Mirrors the RDB nucleo filtering locally; extracting this into tui-kit is
-    // a separate boundary task.
-    let mut matcher = Matcher::new(Config::DEFAULT);
-    let pattern = Pattern::parse(
-        &state.filter_query,
-        CaseMatching::Ignore,
-        Normalization::Smart,
-    );
-
-    state.filtered_indices = state
-        .keys
-        .iter()
-        .enumerate()
-        .filter_map(|(index, redis_key)| {
-            let mut indices = Vec::new();
-            let mut buf = Vec::new();
-            let haystack = nucleo_matcher::Utf32Str::new(&redis_key.key, &mut buf);
-            pattern
-                .indices(haystack, &mut matcher, &mut indices)
-                .map(|_| index)
-        })
-        .collect();
 }
 
 fn request_export_csv(state: &mut AppState) -> Vec<Effect> {
@@ -609,7 +595,7 @@ fn table_visible_rows_for_height(height: u16) -> usize {
 }
 
 fn clamp_selection_and_scroll(state: &mut AppState) {
-    let count = filtered_count(state);
+    let count = key_count(state);
     if count == 0 {
         state.selected_index = 0;
         state.scroll_offset = 0;
@@ -623,7 +609,7 @@ fn clamp_selection_and_scroll(state: &mut AppState) {
 }
 
 fn keep_selection_visible(state: &mut AppState) {
-    if filtered_count(state) == 0 {
+    if key_count(state) == 0 {
         state.scroll_offset = 0;
         return;
     }
@@ -671,6 +657,15 @@ impl EffectRunner {
                     };
                     let _ = self.action_tx.send(action).await;
                 }
+                Effect::SearchKeys { pattern } => {
+                    let action = match self.cli.scan_keys(&pattern).await {
+                        Ok(keys) => Action::KeysScanned { keys },
+                        Err(e) => Action::KeysScanFailed {
+                            message: e.to_string(),
+                        },
+                    };
+                    let _ = self.action_tx.send(action).await;
+                }
                 Effect::ExecuteCommand { command } => {
                     let action = match self.cli.execute_command(&command).await {
                         Ok(output) => Action::CommandSucceeded { output },
@@ -712,7 +707,7 @@ impl EffectRunner {
     async fn connect(&self) -> Result<(Vec<RedisKey>, Option<usize>), crate::infra::RedisCliError> {
         self.cli.ping().await?;
         let dbsize = self.cli.dbsize().await?;
-        let keys = self.cli.scan_keys().await?;
+        let keys = self.cli.scan_keys("*").await?;
         Ok((keys, Some(dbsize)))
     }
 
@@ -739,10 +734,6 @@ mod tests {
 
     mod reducer {
         use super::*;
-
-        fn sync_filter(state: &mut AppState) {
-            state.filtered_indices = (0..state.keys.len()).collect();
-        }
 
         #[test]
         fn start_connect_sets_connecting_and_emits_connect_effect() {
@@ -797,7 +788,6 @@ mod tests {
         fn select_next_and_prev_clamp_at_bounds() {
             let mut state = AppState::new("redis://localhost");
             state.keys = vec![key("a"), key("b")];
-            sync_filter(&mut state);
 
             assert_eq!(
                 reduce(&mut state, Action::SelectNext),
@@ -865,7 +855,6 @@ mod tests {
         fn value_loaded_populates_value_state_and_backfills_selected_key_metadata() {
             let mut state = AppState::new("redis://localhost");
             state.keys = vec![key("a"), key("b")];
-            sync_filter(&mut state);
             state.selected_index = 1;
             state.value_state = ValueState::Loading {
                 key: "b".to_string(),
@@ -899,7 +888,6 @@ mod tests {
         fn stale_value_loaded_for_previous_selection_is_ignored() {
             let mut state = AppState::new("redis://localhost");
             state.keys = vec![key("a"), key("b")];
-            sync_filter(&mut state);
             state.selected_index = 1;
             state.value_state = ValueState::Loading {
                 key: "b".to_string(),
@@ -929,7 +917,6 @@ mod tests {
         fn value_fetch_failed_sets_failure_for_current_selection_only() {
             let mut state = AppState::new("redis://localhost");
             state.keys = vec![key("a"), key("b")];
-            sync_filter(&mut state);
             state.selected_index = 1;
             state.value_state = ValueState::Loading {
                 key: "b".to_string(),
@@ -1120,8 +1107,7 @@ mod tests {
             let mut state = AppState::new("redis://localhost:6379/0");
             state.connection_status = ConnectionStatus::Connected;
             state.keys = vec![key("a"), key("b")];
-            state.filtered_indices = vec![0, 1];
-            state.filter_query = "user".to_string();
+            state.search_pattern = "user:*".to_string();
             state.selected_index = 1;
             state.scroll_offset = 1;
             state.dbsize = Some(2);
@@ -1142,8 +1128,7 @@ mod tests {
             assert_eq!(state.current_db, 3);
             assert_eq!(state.connection_status, ConnectionStatus::Connecting);
             assert!(state.keys.is_empty());
-            assert!(state.filtered_indices.is_empty());
-            assert_eq!(state.filter_query, "user");
+            assert_eq!(state.search_pattern, "*");
             assert_eq!(state.selected_index, 0);
             assert_eq!(state.scroll_offset, 0);
             assert_eq!(state.dbsize, None);
@@ -1165,7 +1150,6 @@ mod tests {
             let mut state = AppState::new("redis://localhost:6379/1");
             state.connection_status = ConnectionStatus::Connected;
             state.keys = vec![key("a")];
-            state.filtered_indices = vec![0];
             state.db_overlay = Some(DbOverlayState {
                 entries: vec![(0, Some(0)), (1, Some(1))],
                 selected: 1,
@@ -1177,7 +1161,6 @@ mod tests {
             assert!(effects.is_empty());
             assert_eq!(state.current_db, 1);
             assert_eq!(state.keys, vec![key("a")]);
-            assert_eq!(state.filtered_indices, vec![0]);
             assert_eq!(state.db_overlay, None);
         }
 
@@ -1200,7 +1183,6 @@ mod tests {
         fn db_overlay_navigation_does_not_move_key_selection() {
             let mut state = AppState::new("redis://localhost");
             state.keys = vec![key("a"), key("b")];
-            sync_filter(&mut state);
             state.selected_index = 0;
             state.db_overlay = Some(DbOverlayState {
                 entries: vec![(0, Some(2)), (1, Some(5))],
@@ -1225,7 +1207,18 @@ mod tests {
         }
 
         #[test]
-        fn filter_query_narrows_key_list_in_original_order() {
+        fn opening_filter_clears_implicit_wildcard_for_input() {
+            let mut state = AppState::new("redis://localhost");
+
+            let effects = reduce(&mut state, Action::OpenFilter);
+
+            assert!(effects.is_empty());
+            assert!(state.filter_active);
+            assert!(state.search_pattern.is_empty());
+        }
+
+        #[test]
+        fn filter_input_edits_pattern_without_scanning() {
             let mut state = AppState::new("redis://localhost");
             state.keys = vec![
                 key("user:1"),
@@ -1233,14 +1226,86 @@ mod tests {
                 key("user:settings"),
                 key("cache:1"),
             ];
-            sync_filter(&mut state);
+            state.search_pattern.clear();
 
             assert!(reduce(&mut state, Action::OpenFilter).is_empty());
             let effects = reduce(&mut state, Action::FilterInput('u'));
 
-            assert_eq!(state.filter_query, "u");
-            assert_eq!(state.filtered_indices, vec![0, 2]);
+            assert_eq!(state.search_pattern, "u");
+            assert_eq!(
+                state.keys,
+                vec![
+                    key("user:1"),
+                    key("session:1"),
+                    key("user:settings"),
+                    key("cache:1"),
+                ]
+            );
             assert_eq!(state.selected_index, 0);
+            assert!(effects.is_empty());
+        }
+
+        #[test]
+        fn commit_filter_emits_search_keys_with_typed_pattern() {
+            let mut state = AppState::new("redis://localhost");
+            state.filter_active = true;
+            state.search_pattern = "user:*".to_string();
+
+            let effects = reduce(&mut state, Action::CommitFilter);
+
+            assert!(!state.filter_active);
+            assert_eq!(state.search_pattern, "user:*");
+            assert_eq!(
+                effects,
+                vec![Effect::SearchKeys {
+                    pattern: "user:*".to_string()
+                }]
+            );
+        }
+
+        #[test]
+        fn commit_filter_uses_wildcard_for_empty_pattern() {
+            let mut state = AppState::new("redis://localhost");
+            state.filter_active = true;
+            state.search_pattern.clear();
+
+            let effects = reduce(&mut state, Action::CommitFilter);
+
+            assert_eq!(state.search_pattern, "*");
+            assert_eq!(
+                effects,
+                vec![Effect::SearchKeys {
+                    pattern: "*".to_string()
+                }]
+            );
+        }
+
+        #[test]
+        fn keys_scanned_replaces_keys_resets_selection_and_fetches_first_key() {
+            let mut state = AppState::new("redis://localhost");
+            state.keys = vec![key("old:a"), key("old:b"), key("old:c")];
+            state.selected_index = 1;
+            state.scroll_offset = 1;
+            state.value_state = ValueState::Loading {
+                key: "old:b".to_string(),
+            };
+
+            let effects = reduce(
+                &mut state,
+                Action::KeysScanned {
+                    keys: vec![key("user:1"), key("user:2")],
+                },
+            );
+
+            assert_eq!(state.keys, vec![key("user:1"), key("user:2")]);
+            assert_eq!(state.selected_index, 0);
+            assert_eq!(state.scroll_offset, 0);
+            assert_eq!(
+                state.value_state,
+                ValueState::Loading {
+                    key: "user:1".to_string()
+                }
+            );
             assert_eq!(
                 effects,
                 vec![Effect::FetchValue {
@@ -1250,127 +1315,41 @@ mod tests {
         }
 
         #[test]
-        fn filter_change_clamps_selection_and_fetches_filtered_selected_key() {
+        fn keys_scanned_with_empty_results_clears_value_state() {
             let mut state = AppState::new("redis://localhost");
-            state.keys = vec![key("alpha"), key("beta"), key("gamma"), key("alpine")];
-            sync_filter(&mut state);
-            state.selected_index = 3;
-
-            assert!(reduce(&mut state, Action::OpenFilter).is_empty());
-            let effects = reduce(&mut state, Action::FilterInput('p'));
-
-            assert_eq!(state.filtered_indices, vec![0, 3]);
-            assert_eq!(state.selected_index, 1);
-            assert_eq!(
-                effects,
-                vec![Effect::FetchValue {
-                    key: "alpine".to_string()
-                }]
-            );
-        }
-
-        #[test]
-        fn moving_selection_while_filtered_fetches_filtered_key() {
-            let mut state = AppState::new("redis://localhost");
-            state.keys = vec![key("alpha"), key("beta"), key("gamma"), key("alpine")];
-            state.filter_query = "al".to_string();
-            state.filtered_indices = vec![0, 3];
-
-            let effects = reduce(&mut state, Action::SelectNext);
-
-            assert_eq!(state.selected_index, 1);
-            assert_eq!(
-                effects,
-                vec![Effect::FetchValue {
-                    key: "alpine".to_string()
-                }]
-            );
-        }
-
-        #[test]
-        fn value_loaded_backfills_full_key_index_while_filtered() {
-            let mut state = AppState::new("redis://localhost");
-            state.keys = vec![key("alpha"), key("beta"), key("gamma"), key("alpine")];
-            state.filter_query = "al".to_string();
-            state.filtered_indices = vec![0, 3];
-            state.selected_index = 1;
-            state.value_state = ValueState::Loading {
-                key: "alpine".to_string(),
+            state.keys = vec![key("old")];
+            state.value_state = ValueState::Loaded {
+                key: "old".to_string(),
+                kind: RedisKind::String,
+                ttl: None,
+                value: RedisValue::String("value".to_string()),
             };
 
-            let effects = reduce(
-                &mut state,
-                Action::ValueLoaded {
-                    key: "alpine".to_string(),
-                    kind: RedisKind::List,
-                    ttl: Some(90),
-                    value: RedisValue::List(vec!["a".to_string()]),
-                },
-            );
+            let effects = reduce(&mut state, Action::KeysScanned { keys: Vec::new() });
 
+            assert!(state.keys.is_empty());
+            assert_eq!(state.selected_index, 0);
+            assert_eq!(state.scroll_offset, 0);
+            assert_eq!(state.value_state, ValueState::Empty);
             assert!(effects.is_empty());
-            assert_eq!(state.keys[1].kind, RedisKind::Unknown);
-            assert_eq!(state.keys[3].kind, RedisKind::List);
-            assert_eq!(state.keys[3].ttl, Some(90));
         }
 
         #[test]
-        fn clearing_filter_restores_full_view_and_refetches_selected_full_key() {
+        fn clearing_filter_resets_pattern_and_searches_all_keys() {
             let mut state = AppState::new("redis://localhost");
-            state.keys = vec![key("alpha"), key("beta"), key("gamma"), key("alpine")];
-            state.filter_query = "alp".to_string();
-            state.filtered_indices = vec![0, 3];
-            state.selected_index = 1;
+            state.search_pattern = "user:*".to_string();
             state.filter_active = true;
 
             let effects = reduce(&mut state, Action::ClearFilter);
 
-            assert_eq!(state.filter_query, "");
+            assert_eq!(state.search_pattern, "*");
             assert!(!state.filter_active);
-            assert_eq!(state.filtered_indices, vec![0, 1, 2, 3]);
-            assert_eq!(state.selected_index, 1);
             assert_eq!(
                 effects,
-                vec![Effect::FetchValue {
-                    key: "beta".to_string()
+                vec![Effect::SearchKeys {
+                    pattern: "*".to_string()
                 }]
             );
-        }
-
-        #[test]
-        fn no_match_filter_yields_empty_view_and_value_state() {
-            let mut state = AppState::new("redis://localhost");
-            state.keys = vec![key("alpha"), key("beta")];
-            sync_filter(&mut state);
-            state.selected_index = 1;
-            state.value_state = ValueState::Loaded {
-                key: "beta".to_string(),
-                kind: RedisKind::String,
-                ttl: None,
-                value: RedisValue::String("b".to_string()),
-            };
-
-            assert!(reduce(&mut state, Action::OpenFilter).is_empty());
-            let effects = reduce(&mut state, Action::FilterInput('z'));
-
-            assert!(effects.is_empty());
-            assert_eq!(state.filtered_indices, Vec::<usize>::new());
-            assert_eq!(state.selected_index, 0);
-            assert_eq!(state.scroll_offset, 0);
-            assert_eq!(state.value_state, ValueState::Empty);
-        }
-
-        #[test]
-        fn enter_commits_filter_without_clearing_query() {
-            let mut state = AppState::new("redis://localhost");
-            state.filter_active = true;
-            state.filter_query = "user".to_string();
-
-            let effects = reduce(&mut state, Action::CommitFilter);
-
-            assert!(effects.is_empty());
-            assert!(!state.filter_active);
-            assert_eq!(state.filter_query, "user");
         }
 
         #[test]
@@ -1420,7 +1399,6 @@ mod tests {
             for (kind, value, headers, rows) in cases {
                 let mut state = AppState::new("redis://localhost");
                 state.keys = vec![key("user:1/profile")];
-                sync_filter(&mut state);
                 state.value_state = ValueState::Loaded {
                     key: "user:1/profile".to_string(),
                     kind,
@@ -1504,7 +1482,8 @@ mod tests {
             cli.expect_dbsize().once().returning(|| Ok(2));
             cli.expect_scan_keys()
                 .once()
-                .returning(|| Ok(vec![key("a"), key("b")]));
+                .withf(|pattern| pattern == "*")
+                .returning(|_| Ok(vec![key("a"), key("b")]));
 
             let (tx, mut rx) = mpsc::channel(4);
             let runner = EffectRunner::new(Arc::new(cli), tx);
@@ -1555,6 +1534,35 @@ mod tests {
             assert_eq!(
                 action,
                 Action::ConnectFailed("redis-cli failed: connection refused".to_string())
+            );
+        }
+
+        #[tokio::test]
+        async fn search_keys_effect_scans_pattern_and_dispatches_keys_scanned() {
+            let mut cli = MockRedisCli::new();
+            cli.expect_scan_keys()
+                .once()
+                .withf(|pattern| pattern == "user:*:[ab]")
+                .returning(|_| Ok(vec![key("user:1:a"), key("user:2:b")]));
+
+            let (tx, mut rx) = mpsc::channel(4);
+            let runner = EffectRunner::new(Arc::new(cli), tx);
+
+            runner
+                .run(vec![Effect::SearchKeys {
+                    pattern: "user:*:[ab]".to_string(),
+                }])
+                .await;
+
+            let action = tokio::time::timeout(Duration::from_millis(500), rx.recv())
+                .await
+                .expect("action timeout")
+                .expect("channel closed");
+            assert_eq!(
+                action,
+                Action::KeysScanned {
+                    keys: vec![key("user:1:a"), key("user:2:b")],
+                }
             );
         }
 
