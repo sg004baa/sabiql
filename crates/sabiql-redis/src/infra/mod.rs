@@ -367,18 +367,22 @@ fn parse_line_pairs(
         .collect())
 }
 
-fn scan_values_body(stdout: &str) -> Result<String, RedisCliError> {
-    let mut lines = stdout.lines();
-    let cursor = lines
-        .next()
-        .map(str::trim)
-        .ok_or_else(|| RedisCliError::Parse("SCAN-family reply was empty".to_string()))?;
-    if cursor.is_empty() || !cursor.bytes().all(|b| b.is_ascii_digit()) {
-        return Err(RedisCliError::Parse(format!(
-            "invalid SCAN-family cursor: {cursor:?}"
-        )));
+fn accumulate_scan_value_body<I>(mut body: Vec<String>, pages: I, cap: usize) -> (Vec<String>, bool)
+where
+    I: IntoIterator<Item = ScanPage>,
+{
+    let mut is_complete = false;
+    for page in pages {
+        is_complete = scan_is_complete(&page);
+        let remaining = cap.saturating_sub(body.len());
+        body.extend(page.keys.into_iter().take(remaining));
+
+        if is_complete || body.len() >= cap {
+            break;
+        }
     }
-    Ok(lines.collect::<Vec<_>>().join("\n"))
+
+    (body, is_complete)
 }
 
 #[derive(Debug, Clone)]
@@ -399,6 +403,39 @@ impl RedisCliSubprocess {
             dsn: RedisDsn::parse(dsn)?,
             timeout,
         })
+    }
+
+    async fn scan_value_lines(
+        &self,
+        command: &str,
+        key: &str,
+        body_cap: usize,
+    ) -> Result<Vec<String>, RedisCliError> {
+        let mut cursor = "0".to_string();
+        let mut body = Vec::new();
+
+        loop {
+            let stdout = self
+                .run_command(&[
+                    command.to_string(),
+                    key.to_string(),
+                    cursor,
+                    "COUNT".to_string(),
+                    REDIS_VALUE_PREVIEW_LIMIT.to_string(),
+                ])
+                .await?;
+            let page = parse_scan_page(&stdout)?;
+            let next_cursor = page.next_cursor.clone();
+            let (next_body, is_complete) = accumulate_scan_value_body(body, [page], body_cap);
+            body = next_body;
+
+            if is_complete || body.len() >= body_cap {
+                break;
+            }
+            cursor = next_cursor;
+        }
+
+        Ok(body)
     }
 
     async fn run_command(&self, args: &[String]) -> Result<String, RedisCliError> {
@@ -514,28 +551,14 @@ impl RedisCli for RedisCliSubprocess {
                 parse_list_value(&stdout, cap)
             }
             RedisKind::Set => {
-                let stdout = self
-                    .run_command(&[
-                        "SSCAN".to_string(),
-                        key.to_string(),
-                        "0".to_string(),
-                        "COUNT".to_string(),
-                        cap.to_string(),
-                    ])
-                    .await?;
-                parse_set_value(&scan_values_body(&stdout)?, cap)
+                let body = self.scan_value_lines("SSCAN", key, cap).await?;
+                parse_set_value(&body.join("\n"), cap)
             }
             RedisKind::Hash => {
-                let stdout = self
-                    .run_command(&[
-                        "HSCAN".to_string(),
-                        key.to_string(),
-                        "0".to_string(),
-                        "COUNT".to_string(),
-                        cap.to_string(),
-                    ])
+                let body = self
+                    .scan_value_lines("HSCAN", key, cap.saturating_mul(2))
                     .await?;
-                parse_hash_value(&scan_values_body(&stdout)?, cap)
+                parse_hash_value(&body.join("\n"), cap)
             }
             RedisKind::ZSet => {
                 let stdout = self
@@ -644,6 +667,109 @@ mod tests {
         assert_eq!(page.next_cursor, "0");
         assert_eq!(page.keys, vec!["settings".to_string()]);
         assert!(scan_is_complete(&page));
+    }
+
+    #[test]
+    fn accumulates_scan_value_body_across_pages_until_terminal_cursor() {
+        let (body, is_complete) = accumulate_scan_value_body(
+            Vec::new(),
+            [
+                ScanPage {
+                    next_cursor: "5".to_string(),
+                    keys: vec!["a".to_string(), "b".to_string()],
+                },
+                ScanPage {
+                    next_cursor: "0".to_string(),
+                    keys: vec!["c".to_string(), "d".to_string()],
+                },
+            ],
+            REDIS_VALUE_PREVIEW_LIMIT,
+        );
+
+        assert!(is_complete);
+        assert_eq!(body, vec!["a", "b", "c", "d"]);
+    }
+
+    #[test]
+    fn accumulates_scan_value_body_stops_at_cap() {
+        let first_page = (0..300).map(|i| format!("v{i}")).collect();
+        let second_page = (300..700).map(|i| format!("v{i}")).collect();
+
+        let (body, is_complete) = accumulate_scan_value_body(
+            Vec::new(),
+            [
+                ScanPage {
+                    next_cursor: "5".to_string(),
+                    keys: first_page,
+                },
+                ScanPage {
+                    next_cursor: "9".to_string(),
+                    keys: second_page,
+                },
+                ScanPage {
+                    next_cursor: "0".to_string(),
+                    keys: vec!["should-not-be-read".to_string()],
+                },
+            ],
+            REDIS_VALUE_PREVIEW_LIMIT,
+        );
+
+        assert!(!is_complete);
+        assert_eq!(body.len(), REDIS_VALUE_PREVIEW_LIMIT);
+        assert_eq!(body.first().map(String::as_str), Some("v0"));
+        assert_eq!(body.last().map(String::as_str), Some("v499"));
+    }
+
+    #[test]
+    fn accumulates_scan_value_body_from_single_terminal_page() {
+        let (body, is_complete) = accumulate_scan_value_body(
+            Vec::new(),
+            [ScanPage {
+                next_cursor: "0".to_string(),
+                keys: vec!["only".to_string()],
+            }],
+            REDIS_VALUE_PREVIEW_LIMIT,
+        );
+
+        assert!(is_complete);
+        assert_eq!(body, vec!["only"]);
+    }
+
+    #[test]
+    fn accumulated_hash_scan_body_preserves_hash_entry_cap() {
+        let first_page = (0..400)
+            .flat_map(|i| [format!("field{i}"), format!("value{i}")])
+            .collect();
+        let second_page = (400..700)
+            .flat_map(|i| [format!("field{i}"), format!("value{i}")])
+            .collect();
+
+        let (body, is_complete) = accumulate_scan_value_body(
+            Vec::new(),
+            [
+                ScanPage {
+                    next_cursor: "5".to_string(),
+                    keys: first_page,
+                },
+                ScanPage {
+                    next_cursor: "9".to_string(),
+                    keys: second_page,
+                },
+            ],
+            REDIS_VALUE_PREVIEW_LIMIT.saturating_mul(2),
+        );
+        let value = parse_hash_value(&body.join("\n"), REDIS_VALUE_PREVIEW_LIMIT).unwrap();
+
+        assert!(!is_complete);
+        assert_eq!(body.len(), REDIS_VALUE_PREVIEW_LIMIT.saturating_mul(2));
+        assert_eq!(
+            value,
+            RedisValue::Hash(
+                (0..REDIS_VALUE_PREVIEW_LIMIT)
+                    .map(|i| (format!("field{i}"), format!("value{i}")))
+                    .collect()
+            )
+        );
     }
 
     #[test]
