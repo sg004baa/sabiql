@@ -31,7 +31,7 @@ async fn main() -> Result<()> {
 
     let cli = Arc::new(redis_cli_from_args(&args)?);
     let (action_tx, mut action_rx) = mpsc::channel::<Action>(64);
-    let effect_runner = EffectRunner::new(cli, action_tx);
+    let effect_runner = Arc::new(EffectRunner::new(cli, action_tx));
     let mut state = AppState::with_read_only(args.dsn, args.read_only);
 
     let mut tui = TuiRunner::new()?;
@@ -44,19 +44,18 @@ async fn main() -> Result<()> {
             &mut state,
             &mut tui,
             &effect_runner,
-        )
-        .await?;
-        process_action(Action::StartConnect, &mut state, &mut tui, &effect_runner).await?;
+        )?;
+        process_action(Action::StartConnect, &mut state, &mut tui, &effect_runner)?;
 
         loop {
             tokio::select! {
                 Some(event) = tui.next_event() => {
                     if let Some(action) = handle_event(event, &state) {
-                        process_action(action, &mut state, &mut tui, &effect_runner).await?;
+                        process_action(action, &mut state, &mut tui, &effect_runner)?;
                     }
                 }
                 Some(action) = action_rx.recv() => {
-                    process_action(action, &mut state, &mut tui, &effect_runner).await?;
+                    process_action(action, &mut state, &mut tui, &effect_runner)?;
                 }
                 else => break,
             }
@@ -82,15 +81,20 @@ fn redis_cli_from_args(
     RedisCliSubprocess::with_read_only(&args.dsn, args.read_only)
 }
 
-async fn process_action(
+fn process_action(
     action: Action,
     state: &mut AppState,
     tui: &mut TuiRunner,
-    effect_runner: &EffectRunner,
+    effect_runner: &Arc<EffectRunner>,
 ) -> Result<()> {
     let effects = app::reduce(state, action);
     tui.terminal().draw(|frame| ui::render(frame, state))?;
-    effect_runner.run(effects).await;
+    if !effects.is_empty() {
+        let runner = Arc::clone(effect_runner);
+        tokio::spawn(async move {
+            runner.run(effects).await;
+        });
+    }
     Ok(())
 }
 
