@@ -18,6 +18,8 @@ use infra::RedisCliSubprocess;
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
+    #[arg(long)]
+    read_only: bool,
     #[arg(default_value = "redis://127.0.0.1:6379/0")]
     dsn: String,
 }
@@ -27,10 +29,10 @@ async fn main() -> Result<()> {
     error::install_hooks()?;
     let args = Args::parse();
 
-    let cli = Arc::new(RedisCliSubprocess::new(&args.dsn)?);
+    let cli = Arc::new(redis_cli_from_args(&args)?);
     let (action_tx, mut action_rx) = mpsc::channel::<Action>(64);
     let effect_runner = EffectRunner::new(cli, action_tx);
-    let mut state = AppState::new(args.dsn);
+    let mut state = AppState::with_read_only(args.dsn, args.read_only);
 
     let mut tui = TuiRunner::new()?;
     tui.enter()?;
@@ -72,6 +74,12 @@ async fn main() -> Result<()> {
     run_result?;
     exit_result?;
     Ok(())
+}
+
+fn redis_cli_from_args(
+    args: &Args,
+) -> std::result::Result<RedisCliSubprocess, infra::RedisCliError> {
+    RedisCliSubprocess::with_read_only(&args.dsn, args.read_only)
 }
 
 async fn process_action(
@@ -144,6 +152,30 @@ fn handle_modal_key(combo: KeyCombo) -> Option<Action> {
 mod tests {
     use super::*;
     use sabiql_tui_kit::input::Modifiers;
+
+    #[test]
+    fn read_only_flag_defaults_to_false() {
+        let args = Args::parse_from(["sabiql-redis", "redis://localhost"]);
+
+        assert!(!args.read_only);
+        assert_eq!(args.dsn, "redis://localhost");
+    }
+
+    #[test]
+    fn read_only_flag_parses_true() {
+        let args = Args::parse_from(["sabiql-redis", "--read-only", "redis://localhost"]);
+
+        assert!(args.read_only);
+        assert_eq!(args.dsn, "redis://localhost");
+    }
+
+    #[test]
+    fn read_only_flag_propagates_to_subprocess() {
+        let args = Args::parse_from(["sabiql-redis", "--read-only", "redis://localhost"]);
+        let cli = redis_cli_from_args(&args).unwrap();
+
+        assert!(cli.read_only());
+    }
 
     #[test]
     fn colon_opens_command_modal_when_closed() {

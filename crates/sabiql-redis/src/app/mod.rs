@@ -71,6 +71,7 @@ pub enum StatusMessage {
 #[derive(Debug, Clone)]
 pub struct AppState {
     pub dsn: String,
+    pub read_only: bool,
     pub connection_status: ConnectionStatus,
     pub keys: Vec<RedisKey>,
     pub filtered_indices: Vec<usize>,
@@ -88,8 +89,13 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(dsn: impl Into<String>) -> Self {
+        Self::with_read_only(dsn, false)
+    }
+
+    pub fn with_read_only(dsn: impl Into<String>, read_only: bool) -> Self {
         Self {
             dsn: dsn.into(),
+            read_only,
             connection_status: ConnectionStatus::Disconnected,
             keys: Vec::new(),
             filtered_indices: Vec::new(),

@@ -136,7 +136,87 @@ pub fn scan_is_complete(page: &ScanPage) -> bool {
     page.next_cursor == "0"
 }
 
-pub fn ensure_command_allowed(command: &str) -> Result<(), RedisCliError> {
+const DESTRUCTIVE_COMMANDS: &[&str] = &["FLUSHALL", "FLUSHDB", "DEL", "UNLINK"];
+
+const READ_ONLY_COMMANDS: &[&str] = &[
+    "PING",
+    "ECHO",
+    "TYPE",
+    "TTL",
+    "PTTL",
+    "EXPIRETIME",
+    "PEXPIRETIME",
+    "EXISTS",
+    "DBSIZE",
+    "RANDOMKEY",
+    "KEYS",
+    "SCAN",
+    "OBJECT",
+    "MEMORY",
+    "DUMP",
+    "TIME",
+    "INFO",
+    "COMMAND",
+    "LOLWUT",
+    "GET",
+    "MGET",
+    "STRLEN",
+    "GETRANGE",
+    "SUBSTR",
+    "GETBIT",
+    "BITCOUNT",
+    "BITPOS",
+    "LLEN",
+    "LRANGE",
+    "LINDEX",
+    "LPOS",
+    "SCARD",
+    "SISMEMBER",
+    "SMISMEMBER",
+    "SMEMBERS",
+    "SRANDMEMBER",
+    "SSCAN",
+    "SINTER",
+    "SUNION",
+    "SDIFF",
+    "HGET",
+    "HMGET",
+    "HGETALL",
+    "HKEYS",
+    "HVALS",
+    "HLEN",
+    "HEXISTS",
+    "HSTRLEN",
+    "HSCAN",
+    "HRANDFIELD",
+    "ZCARD",
+    "ZSCORE",
+    "ZMSCORE",
+    "ZRANK",
+    "ZREVRANK",
+    "ZCOUNT",
+    "ZLEXCOUNT",
+    "ZRANGE",
+    "ZRANGEBYSCORE",
+    "ZRANGEBYLEX",
+    "ZREVRANGE",
+    "ZREVRANGEBYSCORE",
+    "ZREVRANGEBYLEX",
+    "ZSCAN",
+    "ZRANDMEMBER",
+    "SORT_RO",
+    "XLEN",
+    "XRANGE",
+    "XREVRANGE",
+    "XINFO",
+    "GEOPOS",
+    "GEODIST",
+    "GEOSEARCH",
+    "GEOHASH",
+    "PFCOUNT",
+];
+
+pub fn ensure_command_allowed(command: &str, read_only: bool) -> Result<(), RedisCliError> {
     let Some(first_token) = command.split_whitespace().next() else {
         return Err(RedisCliError::CommandDenied(
             "Enter a Redis command.".to_string(),
@@ -144,12 +224,19 @@ pub fn ensure_command_allowed(command: &str) -> Result<(), RedisCliError> {
     };
 
     let upper = first_token.to_ascii_uppercase();
-    match upper.as_str() {
-        "FLUSHALL" | "FLUSHDB" | "DEL" | "UNLINK" => Err(RedisCliError::CommandDenied(format!(
+    if DESTRUCTIVE_COMMANDS.contains(&upper.as_str()) {
+        return Err(RedisCliError::CommandDenied(format!(
             "{upper} is blocked by the destructive-command guard"
-        ))),
-        _ => Ok(()),
+        )));
     }
+
+    if read_only && !READ_ONLY_COMMANDS.contains(&upper.as_str()) {
+        return Err(RedisCliError::CommandDenied(format!(
+            "{upper} is blocked by read-only mode"
+        )));
+    }
+
+    Ok(())
 }
 
 fn command_args(command: &str) -> Vec<String> {
@@ -389,6 +476,7 @@ where
 pub struct RedisCliSubprocess {
     dsn: RedisDsn,
     timeout: Duration,
+    read_only: bool,
 }
 
 impl RedisCliSubprocess {
@@ -398,11 +486,28 @@ impl RedisCliSubprocess {
         Self::with_timeout(dsn, Self::DEFAULT_TIMEOUT)
     }
 
+    pub fn with_read_only(dsn: &str, read_only: bool) -> Result<Self, RedisCliError> {
+        Self::with_timeout_and_read_only(dsn, Self::DEFAULT_TIMEOUT, read_only)
+    }
+
     pub fn with_timeout(dsn: &str, timeout: Duration) -> Result<Self, RedisCliError> {
+        Self::with_timeout_and_read_only(dsn, timeout, false)
+    }
+
+    pub fn with_timeout_and_read_only(
+        dsn: &str,
+        timeout: Duration,
+        read_only: bool,
+    ) -> Result<Self, RedisCliError> {
         Ok(Self {
             dsn: RedisDsn::parse(dsn)?,
             timeout,
+            read_only,
         })
+    }
+
+    pub fn read_only(&self) -> bool {
+        self.read_only
     }
 
     async fn scan_value_lines(
@@ -592,7 +697,7 @@ impl RedisCli for RedisCliSubprocess {
     }
 
     async fn execute_command(&self, command: &str) -> Result<String, RedisCliError> {
-        ensure_command_allowed(command)?;
+        ensure_command_allowed(command, self.read_only)?;
         self.run_command(&command_args(command)).await
     }
 }
@@ -896,7 +1001,7 @@ mod tests {
         for command in ["flushall", "  FLUSHDB  ", "Del key1", "\tDeL\tkey1\n"] {
             assert!(
                 matches!(
-                    ensure_command_allowed(command),
+                    ensure_command_allowed(command, false),
                     Err(RedisCliError::CommandDenied(_))
                 ),
                 "expected command to be denied: {command:?}"
@@ -907,7 +1012,7 @@ mod tests {
     #[test]
     fn command_guard_rejects_destructive_sibling_unlink() {
         assert!(matches!(
-            ensure_command_allowed("UNLINK key1"),
+            ensure_command_allowed("UNLINK key1", false),
             Err(RedisCliError::CommandDenied(_))
         ));
     }
@@ -917,7 +1022,7 @@ mod tests {
         for command in ["", "   ", "\n\t"] {
             assert!(
                 matches!(
-                    ensure_command_allowed(command),
+                    ensure_command_allowed(command, false),
                     Err(RedisCliError::CommandDenied(_))
                 ),
                 "expected command to be denied: {command:?}"
@@ -927,9 +1032,72 @@ mod tests {
 
     #[test]
     fn command_guard_allows_non_destructive_reads_and_writes() {
-        for command in ["GET foo", "set k v", "  LPUSH list value  "] {
-            assert_eq!(ensure_command_allowed(command), Ok(()));
+        for command in [
+            "GET foo",
+            "set k v",
+            "  LPUSH list value  ",
+            "EVAL script 0",
+        ] {
+            assert_eq!(ensure_command_allowed(command, false), Ok(()));
         }
+    }
+
+    #[test]
+    fn command_guard_allows_read_only_allow_list_in_read_only_mode() {
+        for command in [
+            "GET foo",
+            " scan 0 ",
+            "LRANGE list 0 -1",
+            "SMEMBERS set",
+            "HGETALL hash",
+            "ZRANGE zset 0 -1",
+            "XRANGE stream - +",
+            "SORT_RO list",
+            "\tping\n",
+        ] {
+            assert_eq!(
+                ensure_command_allowed(command, true),
+                Ok(()),
+                "expected read-only command to be allowed: {command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn command_guard_rejects_non_allow_list_commands_in_read_only_mode() {
+        for command in [
+            "SET k v",
+            "LPUSH list value",
+            "EVAL script 0",
+            "GETDEL k",
+            "GETEX k",
+            "SORT list",
+            "CONFIG GET *",
+        ] {
+            let err = ensure_command_allowed(command, true).unwrap_err();
+
+            assert!(
+                matches!(err, RedisCliError::CommandDenied(ref message) if message.contains("read-only mode")),
+                "expected read-only denial for {command:?}, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn command_guard_still_rejects_destructive_commands_in_read_only_mode() {
+        assert!(matches!(
+            ensure_command_allowed("FLUSHALL", true),
+            Err(RedisCliError::CommandDenied(_))
+        ));
+    }
+
+    #[test]
+    fn subprocess_defaults_to_read_write_and_can_be_read_only() {
+        let read_write = RedisCliSubprocess::new("redis://localhost").unwrap();
+        let read_only = RedisCliSubprocess::with_read_only("redis://localhost", true).unwrap();
+
+        assert!(!read_write.read_only);
+        assert!(read_only.read_only);
     }
 
     #[tokio::test]

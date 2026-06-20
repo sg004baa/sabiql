@@ -30,7 +30,7 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
     render_status(frame, vertical[0], state);
     render_keys(frame, body[0], state);
     render_value_pane(frame, body[2], state);
-    render_footer(frame, vertical[2]);
+    render_footer(frame, vertical[2], state);
     if state.command_modal.is_open {
         render_command_modal(frame, state);
     }
@@ -239,15 +239,19 @@ fn ttl_label(ttl: Option<u64>) -> String {
     parts.join(" ")
 }
 
-fn render_footer(frame: &mut Frame<'_>, area: Rect) {
+fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let theme = DEFAULT_THEME;
-    let hints = [
+    let mut hints = Vec::new();
+    if state.read_only {
+        hints.push(("[READ-ONLY]", "writes blocked"));
+    }
+    hints.extend([
         ("j/k", "navigate"),
         ("/", "filter"),
         (":", "command"),
         ("e", "export"),
         ("q", "quit"),
-    ];
+    ]);
     frame.render_widget(
         Paragraph::new(hint_line(&hints, &theme))
             .style(Style::default().fg(theme.semantic.text.muted)),
@@ -302,6 +306,10 @@ fn render_command_input(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
 fn render_command_status(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let theme = DEFAULT_THEME;
     let (text, style) = match &state.command_modal.status {
+        CommandStatus::Idle if state.read_only => (
+            "Read-only mode blocks writes; only allow-listed read commands run".to_string(),
+            Style::default().fg(theme.semantic.text.muted),
+        ),
         CommandStatus::Idle => (
             "Blocked: FLUSHALL, FLUSHDB, DEL, UNLINK".to_string(),
             Style::default().fg(theme.semantic.text.muted),
@@ -338,6 +346,29 @@ fn render_command_output(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
+
+    fn render_to_string(state: &AppState) -> String {
+        let backend = TestBackend::new(120, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, state)).unwrap();
+        buffer_to_string(terminal.backend().buffer())
+    }
+
+    fn buffer_to_string(buffer: &Buffer) -> String {
+        let mut output = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                output.push_str(buffer.cell((x, y)).unwrap().symbol());
+            }
+            if y < buffer.area.height.saturating_sub(1) {
+                output.push('\n');
+            }
+        }
+        output
+    }
 
     #[test]
     fn ttl_label_formats_compact_human_readable_values() {
@@ -346,5 +377,34 @@ mod tests {
         assert_eq!(ttl_label(Some(3_600)), "1h");
         assert_eq!(ttl_label(Some(5_025)), "1h 23m 45s");
         assert_eq!(ttl_label(Some(172_801)), "2d 1s");
+    }
+
+    #[test]
+    fn footer_shows_read_only_indicator_when_enabled() {
+        let state = AppState::with_read_only("redis://localhost", true);
+
+        let rendered = render_to_string(&state);
+
+        assert!(rendered.contains("[READ-ONLY]"));
+        assert!(rendered.contains("writes blocked"));
+    }
+
+    #[test]
+    fn footer_omits_read_only_indicator_when_disabled() {
+        let state = AppState::new("redis://localhost");
+
+        let rendered = render_to_string(&state);
+
+        assert!(!rendered.contains("[READ-ONLY]"));
+    }
+
+    #[test]
+    fn command_modal_shows_read_only_hint_when_enabled() {
+        let mut state = AppState::with_read_only("redis://localhost", true);
+        state.command_modal.is_open = true;
+
+        let rendered = render_to_string(&state);
+
+        assert!(rendered.contains("Read-only mode blocks writes"));
     }
 }
