@@ -75,6 +75,30 @@ pub struct DbOverlayState {
     pub loading: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PendingWrite {
+    Delete { key: String, unlink: bool },
+    Persist { key: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfirmState {
+    pub op: PendingWrite,
+    pub prompt: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpireInputState {
+    pub key: String,
+    pub input: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WriteRefresh {
+    ReloadKeys,
+    FetchValue { key: String },
+}
+
 #[derive(Debug, Clone)]
 pub struct AppState {
     pub dsn: String,
@@ -92,6 +116,9 @@ pub struct AppState {
     pub value_state: ValueState,
     pub command_modal: CommandModalState,
     pub db_overlay: Option<DbOverlayState>,
+    pub confirm_state: Option<ConfirmState>,
+    pub expire_input: Option<ExpireInputState>,
+    pub pending_write_refresh: Option<WriteRefresh>,
     pub status_message: Option<StatusMessage>,
     pub should_quit: bool,
 }
@@ -120,6 +147,9 @@ impl AppState {
             value_state: ValueState::Empty,
             command_modal: CommandModalState::new(),
             db_overlay: None,
+            confirm_state: None,
+            expire_input: None,
+            pending_write_refresh: None,
             status_message: None,
             should_quit: false,
         }
@@ -182,6 +212,22 @@ pub enum Action {
     ExportFailed {
         message: String,
     },
+    RequestDelete,
+    RequestUnlink,
+    RequestPersist,
+    OpenExpireInput,
+    ExpireInputDigit(char),
+    ExpireInputBackspace,
+    SubmitExpire,
+    ConfirmWrite,
+    CancelWrite,
+    CancelExpireInput,
+    WriteSucceeded {
+        message: String,
+    },
+    WriteFailed {
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -203,6 +249,17 @@ pub enum Effect {
         stem: String,
         headers: Vec<String>,
         rows: Vec<Vec<String>>,
+    },
+    DeleteKey {
+        key: String,
+        unlink: bool,
+    },
+    SetExpire {
+        key: String,
+        seconds: u64,
+    },
+    PersistKey {
+        key: String,
     },
 }
 
@@ -233,7 +290,7 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             Vec::new()
         }
         Action::SelectNext => {
-            if state.db_overlay.is_some() {
+            if key_navigation_blocked(state) {
                 return Vec::new();
             }
             let previous_index = state.selected_index;
@@ -249,7 +306,7 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             }
         }
         Action::SelectPrev => {
-            if state.db_overlay.is_some() {
+            if key_navigation_blocked(state) {
                 return Vec::new();
             }
             let previous_index = state.selected_index;
@@ -271,7 +328,7 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             Vec::new()
         }
         Action::OpenFilter => {
-            if state.db_overlay.is_some() || state.command_modal.is_open {
+            if overlay_or_modal_open(state) {
                 return Vec::new();
             }
             state.filter_active = true;
@@ -306,7 +363,11 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             Vec::new()
         }
         Action::OpenCommandModal => {
-            if state.db_overlay.is_some() || state.filter_active {
+            if state.db_overlay.is_some()
+                || state.confirm_state.is_some()
+                || state.expire_input.is_some()
+                || state.filter_active
+            {
                 return Vec::new();
             }
             state.command_modal.is_open = true;
@@ -323,6 +384,8 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
                 || state.filter_active
                 || state.command_modal.is_open
                 || state.db_overlay.is_some()
+                || state.confirm_state.is_some()
+                || state.expire_input.is_some()
             {
                 return Vec::new();
             }
@@ -446,7 +509,10 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             Vec::new()
         }
         Action::RequestExportCsv => {
-            if state.db_overlay.is_some() {
+            if state.db_overlay.is_some()
+                || state.confirm_state.is_some()
+                || state.expire_input.is_some()
+            {
                 Vec::new()
             } else {
                 request_export_csv(state)
@@ -465,6 +531,43 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             )));
             Vec::new()
         }
+        Action::RequestDelete => request_delete(state, false),
+        Action::RequestUnlink => request_delete(state, true),
+        Action::RequestPersist => request_persist(state),
+        Action::OpenExpireInput => open_expire_input(state),
+        Action::ExpireInputDigit(ch) => {
+            if let Some(expire_input) = &mut state.expire_input
+                && ch.is_ascii_digit()
+            {
+                expire_input.input.push(ch);
+            }
+            Vec::new()
+        }
+        Action::ExpireInputBackspace => {
+            if let Some(expire_input) = &mut state.expire_input {
+                expire_input.input.pop();
+            }
+            Vec::new()
+        }
+        Action::SubmitExpire => submit_expire(state),
+        Action::ConfirmWrite => confirm_write(state),
+        Action::CancelWrite => {
+            state.confirm_state = None;
+            Vec::new()
+        }
+        Action::CancelExpireInput => {
+            state.expire_input = None;
+            Vec::new()
+        }
+        Action::WriteSucceeded { message } => {
+            state.status_message = Some(StatusMessage::Success(message));
+            refresh_after_write(state)
+        }
+        Action::WriteFailed { message } => {
+            state.pending_write_refresh = None;
+            state.status_message = Some(StatusMessage::Error(message));
+            Vec::new()
+        }
     }
 }
 
@@ -476,6 +579,17 @@ fn reset_for_connect(state: &mut AppState) {
     state.selected_index = 0;
     state.scroll_offset = 0;
     state.value_state = ValueState::Empty;
+}
+
+fn key_navigation_blocked(state: &AppState) -> bool {
+    state.db_overlay.is_some() || state.confirm_state.is_some() || state.expire_input.is_some()
+}
+
+fn overlay_or_modal_open(state: &AppState) -> bool {
+    state.db_overlay.is_some()
+        || state.command_modal.is_open
+        || state.confirm_state.is_some()
+        || state.expire_input.is_some()
 }
 
 fn submit_db_selection(state: &mut AppState) -> Vec<Effect> {
@@ -515,6 +629,133 @@ fn selected_key(state: &AppState) -> Option<String> {
     selected_full_index(state)
         .and_then(|index| state.keys.get(index))
         .map(|redis_key| redis_key.key.clone())
+}
+
+fn request_delete(state: &mut AppState, unlink: bool) -> Vec<Effect> {
+    if state.read_only {
+        deny_read_only_write(state);
+        return Vec::new();
+    }
+    if overlay_or_modal_open(state) || state.filter_active {
+        return Vec::new();
+    }
+    let Some(key) = selected_key(state) else {
+        return Vec::new();
+    };
+
+    let command = if unlink { "UNLINK" } else { "DEL" };
+    let verb = if unlink { "Unlink" } else { "Delete" };
+    state.confirm_state = Some(ConfirmState {
+        op: PendingWrite::Delete {
+            key: key.clone(),
+            unlink,
+        },
+        prompt: format!("{verb} key {key:?} with {command}?"),
+    });
+    Vec::new()
+}
+
+fn request_persist(state: &mut AppState) -> Vec<Effect> {
+    if state.read_only {
+        deny_read_only_write(state);
+        return Vec::new();
+    }
+    if overlay_or_modal_open(state) || state.filter_active {
+        return Vec::new();
+    }
+    let Some(key) = selected_key(state) else {
+        return Vec::new();
+    };
+
+    state.confirm_state = Some(ConfirmState {
+        op: PendingWrite::Persist { key: key.clone() },
+        prompt: format!("Remove expiry from key {key:?} with PERSIST?"),
+    });
+    Vec::new()
+}
+
+fn open_expire_input(state: &mut AppState) -> Vec<Effect> {
+    if state.read_only {
+        deny_read_only_write(state);
+        return Vec::new();
+    }
+    if overlay_or_modal_open(state) || state.filter_active {
+        return Vec::new();
+    }
+    let Some(key) = selected_key(state) else {
+        return Vec::new();
+    };
+
+    state.expire_input = Some(ExpireInputState {
+        key,
+        input: String::new(),
+    });
+    Vec::new()
+}
+
+fn submit_expire(state: &mut AppState) -> Vec<Effect> {
+    if state.read_only {
+        deny_read_only_write(state);
+        return Vec::new();
+    }
+
+    let Some(expire_input) = &state.expire_input else {
+        return Vec::new();
+    };
+    let input = expire_input.input.trim();
+    let Ok(seconds) = input.parse::<u64>() else {
+        state.status_message = Some(StatusMessage::Error(
+            "Enter expiry seconds as digits.".to_string(),
+        ));
+        return Vec::new();
+    };
+
+    let key = expire_input.key.clone();
+    state.expire_input = None;
+    state.pending_write_refresh = Some(WriteRefresh::FetchValue { key: key.clone() });
+    vec![Effect::SetExpire { key, seconds }]
+}
+
+fn confirm_write(state: &mut AppState) -> Vec<Effect> {
+    if state.read_only {
+        deny_read_only_write(state);
+        return Vec::new();
+    }
+
+    let Some(confirm_state) = state.confirm_state.take() else {
+        return Vec::new();
+    };
+    match confirm_state.op {
+        PendingWrite::Delete { key, unlink } => {
+            state.pending_write_refresh = Some(WriteRefresh::ReloadKeys);
+            vec![Effect::DeleteKey { key, unlink }]
+        }
+        PendingWrite::Persist { key } => {
+            state.pending_write_refresh = Some(WriteRefresh::FetchValue { key: key.clone() });
+            vec![Effect::PersistKey { key }]
+        }
+    }
+}
+
+fn refresh_after_write(state: &mut AppState) -> Vec<Effect> {
+    match state.pending_write_refresh.take() {
+        Some(WriteRefresh::ReloadKeys) => {
+            vec![Effect::Connect {
+                dsn: state.dsn.clone(),
+            }]
+        }
+        Some(WriteRefresh::FetchValue { key }) if is_current_key(state, &key) => {
+            state.value_state = ValueState::Loading { key: key.clone() };
+            vec![Effect::FetchValue { key }]
+        }
+        Some(WriteRefresh::FetchValue { .. }) | None => Vec::new(),
+    }
+}
+
+fn deny_read_only_write(state: &mut AppState) {
+    state.status_message = Some(StatusMessage::Error(
+        "Read-only mode blocks write operations.".to_string(),
+    ));
 }
 
 fn is_current_key(state: &AppState, key: &str) -> bool {
@@ -705,6 +946,46 @@ impl EffectRunner {
                     };
                     let _ = self.action_tx.send(action).await;
                 }
+                Effect::DeleteKey { key, unlink } => {
+                    let action = match self.cli.delete_key(&key, unlink).await {
+                        Ok(count) => Action::WriteSucceeded {
+                            message: deleted_message(count, unlink),
+                        },
+                        Err(e) => Action::WriteFailed {
+                            message: e.to_string(),
+                        },
+                    };
+                    let _ = self.action_tx.send(action).await;
+                }
+                Effect::SetExpire { key, seconds } => {
+                    let action = match self.cli.set_expire(&key, seconds).await {
+                        Ok(true) => Action::WriteSucceeded {
+                            message: format!("TTL set to {seconds}s"),
+                        },
+                        Ok(false) => Action::WriteFailed {
+                            message: "EXPIRE did not apply; key may no longer exist".to_string(),
+                        },
+                        Err(e) => Action::WriteFailed {
+                            message: e.to_string(),
+                        },
+                    };
+                    let _ = self.action_tx.send(action).await;
+                }
+                Effect::PersistKey { key } => {
+                    let action = match self.cli.persist_key(&key).await {
+                        Ok(true) => Action::WriteSucceeded {
+                            message: "Persisted key".to_string(),
+                        },
+                        Ok(false) => Action::WriteFailed {
+                            message: "PERSIST did not apply; key may not have an expiry"
+                                .to_string(),
+                        },
+                        Err(e) => Action::WriteFailed {
+                            message: e.to_string(),
+                        },
+                    };
+                    let _ = self.action_tx.send(action).await;
+                }
             }
         }
     }
@@ -724,6 +1005,12 @@ impl EffectRunner {
         let value = self.cli.fetch_value(key, kind).await?;
         Ok((kind, ttl, value))
     }
+}
+
+fn deleted_message(count: u64, unlink: bool) -> String {
+    let verb = if unlink { "Unlinked" } else { "Deleted" };
+    let noun = if count == 1 { "key" } else { "keys" };
+    format!("{verb} {count} {noun}")
 }
 
 #[cfg(test)]
@@ -1068,6 +1355,288 @@ mod tests {
                 state.command_modal.status,
                 CommandStatus::Error("ERR unknown command".to_string())
             );
+        }
+
+        #[test]
+        fn read_only_write_requests_set_status_without_effect() {
+            for action in [
+                Action::RequestDelete,
+                Action::RequestUnlink,
+                Action::RequestPersist,
+                Action::OpenExpireInput,
+                Action::SubmitExpire,
+            ] {
+                let mut state = AppState::with_read_only("redis://localhost", true);
+                state.keys = vec![key("a")];
+                sync_filter(&mut state);
+                state.expire_input = Some(ExpireInputState {
+                    key: "a".to_string(),
+                    input: "60".to_string(),
+                });
+
+                let effects = reduce(&mut state, action);
+
+                assert!(effects.is_empty());
+                assert_eq!(
+                    state.status_message,
+                    Some(StatusMessage::Error(
+                        "Read-only mode blocks write operations.".to_string()
+                    ))
+                );
+                assert_eq!(state.confirm_state, None);
+                assert!(state.pending_write_refresh.is_none());
+            }
+        }
+
+        #[test]
+        fn request_delete_confirm_and_cancel_follow_pending_operation() {
+            let mut state = AppState::new("redis://localhost");
+            state.keys = vec![key("space key")];
+            sync_filter(&mut state);
+
+            let effects = reduce(&mut state, Action::RequestDelete);
+
+            assert!(effects.is_empty());
+            assert_eq!(
+                state.confirm_state,
+                Some(ConfirmState {
+                    op: PendingWrite::Delete {
+                        key: "space key".to_string(),
+                        unlink: false,
+                    },
+                    prompt: "Delete key \"space key\" with DEL?".to_string(),
+                })
+            );
+
+            let effects = reduce(&mut state, Action::ConfirmWrite);
+
+            assert_eq!(
+                effects,
+                vec![Effect::DeleteKey {
+                    key: "space key".to_string(),
+                    unlink: false,
+                }]
+            );
+            assert_eq!(state.confirm_state, None);
+            assert_eq!(state.pending_write_refresh, Some(WriteRefresh::ReloadKeys));
+
+            assert!(reduce(&mut state, Action::RequestDelete).is_empty());
+            assert!(reduce(&mut state, Action::CancelWrite).is_empty());
+            assert_eq!(state.confirm_state, None);
+        }
+
+        #[test]
+        fn request_unlink_emits_unlink_delete_effect() {
+            let mut state = AppState::new("redis://localhost");
+            state.keys = vec![key("a")];
+            sync_filter(&mut state);
+
+            assert!(reduce(&mut state, Action::RequestUnlink).is_empty());
+            let effects = reduce(&mut state, Action::ConfirmWrite);
+
+            assert_eq!(
+                effects,
+                vec![Effect::DeleteKey {
+                    key: "a".to_string(),
+                    unlink: true,
+                }]
+            );
+        }
+
+        #[test]
+        fn request_persist_confirm_emits_persist_effect() {
+            let mut state = AppState::new("redis://localhost");
+            state.keys = vec![key("a")];
+            sync_filter(&mut state);
+
+            assert!(reduce(&mut state, Action::RequestPersist).is_empty());
+            let effects = reduce(&mut state, Action::ConfirmWrite);
+
+            assert_eq!(
+                effects,
+                vec![Effect::PersistKey {
+                    key: "a".to_string(),
+                }]
+            );
+            assert_eq!(
+                state.pending_write_refresh,
+                Some(WriteRefresh::FetchValue {
+                    key: "a".to_string()
+                })
+            );
+        }
+
+        #[test]
+        fn request_write_actions_are_noops_without_selected_key() {
+            for action in [
+                Action::RequestDelete,
+                Action::RequestUnlink,
+                Action::RequestPersist,
+                Action::OpenExpireInput,
+            ] {
+                let mut state = AppState::new("redis://localhost");
+
+                let effects = reduce(&mut state, action);
+
+                assert!(effects.is_empty());
+                assert_eq!(state.confirm_state, None);
+                assert_eq!(state.expire_input, None);
+                assert_eq!(state.status_message, None);
+            }
+        }
+
+        #[test]
+        fn expire_input_accepts_digits_and_backspace_only() {
+            let mut state = AppState::new("redis://localhost");
+            state.expire_input = Some(ExpireInputState {
+                key: "a".to_string(),
+                input: String::new(),
+            });
+
+            assert!(reduce(&mut state, Action::ExpireInputDigit('6')).is_empty());
+            assert!(reduce(&mut state, Action::ExpireInputDigit('x')).is_empty());
+            assert!(reduce(&mut state, Action::ExpireInputDigit('0')).is_empty());
+            assert_eq!(
+                state
+                    .expire_input
+                    .as_ref()
+                    .map(|input| input.input.as_str()),
+                Some("60")
+            );
+
+            assert!(reduce(&mut state, Action::ExpireInputBackspace).is_empty());
+            assert_eq!(
+                state
+                    .expire_input
+                    .as_ref()
+                    .map(|input| input.input.as_str()),
+                Some("6")
+            );
+        }
+
+        #[test]
+        fn submit_expire_rejects_empty_and_invalid_input_without_closing() {
+            for input in ["", "abc"] {
+                let mut state = AppState::new("redis://localhost");
+                state.expire_input = Some(ExpireInputState {
+                    key: "a".to_string(),
+                    input: input.to_string(),
+                });
+
+                let effects = reduce(&mut state, Action::SubmitExpire);
+
+                assert!(effects.is_empty());
+                assert_eq!(
+                    state.status_message,
+                    Some(StatusMessage::Error(
+                        "Enter expiry seconds as digits.".to_string()
+                    ))
+                );
+                assert!(state.expire_input.is_some());
+            }
+        }
+
+        #[test]
+        fn submit_expire_emits_effect_and_closes_overlay_for_valid_digits() {
+            let mut state = AppState::new("redis://localhost");
+            state.expire_input = Some(ExpireInputState {
+                key: "a".to_string(),
+                input: "60".to_string(),
+            });
+
+            let effects = reduce(&mut state, Action::SubmitExpire);
+
+            assert_eq!(
+                effects,
+                vec![Effect::SetExpire {
+                    key: "a".to_string(),
+                    seconds: 60,
+                }]
+            );
+            assert_eq!(state.expire_input, None);
+            assert_eq!(
+                state.pending_write_refresh,
+                Some(WriteRefresh::FetchValue {
+                    key: "a".to_string()
+                })
+            );
+        }
+
+        #[test]
+        fn write_success_after_delete_reloads_key_list() {
+            let mut state = AppState::new("redis://localhost");
+            state.pending_write_refresh = Some(WriteRefresh::ReloadKeys);
+
+            let effects = reduce(
+                &mut state,
+                Action::WriteSucceeded {
+                    message: "Deleted 1 key".to_string(),
+                },
+            );
+
+            assert_eq!(
+                effects,
+                vec![Effect::Connect {
+                    dsn: "redis://localhost".to_string()
+                }]
+            );
+            assert_eq!(
+                state.status_message,
+                Some(StatusMessage::Success("Deleted 1 key".to_string()))
+            );
+            assert_eq!(state.pending_write_refresh, None);
+        }
+
+        #[test]
+        fn write_success_after_expire_or_persist_refetches_selected_value() {
+            for message in ["TTL set to 60s", "Persisted key"] {
+                let mut state = AppState::new("redis://localhost");
+                state.keys = vec![key("a")];
+                sync_filter(&mut state);
+                state.pending_write_refresh = Some(WriteRefresh::FetchValue {
+                    key: "a".to_string(),
+                });
+
+                let effects = reduce(
+                    &mut state,
+                    Action::WriteSucceeded {
+                        message: message.to_string(),
+                    },
+                );
+
+                assert_eq!(
+                    effects,
+                    vec![Effect::FetchValue {
+                        key: "a".to_string()
+                    }]
+                );
+                assert_eq!(
+                    state.value_state,
+                    ValueState::Loading {
+                        key: "a".to_string()
+                    }
+                );
+            }
+        }
+
+        #[test]
+        fn write_failure_sets_error_and_clears_pending_refresh() {
+            let mut state = AppState::new("redis://localhost");
+            state.pending_write_refresh = Some(WriteRefresh::ReloadKeys);
+
+            let effects = reduce(
+                &mut state,
+                Action::WriteFailed {
+                    message: "DENIED".to_string(),
+                },
+            );
+
+            assert!(effects.is_empty());
+            assert_eq!(
+                state.status_message,
+                Some(StatusMessage::Error("DENIED".to_string()))
+            );
+            assert_eq!(state.pending_write_refresh, None);
         }
 
         #[test]
@@ -1681,6 +2250,168 @@ mod tests {
                 action,
                 Action::CommandFailed {
                     message: "DEL is blocked".to_string(),
+                }
+            );
+        }
+
+        #[tokio::test]
+        async fn delete_key_effect_dispatches_success_message() {
+            let mut cli = MockRedisCli::new();
+            cli.expect_delete_key()
+                .once()
+                .withf(|key, unlink| key == "space key" && !*unlink)
+                .returning(|_, _| Ok(1));
+
+            let (tx, mut rx) = mpsc::channel(4);
+            let runner = EffectRunner::new(Arc::new(cli), tx);
+
+            runner
+                .run(vec![Effect::DeleteKey {
+                    key: "space key".to_string(),
+                    unlink: false,
+                }])
+                .await;
+
+            let action = tokio::time::timeout(Duration::from_millis(500), rx.recv())
+                .await
+                .expect("action timeout")
+                .expect("channel closed");
+            assert_eq!(
+                action,
+                Action::WriteSucceeded {
+                    message: "Deleted 1 key".to_string(),
+                }
+            );
+        }
+
+        #[tokio::test]
+        async fn unlink_effect_dispatches_plural_success_message() {
+            let mut cli = MockRedisCli::new();
+            cli.expect_delete_key()
+                .once()
+                .withf(|key, unlink| key == "old key" && *unlink)
+                .returning(|_, _| Ok(2));
+
+            let (tx, mut rx) = mpsc::channel(4);
+            let runner = EffectRunner::new(Arc::new(cli), tx);
+
+            runner
+                .run(vec![Effect::DeleteKey {
+                    key: "old key".to_string(),
+                    unlink: true,
+                }])
+                .await;
+
+            let action = tokio::time::timeout(Duration::from_millis(500), rx.recv())
+                .await
+                .expect("action timeout")
+                .expect("channel closed");
+            assert_eq!(
+                action,
+                Action::WriteSucceeded {
+                    message: "Unlinked 2 keys".to_string(),
+                }
+            );
+        }
+
+        #[tokio::test]
+        async fn set_expire_effect_dispatches_success_and_false_failure() {
+            let mut cli = MockRedisCli::new();
+            cli.expect_set_expire()
+                .once()
+                .withf(|key, seconds| key == "a" && *seconds == 60)
+                .returning(|_, _| Ok(true));
+            cli.expect_set_expire()
+                .once()
+                .withf(|key, seconds| key == "missing" && *seconds == 30)
+                .returning(|_, _| Ok(false));
+
+            let (tx, mut rx) = mpsc::channel(4);
+            let runner = EffectRunner::new(Arc::new(cli), tx);
+
+            runner
+                .run(vec![
+                    Effect::SetExpire {
+                        key: "a".to_string(),
+                        seconds: 60,
+                    },
+                    Effect::SetExpire {
+                        key: "missing".to_string(),
+                        seconds: 30,
+                    },
+                ])
+                .await;
+
+            let success = tokio::time::timeout(Duration::from_millis(500), rx.recv())
+                .await
+                .expect("action timeout")
+                .expect("channel closed");
+            let failure = tokio::time::timeout(Duration::from_millis(500), rx.recv())
+                .await
+                .expect("action timeout")
+                .expect("channel closed");
+            assert_eq!(
+                success,
+                Action::WriteSucceeded {
+                    message: "TTL set to 60s".to_string(),
+                }
+            );
+            assert_eq!(
+                failure,
+                Action::WriteFailed {
+                    message: "EXPIRE did not apply; key may no longer exist".to_string(),
+                }
+            );
+        }
+
+        #[tokio::test]
+        async fn persist_key_effect_dispatches_success_and_error_failure() {
+            let mut cli = MockRedisCli::new();
+            cli.expect_persist_key()
+                .once()
+                .withf(|key| key == "a")
+                .returning(|_| Ok(true));
+            cli.expect_persist_key()
+                .once()
+                .withf(|key| key == "b")
+                .returning(|_| {
+                    Err(crate::infra::RedisCliError::CommandDenied(
+                        "PERSIST is blocked by read-only mode".to_string(),
+                    ))
+                });
+
+            let (tx, mut rx) = mpsc::channel(4);
+            let runner = EffectRunner::new(Arc::new(cli), tx);
+
+            runner
+                .run(vec![
+                    Effect::PersistKey {
+                        key: "a".to_string(),
+                    },
+                    Effect::PersistKey {
+                        key: "b".to_string(),
+                    },
+                ])
+                .await;
+
+            let success = tokio::time::timeout(Duration::from_millis(500), rx.recv())
+                .await
+                .expect("action timeout")
+                .expect("channel closed");
+            let failure = tokio::time::timeout(Duration::from_millis(500), rx.recv())
+                .await
+                .expect("action timeout")
+                .expect("channel closed");
+            assert_eq!(
+                success,
+                Action::WriteSucceeded {
+                    message: "Persisted key".to_string(),
+                }
+            );
+            assert_eq!(
+                failure,
+                Action::WriteFailed {
+                    message: "PERSIST is blocked by read-only mode".to_string(),
                 }
             );
         }
