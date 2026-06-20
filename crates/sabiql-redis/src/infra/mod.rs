@@ -403,7 +403,8 @@ impl RedisCliSubprocess {
 
     async fn run_command(&self, args: &[String]) -> Result<String, RedisCliError> {
         let mut cmd = Command::new("redis-cli");
-        cmd.arg("-h")
+        cmd.kill_on_drop(true)
+            .arg("-h")
             .arg(&self.dsn.host)
             .arg("-p")
             .arg(self.dsn.port.to_string())
