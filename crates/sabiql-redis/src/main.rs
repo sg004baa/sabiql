@@ -8,6 +8,7 @@ use tokio::sync::mpsc;
 
 pub mod app;
 pub mod domain;
+pub mod error;
 pub mod infra;
 pub mod ui;
 
@@ -23,7 +24,7 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    color_eyre::install()?;
+    error::install_hooks()?;
     let args = Args::parse();
 
     let cli = Arc::new(RedisCliSubprocess::new(&args.dsn)?);
