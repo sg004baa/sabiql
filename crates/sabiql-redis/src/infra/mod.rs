@@ -1,6 +1,8 @@
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -34,6 +36,8 @@ pub enum RedisCliError {
 pub trait RedisCli: Send + Sync {
     async fn ping(&self) -> Result<(), RedisCliError>;
     async fn dbsize(&self) -> Result<usize, RedisCliError>;
+    fn select_db(&self, db: u8);
+    async fn db_overview(&self) -> Result<Vec<(u8, usize)>, RedisCliError>;
     async fn scan_keys(&self) -> Result<Vec<RedisKey>, RedisCliError>;
     async fn key_type_and_ttl(&self, key: &str) -> Result<(RedisKind, Option<u64>), RedisCliError>;
     async fn fetch_value(&self, key: &str, kind: RedisKind) -> Result<RedisValue, RedisCliError>;
@@ -44,7 +48,7 @@ pub trait RedisCli: Send + Sync {
 pub struct RedisDsn {
     pub host: String,
     pub port: u16,
-    pub db: u32,
+    pub db: u8,
 }
 
 impl RedisDsn {
@@ -79,7 +83,7 @@ impl RedisDsn {
             )));
         } else {
             db_part
-                .parse::<u32>()
+                .parse::<u8>()
                 .map_err(|_| RedisCliError::Parse(format!("invalid Redis database: {db_part}")))?
         };
 
@@ -109,6 +113,36 @@ pub fn parse_dbsize_reply(stdout: &str) -> Result<usize, RedisCliError> {
     reply
         .parse::<usize>()
         .map_err(|_| RedisCliError::Parse(format!("invalid DBSIZE reply: {reply:?}")))
+}
+
+const DEFAULT_REDIS_DATABASES: u8 = 16;
+
+pub fn parse_config_databases_reply(stdout: &str) -> Result<u8, RedisCliError> {
+    let lines = stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    if lines.len() != 2 || !lines[0].eq_ignore_ascii_case("databases") {
+        return Err(RedisCliError::Parse(format!(
+            "invalid CONFIG GET databases reply: {stdout:?}"
+        )));
+    }
+
+    let databases = lines[1]
+        .parse::<u8>()
+        .map_err(|_| RedisCliError::Parse(format!("invalid databases count: {:?}", lines[1])))?;
+    if databases == 0 {
+        return Err(RedisCliError::Parse(
+            "databases count must be greater than zero".to_string(),
+        ));
+    }
+
+    Ok(databases)
+}
+
+fn config_databases_or_default(stdout: &str) -> u8 {
+    parse_config_databases_reply(stdout).unwrap_or(DEFAULT_REDIS_DATABASES)
 }
 
 pub fn parse_scan_page(stdout: &str) -> Result<ScanPage, RedisCliError> {
@@ -475,6 +509,7 @@ where
 #[derive(Debug, Clone)]
 pub struct RedisCliSubprocess {
     dsn: RedisDsn,
+    current_db: Arc<AtomicU8>,
     timeout: Duration,
     read_only: bool,
 }
@@ -499,8 +534,10 @@ impl RedisCliSubprocess {
         timeout: Duration,
         read_only: bool,
     ) -> Result<Self, RedisCliError> {
+        let dsn = RedisDsn::parse(dsn)?;
         Ok(Self {
-            dsn: RedisDsn::parse(dsn)?,
+            current_db: Arc::new(AtomicU8::new(dsn.db)),
+            dsn,
             timeout,
             read_only,
         })
@@ -544,6 +581,11 @@ impl RedisCliSubprocess {
     }
 
     async fn run_command(&self, args: &[String]) -> Result<String, RedisCliError> {
+        self.run_command_in_db(self.current_db.load(Ordering::Relaxed), args)
+            .await
+    }
+
+    async fn run_command_in_db(&self, db: u8, args: &[String]) -> Result<String, RedisCliError> {
         let mut cmd = Command::new("redis-cli");
         cmd.kill_on_drop(true)
             .arg("-h")
@@ -551,7 +593,7 @@ impl RedisCliSubprocess {
             .arg("-p")
             .arg(self.dsn.port.to_string())
             .arg("-n")
-            .arg(self.dsn.db.to_string())
+            .arg(db.to_string())
             .arg("--raw");
         for arg in args {
             cmd.arg(arg);
@@ -593,6 +635,36 @@ impl RedisCli for RedisCliSubprocess {
     async fn dbsize(&self) -> Result<usize, RedisCliError> {
         let stdout = self.run_command(&["DBSIZE".to_string()]).await?;
         parse_dbsize_reply(&stdout)
+    }
+
+    fn select_db(&self, db: u8) {
+        self.current_db.store(db, Ordering::Relaxed);
+    }
+
+    async fn db_overview(&self) -> Result<Vec<(u8, usize)>, RedisCliError> {
+        let database_count = match self
+            .run_command(&[
+                "CONFIG".to_string(),
+                "GET".to_string(),
+                "databases".to_string(),
+            ])
+            .await
+        {
+            Ok(stdout) => config_databases_or_default(&stdout),
+            Err(_) => DEFAULT_REDIS_DATABASES,
+        };
+        let mut entries = Vec::with_capacity(usize::from(database_count));
+
+        for db in 0..database_count {
+            let count = self
+                .run_command_in_db(db, &["DBSIZE".to_string()])
+                .await
+                .and_then(|stdout| parse_dbsize_reply(&stdout))
+                .unwrap_or_default();
+            entries.push((db, count));
+        }
+
+        Ok(entries)
     }
 
     async fn scan_keys(&self) -> Result<Vec<RedisKey>, RedisCliError> {
@@ -749,6 +821,19 @@ mod tests {
     #[test]
     fn parses_dbsize_reply() {
         assert_eq!(parse_dbsize_reply("42\n"), Ok(42));
+    }
+
+    #[test]
+    fn parses_config_databases_reply() {
+        assert_eq!(parse_config_databases_reply("databases\n32\n"), Ok(32));
+        assert_eq!(parse_config_databases_reply("DATABASES\r\n16\r\n"), Ok(16));
+    }
+
+    #[test]
+    fn config_databases_falls_back_to_default_on_parse_failure() {
+        assert_eq!(config_databases_or_default("unexpected\n"), 16);
+        assert_eq!(config_databases_or_default("databases\nnot-a-number\n"), 16);
+        assert_eq!(config_databases_or_default("databases\n0\n"), 16);
     }
 
     #[test]

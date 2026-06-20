@@ -96,6 +96,7 @@ async fn process_action(
 
 fn handle_event(event: InputEvent, state: &AppState) -> Option<Action> {
     match event {
+        InputEvent::Key(combo) if state.db_overlay.is_some() => handle_db_overlay_key(combo),
         InputEvent::Key(combo) if state.command_modal.is_open => handle_modal_key(combo),
         InputEvent::Key(combo) if state.filter_active => handle_filter_key(combo),
         InputEvent::Resize(width, height) => Some(Action::Resize(width, height)),
@@ -104,6 +105,9 @@ fn handle_event(event: InputEvent, state: &AppState) -> Option<Action> {
         }
         InputEvent::Key(combo) if combo == KeyCombo::plain(Key::Char('/')) => {
             Some(Action::OpenFilter)
+        }
+        InputEvent::Key(combo) if combo == KeyCombo::plain(Key::Char('d')) => {
+            Some(Action::OpenDbOverlay)
         }
         InputEvent::Key(combo) if combo == KeyCombo::plain(Key::Char('e')) => {
             Some(Action::RequestExportCsv)
@@ -121,6 +125,22 @@ fn handle_event(event: InputEvent, state: &AppState) -> Option<Action> {
             Some(Action::SelectPrev)
         }
         InputEvent::Init | InputEvent::Paste(_) | InputEvent::Key(_) => None,
+    }
+}
+
+fn handle_db_overlay_key(combo: KeyCombo) -> Option<Action> {
+    match combo {
+        combo if combo == KeyCombo::plain(Key::Enter) => Some(Action::SubmitDbSelection),
+        combo if combo == KeyCombo::plain(Key::Esc) => Some(Action::CloseDbOverlay),
+        combo
+            if combo == KeyCombo::plain(Key::Down) || combo == KeyCombo::plain(Key::Char('j')) =>
+        {
+            Some(Action::DbOverlaySelectNext)
+        }
+        combo if combo == KeyCombo::plain(Key::Up) || combo == KeyCombo::plain(Key::Char('k')) => {
+            Some(Action::DbOverlaySelectPrev)
+        }
+        _ => None,
     }
 }
 
@@ -202,6 +222,61 @@ mod tests {
         let action = handle_event(InputEvent::Key(KeyCombo::plain(Key::Char('e'))), &state);
 
         assert_eq!(action, Some(Action::RequestExportCsv));
+    }
+
+    #[test]
+    fn d_key_opens_db_overlay() {
+        let state = AppState::new("redis://localhost");
+
+        let action = handle_event(InputEvent::Key(KeyCombo::plain(Key::Char('d'))), &state);
+
+        assert_eq!(action, Some(Action::OpenDbOverlay));
+    }
+
+    #[test]
+    fn db_overlay_routes_navigation_submit_and_escape() {
+        let mut state = AppState::new("redis://localhost");
+        state.db_overlay = Some(app::DbOverlayState {
+            entries: vec![(0, Some(1)), (1, Some(2))],
+            selected: 0,
+            loading: false,
+        });
+
+        assert_eq!(
+            handle_event(InputEvent::Key(KeyCombo::plain(Key::Char('j'))), &state),
+            Some(Action::DbOverlaySelectNext)
+        );
+        assert_eq!(
+            handle_event(InputEvent::Key(KeyCombo::plain(Key::Char('k'))), &state),
+            Some(Action::DbOverlaySelectPrev)
+        );
+        assert_eq!(
+            handle_event(InputEvent::Key(KeyCombo::plain(Key::Enter)), &state),
+            Some(Action::SubmitDbSelection)
+        );
+        assert_eq!(
+            handle_event(InputEvent::Key(KeyCombo::plain(Key::Esc)), &state),
+            Some(Action::CloseDbOverlay)
+        );
+    }
+
+    #[test]
+    fn db_overlay_suppresses_regular_keymaps() {
+        let mut state = AppState::new("redis://localhost");
+        state.db_overlay = Some(app::DbOverlayState {
+            entries: vec![(0, Some(1))],
+            selected: 0,
+            loading: false,
+        });
+
+        assert_eq!(
+            handle_event(InputEvent::Key(KeyCombo::plain(Key::Char('d'))), &state),
+            None
+        );
+        assert_eq!(
+            handle_event(InputEvent::Key(KeyCombo::plain(Key::Char(':'))), &state),
+            None
+        );
     }
 
     #[test]

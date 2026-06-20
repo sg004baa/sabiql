@@ -6,7 +6,7 @@ use nucleo_matcher::{Config, Matcher};
 use tokio::sync::mpsc;
 
 use crate::domain::{RedisKey, RedisKind, RedisValue, redis_value_table};
-use crate::infra::RedisCli;
+use crate::infra::{RedisCli, RedisDsn};
 
 const DEFAULT_TABLE_VISIBLE_ROWS: usize = 20;
 
@@ -68,10 +68,18 @@ pub enum StatusMessage {
     Error(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DbOverlayState {
+    pub entries: Vec<(u8, Option<usize>)>,
+    pub selected: usize,
+    pub loading: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct AppState {
     pub dsn: String,
     pub read_only: bool,
+    pub current_db: u8,
     pub connection_status: ConnectionStatus,
     pub keys: Vec<RedisKey>,
     pub filtered_indices: Vec<usize>,
@@ -83,6 +91,7 @@ pub struct AppState {
     pub dbsize: Option<usize>,
     pub value_state: ValueState,
     pub command_modal: CommandModalState,
+    pub db_overlay: Option<DbOverlayState>,
     pub status_message: Option<StatusMessage>,
     pub should_quit: bool,
 }
@@ -93,9 +102,12 @@ impl AppState {
     }
 
     pub fn with_read_only(dsn: impl Into<String>, read_only: bool) -> Self {
+        let dsn = dsn.into();
+        let current_db = RedisDsn::parse(&dsn).map(|parsed| parsed.db).unwrap_or(0);
         Self {
-            dsn: dsn.into(),
+            dsn,
             read_only,
+            current_db,
             connection_status: ConnectionStatus::Disconnected,
             keys: Vec::new(),
             filtered_indices: Vec::new(),
@@ -107,6 +119,7 @@ impl AppState {
             dbsize: None,
             value_state: ValueState::Empty,
             command_modal: CommandModalState::new(),
+            db_overlay: None,
             status_message: None,
             should_quit: false,
         }
@@ -132,6 +145,17 @@ pub enum Action {
     CommitFilter,
     OpenCommandModal,
     CloseCommandModal,
+    OpenDbOverlay,
+    CloseDbOverlay,
+    DbOverlaySelectNext,
+    DbOverlaySelectPrev,
+    SubmitDbSelection,
+    DbOverviewLoaded {
+        entries: Vec<(u8, usize)>,
+    },
+    DbOverviewFailed {
+        message: String,
+    },
     CommandInput(char),
     CommandBackspace,
     SubmitCommand,
@@ -171,6 +195,10 @@ pub enum Effect {
     ExecuteCommand {
         command: String,
     },
+    LoadDbOverview,
+    SelectDb {
+        db: u8,
+    },
     ExportCsv {
         stem: String,
         headers: Vec<String>,
@@ -181,13 +209,7 @@ pub enum Effect {
 pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
     match action {
         Action::StartConnect => {
-            state.connection_status = ConnectionStatus::Connecting;
-            state.keys.clear();
-            recompute_filtered_indices(state);
-            state.dbsize = None;
-            state.selected_index = 0;
-            state.scroll_offset = 0;
-            state.value_state = ValueState::Empty;
+            reset_for_connect(state);
             vec![Effect::Connect {
                 dsn: state.dsn.clone(),
             }]
@@ -211,6 +233,9 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             Vec::new()
         }
         Action::SelectNext => {
+            if state.db_overlay.is_some() {
+                return Vec::new();
+            }
             let previous_index = state.selected_index;
             let count = filtered_count(state);
             if count > 0 {
@@ -224,6 +249,9 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             }
         }
         Action::SelectPrev => {
+            if state.db_overlay.is_some() {
+                return Vec::new();
+            }
             let previous_index = state.selected_index;
             state.selected_index = state.selected_index.saturating_sub(1);
             keep_selection_visible(state);
@@ -243,6 +271,9 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             Vec::new()
         }
         Action::OpenFilter => {
+            if state.db_overlay.is_some() || state.command_modal.is_open {
+                return Vec::new();
+            }
             state.filter_active = true;
             Vec::new()
         }
@@ -275,6 +306,9 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             Vec::new()
         }
         Action::OpenCommandModal => {
+            if state.db_overlay.is_some() || state.filter_active {
+                return Vec::new();
+            }
             state.command_modal.is_open = true;
             state.command_modal.input.clear();
             state.command_modal.status = CommandStatus::Idle;
@@ -282,6 +316,63 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
         }
         Action::CloseCommandModal => {
             state.command_modal.is_open = false;
+            Vec::new()
+        }
+        Action::OpenDbOverlay => {
+            if !matches!(state.connection_status, ConnectionStatus::Connected)
+                || state.filter_active
+                || state.command_modal.is_open
+                || state.db_overlay.is_some()
+            {
+                return Vec::new();
+            }
+
+            state.db_overlay = Some(DbOverlayState {
+                entries: Vec::new(),
+                selected: 0,
+                loading: true,
+            });
+            vec![Effect::LoadDbOverview]
+        }
+        Action::CloseDbOverlay => {
+            state.db_overlay = None;
+            Vec::new()
+        }
+        Action::DbOverlaySelectNext => {
+            if let Some(overlay) = &mut state.db_overlay {
+                let count = overlay.entries.len();
+                if count > 0 {
+                    overlay.selected = (overlay.selected + 1).min(count - 1);
+                }
+            }
+            Vec::new()
+        }
+        Action::DbOverlaySelectPrev => {
+            if let Some(overlay) = &mut state.db_overlay {
+                overlay.selected = overlay.selected.saturating_sub(1);
+            }
+            Vec::new()
+        }
+        Action::SubmitDbSelection => submit_db_selection(state),
+        Action::DbOverviewLoaded { entries } => {
+            if let Some(overlay) = &mut state.db_overlay {
+                overlay.selected = entries
+                    .iter()
+                    .position(|(db, _)| *db == state.current_db)
+                    .unwrap_or(0);
+                overlay.entries = entries
+                    .into_iter()
+                    .map(|(db, count)| (db, Some(count)))
+                    .collect();
+                overlay.loading = false;
+            }
+            Vec::new()
+        }
+        Action::DbOverviewFailed { message } => {
+            state.db_overlay = None;
+            state.status_message = Some(StatusMessage::Error(format!(
+                "Failed to load Redis databases: {message}"
+            )));
             Vec::new()
         }
         Action::CommandInput(ch) => {
@@ -354,7 +445,13 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             state.value_state = ValueState::Failed { key, message };
             Vec::new()
         }
-        Action::RequestExportCsv => request_export_csv(state),
+        Action::RequestExportCsv => {
+            if state.db_overlay.is_some() {
+                Vec::new()
+            } else {
+                request_export_csv(state)
+            }
+        }
         Action::ExportSucceeded { path } => {
             state.status_message = Some(StatusMessage::Success(format!(
                 "Exported CSV to {}",
@@ -369,6 +466,41 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             Vec::new()
         }
     }
+}
+
+fn reset_for_connect(state: &mut AppState) {
+    state.connection_status = ConnectionStatus::Connecting;
+    state.keys.clear();
+    recompute_filtered_indices(state);
+    state.dbsize = None;
+    state.selected_index = 0;
+    state.scroll_offset = 0;
+    state.value_state = ValueState::Empty;
+}
+
+fn submit_db_selection(state: &mut AppState) -> Vec<Effect> {
+    let Some(db) = state
+        .db_overlay
+        .as_ref()
+        .and_then(|overlay| overlay.entries.get(overlay.selected))
+        .map(|(db, _)| *db)
+    else {
+        return Vec::new();
+    };
+
+    state.db_overlay = None;
+    if db == state.current_db {
+        return Vec::new();
+    }
+
+    state.current_db = db;
+    reset_for_connect(state);
+    vec![
+        Effect::SelectDb { db },
+        Effect::Connect {
+            dsn: state.dsn.clone(),
+        },
+    ]
 }
 
 pub fn filtered_count(state: &AppState) -> usize {
@@ -547,6 +679,18 @@ impl EffectRunner {
                         },
                     };
                     let _ = self.action_tx.send(action).await;
+                }
+                Effect::LoadDbOverview => {
+                    let action = match self.cli.db_overview().await {
+                        Ok(entries) => Action::DbOverviewLoaded { entries },
+                        Err(e) => Action::DbOverviewFailed {
+                            message: e.to_string(),
+                        },
+                    };
+                    let _ = self.action_tx.send(action).await;
+                }
+                Effect::SelectDb { db } => {
+                    self.cli.select_db(db);
                 }
                 Effect::ExportCsv {
                     stem,
@@ -924,6 +1068,160 @@ mod tests {
                 state.command_modal.status,
                 CommandStatus::Error("ERR unknown command".to_string())
             );
+        }
+
+        #[test]
+        fn open_db_overlay_on_connected_state_loads_overview() {
+            let mut state = AppState::new("redis://localhost");
+            state.connection_status = ConnectionStatus::Connected;
+
+            let effects = reduce(&mut state, Action::OpenDbOverlay);
+
+            assert_eq!(effects, vec![Effect::LoadDbOverview]);
+            assert_eq!(
+                state.db_overlay,
+                Some(DbOverlayState {
+                    entries: Vec::new(),
+                    selected: 0,
+                    loading: true,
+                })
+            );
+        }
+
+        #[test]
+        fn db_overview_loaded_populates_entries_and_selects_current_db() {
+            let mut state = AppState::new("redis://localhost:6379/2");
+            state.db_overlay = Some(DbOverlayState {
+                entries: Vec::new(),
+                selected: 0,
+                loading: true,
+            });
+
+            let effects = reduce(
+                &mut state,
+                Action::DbOverviewLoaded {
+                    entries: vec![(0, 1), (2, 7), (3, 0)],
+                },
+            );
+
+            assert!(effects.is_empty());
+            assert_eq!(
+                state.db_overlay,
+                Some(DbOverlayState {
+                    entries: vec![(0, Some(1)), (2, Some(7)), (3, Some(0))],
+                    selected: 1,
+                    loading: false,
+                })
+            );
+        }
+
+        #[test]
+        fn submit_db_selection_updates_current_db_resets_view_and_reconnects() {
+            let mut state = AppState::new("redis://localhost:6379/0");
+            state.connection_status = ConnectionStatus::Connected;
+            state.keys = vec![key("a"), key("b")];
+            state.filtered_indices = vec![0, 1];
+            state.filter_query = "user".to_string();
+            state.selected_index = 1;
+            state.scroll_offset = 1;
+            state.dbsize = Some(2);
+            state.value_state = ValueState::Loaded {
+                key: "b".to_string(),
+                kind: RedisKind::String,
+                ttl: None,
+                value: RedisValue::String("value".to_string()),
+            };
+            state.db_overlay = Some(DbOverlayState {
+                entries: vec![(0, Some(2)), (3, Some(5))],
+                selected: 1,
+                loading: false,
+            });
+
+            let effects = reduce(&mut state, Action::SubmitDbSelection);
+
+            assert_eq!(state.current_db, 3);
+            assert_eq!(state.connection_status, ConnectionStatus::Connecting);
+            assert!(state.keys.is_empty());
+            assert!(state.filtered_indices.is_empty());
+            assert_eq!(state.filter_query, "user");
+            assert_eq!(state.selected_index, 0);
+            assert_eq!(state.scroll_offset, 0);
+            assert_eq!(state.dbsize, None);
+            assert_eq!(state.value_state, ValueState::Empty);
+            assert_eq!(state.db_overlay, None);
+            assert_eq!(
+                effects,
+                vec![
+                    Effect::SelectDb { db: 3 },
+                    Effect::Connect {
+                        dsn: "redis://localhost:6379/0".to_string(),
+                    },
+                ]
+            );
+        }
+
+        #[test]
+        fn submit_db_selection_same_db_closes_overlay_without_reconnect() {
+            let mut state = AppState::new("redis://localhost:6379/1");
+            state.connection_status = ConnectionStatus::Connected;
+            state.keys = vec![key("a")];
+            state.filtered_indices = vec![0];
+            state.db_overlay = Some(DbOverlayState {
+                entries: vec![(0, Some(0)), (1, Some(1))],
+                selected: 1,
+                loading: false,
+            });
+
+            let effects = reduce(&mut state, Action::SubmitDbSelection);
+
+            assert!(effects.is_empty());
+            assert_eq!(state.current_db, 1);
+            assert_eq!(state.keys, vec![key("a")]);
+            assert_eq!(state.filtered_indices, vec![0]);
+            assert_eq!(state.db_overlay, None);
+        }
+
+        #[test]
+        fn close_db_overlay_clears_overlay() {
+            let mut state = AppState::new("redis://localhost");
+            state.db_overlay = Some(DbOverlayState {
+                entries: vec![(0, Some(1))],
+                selected: 0,
+                loading: false,
+            });
+
+            let effects = reduce(&mut state, Action::CloseDbOverlay);
+
+            assert!(effects.is_empty());
+            assert_eq!(state.db_overlay, None);
+        }
+
+        #[test]
+        fn db_overlay_navigation_does_not_move_key_selection() {
+            let mut state = AppState::new("redis://localhost");
+            state.keys = vec![key("a"), key("b")];
+            sync_filter(&mut state);
+            state.selected_index = 0;
+            state.db_overlay = Some(DbOverlayState {
+                entries: vec![(0, Some(2)), (1, Some(5))],
+                selected: 0,
+                loading: false,
+            });
+
+            let effects = reduce(&mut state, Action::DbOverlaySelectNext);
+
+            assert!(effects.is_empty());
+            assert_eq!(state.selected_index, 0);
+            assert_eq!(
+                state.db_overlay,
+                Some(DbOverlayState {
+                    entries: vec![(0, Some(2)), (1, Some(5))],
+                    selected: 1,
+                    loading: false,
+                })
+            );
+            assert!(reduce(&mut state, Action::SelectNext).is_empty());
+            assert_eq!(state.selected_index, 0);
         }
 
         #[test]
@@ -1385,6 +1683,46 @@ mod tests {
                     message: "DEL is blocked".to_string(),
                 }
             );
+        }
+
+        #[tokio::test]
+        async fn load_db_overview_effect_dispatches_loaded_entries() {
+            let mut cli = MockRedisCli::new();
+            cli.expect_db_overview()
+                .once()
+                .returning(|| Ok(vec![(0, 2), (1, 0), (2, 7)]));
+
+            let (tx, mut rx) = mpsc::channel(4);
+            let runner = EffectRunner::new(Arc::new(cli), tx);
+
+            runner.run(vec![Effect::LoadDbOverview]).await;
+
+            let action = tokio::time::timeout(Duration::from_millis(500), rx.recv())
+                .await
+                .expect("action timeout")
+                .expect("channel closed");
+            assert_eq!(
+                action,
+                Action::DbOverviewLoaded {
+                    entries: vec![(0, 2), (1, 0), (2, 7)],
+                }
+            );
+        }
+
+        #[tokio::test]
+        async fn select_db_effect_updates_cli_without_dispatching_action() {
+            let mut cli = MockRedisCli::new();
+            cli.expect_select_db()
+                .once()
+                .withf(|db| *db == 3)
+                .returning(|_| ());
+
+            let (tx, mut rx) = mpsc::channel(4);
+            let runner = EffectRunner::new(Arc::new(cli), tx);
+
+            runner.run(vec![Effect::SelectDb { db: 3 }]).await;
+
+            assert!(rx.try_recv().is_err());
         }
 
         #[tokio::test]

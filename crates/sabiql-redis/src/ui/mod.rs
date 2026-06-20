@@ -9,7 +9,9 @@ use sabiql_tui_kit::primitives::molecules::{
 };
 use sabiql_tui_kit::theme::{DEFAULT_THEME, StatusTone};
 
-use crate::app::{AppState, CommandStatus, ConnectionStatus, StatusMessage, ValueState};
+use crate::app::{
+    AppState, CommandStatus, ConnectionStatus, DbOverlayState, StatusMessage, ValueState,
+};
 use crate::domain::{RedisValue, redis_value_table};
 
 pub fn render(frame: &mut Frame<'_>, state: &AppState) {
@@ -33,6 +35,9 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
     render_footer(frame, vertical[2], state);
     if state.command_modal.is_open {
         render_command_modal(frame, state);
+    }
+    if let Some(overlay) = &state.db_overlay {
+        render_db_overlay(frame, overlay);
     }
 }
 
@@ -241,7 +246,9 @@ fn ttl_label(ttl: Option<u64>) -> String {
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let theme = DEFAULT_THEME;
+    let db_label = format!("db {}", state.current_db);
     let mut hints = Vec::new();
+    hints.push((db_label.as_str(), "current"));
     if state.read_only {
         hints.push(("[READ-ONLY]", "writes blocked"));
     }
@@ -256,6 +263,63 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         Paragraph::new(hint_line(&hints, &theme))
             .style(Style::default().fg(theme.semantic.text.muted)),
         area,
+    );
+}
+
+fn render_db_overlay(frame: &mut Frame<'_>, overlay: &DbOverlayState) {
+    let theme = DEFAULT_THEME;
+    let (_, inner) = render_modal(
+        frame,
+        Constraint::Percentage(50),
+        Constraint::Percentage(60),
+        "Redis Databases",
+        " Enter:switch  Esc:cancel  j/k:move ",
+        &theme,
+    );
+    let selected_style = Style::default()
+        .bg(theme.component.table.result_row_active_bg)
+        .fg(theme.semantic.text.primary)
+        .add_modifier(Modifier::BOLD);
+    let headers = ["database", "keys"];
+    let widths = [Constraint::Length(12), Constraint::Min(10)];
+    let visible_rows = inner.height.saturating_sub(2) as usize;
+    let scroll_offset = overlay
+        .selected
+        .saturating_sub(visible_rows.saturating_sub(1));
+
+    render_striped_table(
+        frame,
+        inner,
+        &StripedTableConfig {
+            headers: &headers,
+            widths: &widths,
+            total_items: overlay.entries.len(),
+            empty_message: if overlay.loading {
+                "Loading..."
+            } else {
+                "No databases found"
+            },
+        },
+        scroll_offset,
+        &theme,
+        |index| {
+            let Some((db, count)) = overlay.entries.get(index) else {
+                return vec![Cell::from(""), Cell::from("")];
+            };
+            let style = if index == overlay.selected {
+                selected_style
+            } else {
+                Style::default().fg(theme.semantic.text.primary)
+            };
+            let count_label = count
+                .map(|count| format!("{count} keys"))
+                .unwrap_or_else(|| "...".to_string());
+
+            vec![
+                Cell::from(format!("db {db}")).style(style),
+                Cell::from(count_label).style(style),
+            ]
+        },
     );
 }
 
@@ -396,6 +460,32 @@ mod tests {
         let rendered = render_to_string(&state);
 
         assert!(!rendered.contains("[READ-ONLY]"));
+    }
+
+    #[test]
+    fn footer_shows_current_db() {
+        let state = AppState::new("redis://localhost:6379/3");
+
+        let rendered = render_to_string(&state);
+
+        assert!(rendered.contains("db 3"));
+    }
+
+    #[test]
+    fn db_overlay_shows_database_rows() {
+        let mut state = AppState::new("redis://localhost");
+        state.db_overlay = Some(DbOverlayState {
+            entries: vec![(0, Some(2)), (1, Some(0))],
+            selected: 1,
+            loading: false,
+        });
+
+        let rendered = render_to_string(&state);
+
+        assert!(rendered.contains("Redis Databases"));
+        assert!(rendered.contains("db 1"));
+        assert!(rendered.contains("0 keys"));
+        assert!(rendered.contains("Enter:switch"));
     }
 
     #[test]
