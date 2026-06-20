@@ -45,6 +45,22 @@ pub trait RedisCli: Send + Sync {
     async fn execute_command(&self, command: &str) -> Result<String, RedisCliError>;
 }
 
+#[cfg_attr(test, mockall::automock)]
+pub trait RedisCliFactory: Send + Sync {
+    fn create(&self, dsn: &str, read_only: bool) -> Result<Arc<dyn RedisCli>, RedisCliError>;
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RedisCliSubprocessFactory;
+
+impl RedisCliFactory for RedisCliSubprocessFactory {
+    fn create(&self, dsn: &str, read_only: bool) -> Result<Arc<dyn RedisCli>, RedisCliError> {
+        Ok(Arc::new(RedisCliSubprocess::with_read_only(
+            dsn, read_only,
+        )?))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RedisDsn {
     pub host: String,
