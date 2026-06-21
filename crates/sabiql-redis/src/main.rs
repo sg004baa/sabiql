@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 use color_eyre::eyre::Result;
-use sabiql_tui_kit::input::{InputEvent, Key, KeyCombo};
+use sabiql_tui_kit::input::{InputEvent, Key, KeyCombo, Modifiers};
 use sabiql_tui_kit::tui::TuiRunner;
 use tokio::sync::mpsc;
 
@@ -13,7 +13,7 @@ pub mod infra;
 pub mod ui;
 
 use app::{Action, AppState, EffectRunner};
-use infra::RedisCliSubprocess;
+use infra::{RedisCliSubprocess, RedisCliSubprocessFactory};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -30,8 +30,9 @@ async fn main() -> Result<()> {
     let args = Args::parse();
 
     let cli = Arc::new(redis_cli_from_args(&args)?);
+    let factory = Arc::new(RedisCliSubprocessFactory);
     let (action_tx, mut action_rx) = mpsc::channel::<Action>(64);
-    let effect_runner = Arc::new(EffectRunner::new(cli, action_tx));
+    let effect_runner = Arc::new(EffectRunner::new(cli, factory, action_tx));
     let mut state = AppState::with_read_only(args.dsn, args.read_only);
 
     let mut tui = TuiRunner::new()?;
@@ -102,6 +103,9 @@ fn handle_event(event: InputEvent, state: &AppState) -> Option<Action> {
     match event {
         InputEvent::Key(combo) if state.confirm_state.is_some() => handle_confirm_key(combo),
         InputEvent::Key(combo) if state.expire_input.is_some() => handle_expire_input_key(combo),
+        InputEvent::Key(combo) if state.connection_form.is_some() => {
+            handle_connection_form_key(combo)
+        }
         InputEvent::Key(combo) if state.db_overlay.is_some() => handle_db_overlay_key(combo),
         InputEvent::Key(combo) if state.command_modal.is_open => handle_modal_key(combo),
         InputEvent::Key(combo) if state.filter_active => handle_filter_key(combo),
@@ -114,6 +118,9 @@ fn handle_event(event: InputEvent, state: &AppState) -> Option<Action> {
         }
         InputEvent::Key(combo) if combo == KeyCombo::plain(Key::Char('d')) => {
             Some(Action::OpenDbOverlay)
+        }
+        InputEvent::Key(combo) if combo == KeyCombo::plain(Key::Char('c')) => {
+            Some(Action::OpenConnectionForm)
         }
         InputEvent::Key(combo) if combo == KeyCombo::plain(Key::Char('e')) => {
             Some(Action::RequestExportCsv)
@@ -182,6 +189,24 @@ fn handle_expire_input_key(combo: KeyCombo) -> Option<Action> {
         } if c.is_ascii_digit() => Some(Action::ExpireInputDigit(c)),
         _ => None,
     }
+}
+
+fn handle_connection_form_key(combo: KeyCombo) -> Option<Action> {
+    match combo {
+        combo if combo == KeyCombo::plain(Key::Enter) => Some(Action::SubmitConnectionForm),
+        combo if combo == KeyCombo::plain(Key::Esc) => Some(Action::CancelConnectionForm),
+        combo if combo == KeyCombo::plain(Key::Backspace) => Some(Action::ConnectionFormBackspace),
+        combo if combo == KeyCombo::plain(Key::Tab) => Some(Action::ToggleConnectionFormReadOnly),
+        KeyCombo {
+            key: Key::Char(c),
+            modifiers,
+        } if is_printable_input(c, modifiers) => Some(Action::ConnectionFormInput(c)),
+        _ => None,
+    }
+}
+
+fn is_printable_input(ch: char, modifiers: Modifiers) -> bool {
+    !ch.is_control() && !modifiers.intersects(Modifiers::CTRL | Modifiers::ALT)
 }
 
 fn handle_db_overlay_key(combo: KeyCombo) -> Option<Action> {
@@ -375,6 +400,73 @@ mod tests {
         assert_eq!(
             handle_event(InputEvent::Key(KeyCombo::plain(Key::Char('x'))), &state),
             None
+        );
+    }
+
+    #[test]
+    fn c_key_opens_connection_form() {
+        let state = AppState::new("redis://localhost");
+
+        let action = handle_event(InputEvent::Key(KeyCombo::plain(Key::Char('c'))), &state);
+
+        assert_eq!(action, Some(Action::OpenConnectionForm));
+    }
+
+    #[test]
+    fn connection_form_routes_text_toggle_submit_and_escape() {
+        let mut state = AppState::new("redis://localhost");
+        state.connection_form = Some(app::ConnectionFormState {
+            dsn: "redis://localhost".to_string(),
+            read_only: false,
+        });
+
+        assert_eq!(
+            handle_event(InputEvent::Key(KeyCombo::plain(Key::Char('r'))), &state),
+            Some(Action::ConnectionFormInput('r'))
+        );
+        assert_eq!(
+            handle_event(
+                InputEvent::Key(KeyCombo {
+                    key: Key::Char(':'),
+                    modifiers: Modifiers::SHIFT,
+                }),
+                &state
+            ),
+            Some(Action::ConnectionFormInput(':'))
+        );
+        assert_eq!(
+            handle_event(InputEvent::Key(KeyCombo::plain(Key::Backspace)), &state),
+            Some(Action::ConnectionFormBackspace)
+        );
+        assert_eq!(
+            handle_event(InputEvent::Key(KeyCombo::plain(Key::Tab)), &state),
+            Some(Action::ToggleConnectionFormReadOnly)
+        );
+        assert_eq!(
+            handle_event(InputEvent::Key(KeyCombo::plain(Key::Enter)), &state),
+            Some(Action::SubmitConnectionForm)
+        );
+        assert_eq!(
+            handle_event(InputEvent::Key(KeyCombo::plain(Key::Esc)), &state),
+            Some(Action::CancelConnectionForm)
+        );
+    }
+
+    #[test]
+    fn connection_form_suppresses_regular_keymaps() {
+        let mut state = AppState::new("redis://localhost");
+        state.connection_form = Some(app::ConnectionFormState {
+            dsn: "redis://localhost".to_string(),
+            read_only: false,
+        });
+
+        assert_eq!(
+            handle_event(InputEvent::Key(KeyCombo::plain(Key::Char('j'))), &state),
+            Some(Action::ConnectionFormInput('j'))
+        );
+        assert_eq!(
+            handle_event(InputEvent::Key(KeyCombo::plain(Key::Char(':'))), &state),
+            Some(Action::ConnectionFormInput(':'))
         );
     }
 

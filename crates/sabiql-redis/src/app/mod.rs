@@ -1,10 +1,10 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tokio::sync::mpsc;
+use tokio::sync::{RwLock, mpsc};
 
 use crate::domain::{RedisKey, RedisKind, RedisValue, redis_value_table};
-use crate::infra::{RedisCli, RedisDsn};
+use crate::infra::{RedisCli, RedisCliFactory, RedisDsn};
 
 const DEFAULT_TABLE_VISIBLE_ROWS: usize = 20;
 
@@ -97,6 +97,12 @@ pub enum WriteRefresh {
     FetchValue { key: String },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectionFormState {
+    pub dsn: String,
+    pub read_only: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct AppState {
     pub dsn: String,
@@ -117,6 +123,7 @@ pub struct AppState {
     pub confirm_state: Option<ConfirmState>,
     pub expire_input: Option<ExpireInputState>,
     pub pending_write_refresh: Option<WriteRefresh>,
+    pub connection_form: Option<ConnectionFormState>,
     pub status_message: Option<StatusMessage>,
     pub should_quit: bool,
 }
@@ -148,6 +155,7 @@ impl AppState {
             confirm_state: None,
             expire_input: None,
             pending_write_refresh: None,
+            connection_form: None,
             status_message: None,
             should_quit: false,
         }
@@ -181,6 +189,12 @@ pub enum Action {
     CommitFilter,
     OpenCommandModal,
     CloseCommandModal,
+    OpenConnectionForm,
+    ConnectionFormInput(char),
+    ConnectionFormBackspace,
+    ToggleConnectionFormReadOnly,
+    SubmitConnectionForm,
+    CancelConnectionForm,
     OpenDbOverlay,
     CloseDbOverlay,
     DbOverlaySelectNext,
@@ -240,6 +254,7 @@ pub enum Action {
 pub enum Effect {
     Connect {
         dsn: String,
+        read_only: bool,
     },
     FetchValue {
         key: String,
@@ -278,6 +293,7 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             reset_for_connect(state);
             vec![Effect::Connect {
                 dsn: state.dsn.clone(),
+                read_only: state.read_only,
             }]
         }
         Action::Connected { keys, dbsize } => {
@@ -402,6 +418,7 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
         }
         Action::OpenCommandModal => {
             if state.db_overlay.is_some()
+                || state.connection_form.is_some()
                 || state.confirm_state.is_some()
                 || state.expire_input.is_some()
                 || state.filter_active
@@ -417,6 +434,39 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             state.command_modal.is_open = false;
             Vec::new()
         }
+        Action::OpenConnectionForm => {
+            if overlay_or_modal_open(state) || state.filter_active {
+                return Vec::new();
+            }
+            state.connection_form = Some(ConnectionFormState {
+                dsn: state.dsn.clone(),
+                read_only: state.read_only,
+            });
+            Vec::new()
+        }
+        Action::ConnectionFormInput(ch) => {
+            if let Some(form) = &mut state.connection_form {
+                form.dsn.push(ch);
+            }
+            Vec::new()
+        }
+        Action::ConnectionFormBackspace => {
+            if let Some(form) = &mut state.connection_form {
+                form.dsn.pop();
+            }
+            Vec::new()
+        }
+        Action::ToggleConnectionFormReadOnly => {
+            if let Some(form) = &mut state.connection_form {
+                form.read_only = !form.read_only;
+            }
+            Vec::new()
+        }
+        Action::SubmitConnectionForm => submit_connection_form(state),
+        Action::CancelConnectionForm => {
+            state.connection_form = None;
+            Vec::new()
+        }
         Action::OpenDbOverlay => {
             if !matches!(state.connection_status, ConnectionStatus::Connected)
                 || state.filter_active
@@ -424,6 +474,7 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
                 || state.db_overlay.is_some()
                 || state.confirm_state.is_some()
                 || state.expire_input.is_some()
+                || state.connection_form.is_some()
             {
                 return Vec::new();
             }
@@ -510,6 +561,7 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             state.command_modal.status = CommandStatus::Success(output);
             vec![Effect::Connect {
                 dsn: state.dsn.clone(),
+                read_only: state.read_only,
             }]
         }
         Action::CommandFailed { message } => {
@@ -547,10 +599,7 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             Vec::new()
         }
         Action::RequestExportCsv => {
-            if state.db_overlay.is_some()
-                || state.confirm_state.is_some()
-                || state.expire_input.is_some()
-            {
+            if overlay_or_modal_open(state) {
                 Vec::new()
             } else {
                 request_export_csv(state)
@@ -621,14 +670,32 @@ fn reset_for_connect(state: &mut AppState) {
 }
 
 fn key_navigation_blocked(state: &AppState) -> bool {
-    state.db_overlay.is_some() || state.confirm_state.is_some() || state.expire_input.is_some()
+    state.db_overlay.is_some()
+        || state.connection_form.is_some()
+        || state.confirm_state.is_some()
+        || state.expire_input.is_some()
 }
 
 fn overlay_or_modal_open(state: &AppState) -> bool {
     state.db_overlay.is_some()
+        || state.connection_form.is_some()
         || state.command_modal.is_open
         || state.confirm_state.is_some()
         || state.expire_input.is_some()
+}
+
+fn submit_connection_form(state: &mut AppState) -> Vec<Effect> {
+    let Some(form) = state.connection_form.take() else {
+        return Vec::new();
+    };
+
+    let dsn = form.dsn;
+    let read_only = form.read_only;
+    state.dsn.clone_from(&dsn);
+    state.read_only = read_only;
+    state.current_db = RedisDsn::parse(&dsn).map(|parsed| parsed.db).unwrap_or(0);
+    reset_for_connect(state);
+    vec![Effect::Connect { dsn, read_only }]
 }
 
 fn submit_db_selection(state: &mut AppState) -> Vec<Effect> {
@@ -647,13 +714,22 @@ fn submit_db_selection(state: &mut AppState) -> Vec<Effect> {
     }
 
     state.current_db = db;
+    state.dsn = dsn_with_db(&state.dsn, db);
     reset_for_connect(state);
     vec![
         Effect::SelectDb { db },
         Effect::Connect {
             dsn: state.dsn.clone(),
+            read_only: state.read_only,
         },
     ]
+}
+
+fn dsn_with_db(dsn: &str, db: u8) -> String {
+    RedisDsn::parse(dsn).map_or_else(
+        |_| dsn.to_string(),
+        |parsed| format!("redis://{}:{}/{db}", parsed.host, parsed.port),
+    )
 }
 
 pub fn key_count(state: &AppState) -> usize {
@@ -778,6 +854,7 @@ fn refresh_after_write(state: &mut AppState) -> Vec<Effect> {
         Some(WriteRefresh::ReloadKeys) => {
             vec![Effect::Connect {
                 dsn: state.dsn.clone(),
+                read_only: state.read_only,
             }]
         }
         Some(WriteRefresh::FetchValue { key }) if is_current_key(state, &key) => {
@@ -895,20 +972,30 @@ fn keep_selection_visible(state: &mut AppState) {
 }
 
 pub struct EffectRunner {
-    cli: Arc<dyn RedisCli>,
+    current_cli: RwLock<Arc<dyn RedisCli>>,
+    factory: Arc<dyn RedisCliFactory>,
     action_tx: mpsc::Sender<Action>,
 }
 
 impl EffectRunner {
-    pub fn new(cli: Arc<dyn RedisCli>, action_tx: mpsc::Sender<Action>) -> Self {
-        Self { cli, action_tx }
+    #[must_use]
+    pub fn new(
+        initial_cli: Arc<dyn RedisCli>,
+        factory: Arc<dyn RedisCliFactory>,
+        action_tx: mpsc::Sender<Action>,
+    ) -> Self {
+        Self {
+            current_cli: RwLock::new(initial_cli),
+            factory,
+            action_tx,
+        }
     }
 
     pub async fn run(&self, effects: Vec<Effect>) {
         for effect in effects {
             match effect {
-                Effect::Connect { dsn: _ } => {
-                    let action = match self.connect().await {
+                Effect::Connect { dsn, read_only } => {
+                    let action = match self.connect(&dsn, read_only).await {
                         Ok((keys, dbsize)) => Action::Connected { keys, dbsize },
                         Err(e) => Action::ConnectFailed(e.to_string()),
                     };
@@ -930,7 +1017,8 @@ impl EffectRunner {
                     let _ = self.action_tx.send(action).await;
                 }
                 Effect::SearchKeys { pattern } => {
-                    let action = match self.cli.scan_keys(&pattern).await {
+                    let cli = self.current_cli().await;
+                    let action = match cli.scan_keys(&pattern).await {
                         Ok(keys) => Action::KeysScanned { keys },
                         Err(e) => Action::KeysScanFailed {
                             message: e.to_string(),
@@ -939,7 +1027,8 @@ impl EffectRunner {
                     let _ = self.action_tx.send(action).await;
                 }
                 Effect::ExecuteCommand { command } => {
-                    let action = match self.cli.execute_command(&command).await {
+                    let cli = self.current_cli().await;
+                    let action = match cli.execute_command(&command).await {
                         Ok(output) => Action::CommandSucceeded { output },
                         Err(e) => Action::CommandFailed {
                             message: e.to_string(),
@@ -948,7 +1037,8 @@ impl EffectRunner {
                     let _ = self.action_tx.send(action).await;
                 }
                 Effect::LoadDbOverview => {
-                    let action = match self.cli.db_overview().await {
+                    let cli = self.current_cli().await;
+                    let action = match cli.db_overview().await {
                         Ok(entries) => Action::DbOverviewLoaded { entries },
                         Err(e) => Action::DbOverviewFailed {
                             message: e.to_string(),
@@ -957,7 +1047,8 @@ impl EffectRunner {
                     let _ = self.action_tx.send(action).await;
                 }
                 Effect::SelectDb { db } => {
-                    self.cli.select_db(db);
+                    let cli = self.current_cli().await;
+                    cli.select_db(db);
                 }
                 Effect::ExportCsv {
                     stem,
@@ -973,7 +1064,8 @@ impl EffectRunner {
                     let _ = self.action_tx.send(action).await;
                 }
                 Effect::DeleteKey { key, unlink } => {
-                    let action = match self.cli.delete_key(&key, unlink).await {
+                    let cli = self.current_cli().await;
+                    let action = match cli.delete_key(&key, unlink).await {
                         Ok(count) => Action::WriteSucceeded {
                             message: deleted_message(count, unlink),
                         },
@@ -984,7 +1076,8 @@ impl EffectRunner {
                     let _ = self.action_tx.send(action).await;
                 }
                 Effect::SetExpire { key, seconds } => {
-                    let action = match self.cli.set_expire(&key, seconds).await {
+                    let cli = self.current_cli().await;
+                    let action = match cli.set_expire(&key, seconds).await {
                         Ok(true) => Action::WriteSucceeded {
                             message: format!("TTL set to {seconds}s"),
                         },
@@ -998,7 +1091,8 @@ impl EffectRunner {
                     let _ = self.action_tx.send(action).await;
                 }
                 Effect::PersistKey { key } => {
-                    let action = match self.cli.persist_key(&key).await {
+                    let cli = self.current_cli().await;
+                    let action = match cli.persist_key(&key).await {
                         Ok(true) => Action::WriteSucceeded {
                             message: "Persisted key".to_string(),
                         },
@@ -1016,10 +1110,26 @@ impl EffectRunner {
         }
     }
 
-    async fn connect(&self) -> Result<(Vec<RedisKey>, Option<usize>), crate::infra::RedisCliError> {
-        self.cli.ping().await?;
-        let dbsize = self.cli.dbsize().await?;
-        let keys = self.cli.scan_keys("*").await?;
+    async fn current_cli(&self) -> Arc<dyn RedisCli> {
+        self.current_cli.read().await.clone()
+    }
+
+    async fn connect(
+        &self,
+        dsn: &str,
+        read_only: bool,
+    ) -> Result<(Vec<RedisKey>, Option<usize>), crate::infra::RedisCliError> {
+        let cli = self.factory.create(dsn, read_only)?;
+        *self.current_cli.write().await = cli.clone();
+        Self::load_keys(&cli).await
+    }
+
+    async fn load_keys(
+        cli: &Arc<dyn RedisCli>,
+    ) -> Result<(Vec<RedisKey>, Option<usize>), crate::infra::RedisCliError> {
+        cli.ping().await?;
+        let dbsize = cli.dbsize().await?;
+        let keys = cli.scan_keys("*").await?;
         Ok((keys, Some(dbsize)))
     }
 
@@ -1027,8 +1137,9 @@ impl EffectRunner {
         &self,
         key: &str,
     ) -> Result<(RedisKind, Option<u64>, RedisValue), crate::infra::RedisCliError> {
-        let (kind, ttl) = self.cli.key_type_and_ttl(key).await?;
-        let value = self.cli.fetch_value(key, kind).await?;
+        let cli = self.current_cli().await;
+        let (kind, ttl) = cli.key_type_and_ttl(key).await?;
+        let value = cli.fetch_value(key, kind).await?;
         Ok((kind, ttl, value))
     }
 }
@@ -1044,7 +1155,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::infra::MockRedisCli;
+    use crate::infra::{MockRedisCli, MockRedisCliFactory};
 
     fn key(name: &str) -> RedisKey {
         RedisKey::unknown(name)
@@ -1063,7 +1174,8 @@ mod tests {
             assert_eq!(
                 effects,
                 vec![Effect::Connect {
-                    dsn: "redis://localhost".to_string()
+                    dsn: "redis://localhost".to_string(),
+                    read_only: false,
                 }]
             );
         }
@@ -1397,6 +1509,94 @@ mod tests {
         }
 
         #[test]
+        fn open_connection_form_prefills_current_connection() {
+            let mut state = AppState::with_read_only("redis://localhost:6380/2", true);
+
+            let effects = reduce(&mut state, Action::OpenConnectionForm);
+
+            assert!(effects.is_empty());
+            assert_eq!(
+                state.connection_form,
+                Some(ConnectionFormState {
+                    dsn: "redis://localhost:6380/2".to_string(),
+                    read_only: true,
+                })
+            );
+        }
+
+        #[test]
+        fn connection_form_input_backspace_toggle_and_cancel_update_state_only() {
+            let mut state = AppState::with_read_only("redis://localhost", true);
+            state.connection_form = Some(ConnectionFormState {
+                dsn: "redis://localhost".to_string(),
+                read_only: true,
+            });
+
+            assert!(reduce(&mut state, Action::ConnectionFormInput('/')).is_empty());
+            assert!(reduce(&mut state, Action::ConnectionFormInput('1')).is_empty());
+            assert_eq!(
+                state.connection_form.as_ref().map(|form| form.dsn.as_str()),
+                Some("redis://localhost/1")
+            );
+
+            assert!(reduce(&mut state, Action::ConnectionFormBackspace).is_empty());
+            assert_eq!(
+                state.connection_form.as_ref().map(|form| form.dsn.as_str()),
+                Some("redis://localhost/")
+            );
+
+            assert!(reduce(&mut state, Action::ToggleConnectionFormReadOnly).is_empty());
+            assert_eq!(
+                state.connection_form.as_ref().map(|form| form.read_only),
+                Some(false)
+            );
+
+            assert!(reduce(&mut state, Action::CancelConnectionForm).is_empty());
+            assert_eq!(state.connection_form, None);
+            assert_eq!(state.dsn, "redis://localhost");
+            assert!(state.read_only);
+        }
+
+        #[test]
+        fn submit_connection_form_updates_state_and_emits_connect() {
+            let mut state = AppState::new("redis://localhost:6379/0");
+            state.keys = vec![key("a"), key("b")];
+            state.selected_index = 1;
+            state.scroll_offset = 1;
+            state.dbsize = Some(2);
+            state.value_state = ValueState::Loaded {
+                key: "b".to_string(),
+                kind: RedisKind::String,
+                ttl: None,
+                value: RedisValue::String("value".to_string()),
+            };
+            state.connection_form = Some(ConnectionFormState {
+                dsn: "redis://cache.example.com:6380/4".to_string(),
+                read_only: true,
+            });
+
+            let effects = reduce(&mut state, Action::SubmitConnectionForm);
+
+            assert_eq!(state.connection_form, None);
+            assert_eq!(state.dsn, "redis://cache.example.com:6380/4");
+            assert!(state.read_only);
+            assert_eq!(state.current_db, 4);
+            assert_eq!(state.connection_status, ConnectionStatus::Connecting);
+            assert!(state.keys.is_empty());
+            assert_eq!(state.selected_index, 0);
+            assert_eq!(state.scroll_offset, 0);
+            assert_eq!(state.dbsize, None);
+            assert_eq!(state.value_state, ValueState::Empty);
+            assert_eq!(
+                effects,
+                vec![Effect::Connect {
+                    dsn: "redis://cache.example.com:6380/4".to_string(),
+                    read_only: true,
+                }]
+            );
+        }
+
+        #[test]
         fn submit_command_emits_execute_command_and_sets_running() {
             let mut state = AppState::new("redis://localhost");
             state.command_modal.is_open = true;
@@ -1451,6 +1651,7 @@ mod tests {
                 effects,
                 vec![Effect::Connect {
                     dsn: "redis://localhost".to_string(),
+                    read_only: false,
                 }]
             );
         }
@@ -1690,7 +1891,8 @@ mod tests {
             assert_eq!(
                 effects,
                 vec![Effect::Connect {
-                    dsn: "redis://localhost".to_string()
+                    dsn: "redis://localhost".to_string(),
+                    read_only: false,
                 }]
             );
             assert_eq!(
@@ -1820,6 +2022,7 @@ mod tests {
             let effects = reduce(&mut state, Action::SubmitDbSelection);
 
             assert_eq!(state.current_db, 3);
+            assert_eq!(state.dsn, "redis://localhost:6379/3");
             assert_eq!(state.connection_status, ConnectionStatus::Connecting);
             assert!(state.keys.is_empty());
             assert_eq!(state.search_pattern, "*");
@@ -1833,7 +2036,8 @@ mod tests {
                 vec![
                     Effect::SelectDb { db: 3 },
                     Effect::Connect {
-                        dsn: "redis://localhost:6379/0".to_string(),
+                        dsn: "redis://localhost:6379/3".to_string(),
+                        read_only: false,
                     },
                 ]
             );
@@ -2169,22 +2373,44 @@ mod tests {
     mod effect_runner {
         use super::*;
 
+        fn runner_with_cli(cli: MockRedisCli, action_tx: mpsc::Sender<Action>) -> EffectRunner {
+            let mut factory = MockRedisCliFactory::new();
+            factory.expect_create().never();
+            EffectRunner::new(Arc::new(cli), Arc::new(factory), action_tx)
+        }
+
         #[tokio::test]
-        async fn connect_effect_pings_counts_and_scans_then_dispatches_connected() {
-            let mut cli = MockRedisCli::new();
-            cli.expect_ping().once().returning(|| Ok(()));
-            cli.expect_dbsize().once().returning(|| Ok(2));
-            cli.expect_scan_keys()
+        async fn connect_effect_uses_factory_swaps_cli_and_dispatches_connected() {
+            let initial_cli = MockRedisCli::new();
+            let mut next_cli = MockRedisCli::new();
+            next_cli.expect_ping().once().returning(|| Ok(()));
+            next_cli.expect_dbsize().once().returning(|| Ok(2));
+            next_cli
+                .expect_scan_keys()
                 .once()
                 .withf(|pattern| pattern == "*")
                 .returning(|_| Ok(vec![key("a"), key("b")]));
+            next_cli
+                .expect_execute_command()
+                .once()
+                .withf(|command| command == "PING")
+                .returning(|_| Ok("PONG\n".to_string()));
+            let next_cli: Arc<dyn RedisCli> = Arc::new(next_cli);
+
+            let mut factory = MockRedisCliFactory::new();
+            factory
+                .expect_create()
+                .once()
+                .withf(|dsn, read_only| dsn == "redis://cache.example.com:6380/2" && *read_only)
+                .return_once(move |_, _| Ok(next_cli));
 
             let (tx, mut rx) = mpsc::channel(4);
-            let runner = EffectRunner::new(Arc::new(cli), tx);
+            let runner = EffectRunner::new(Arc::new(initial_cli), Arc::new(factory), tx);
 
             runner
                 .run(vec![Effect::Connect {
-                    dsn: "redis://localhost".to_string(),
+                    dsn: "redis://cache.example.com:6380/2".to_string(),
+                    read_only: true,
                 }])
                 .await;
 
@@ -2199,25 +2425,45 @@ mod tests {
                     dbsize: Some(2),
                 }
             );
+
+            runner
+                .run(vec![Effect::ExecuteCommand {
+                    command: "PING".to_string(),
+                }])
+                .await;
+            let action = tokio::time::timeout(Duration::from_millis(500), rx.recv())
+                .await
+                .expect("action timeout")
+                .expect("channel closed");
+            assert_eq!(
+                action,
+                Action::CommandSucceeded {
+                    output: "PONG\n".to_string(),
+                }
+            );
         }
 
         #[tokio::test]
-        async fn connect_effect_dispatches_failure_when_ping_fails() {
-            let mut cli = MockRedisCli::new();
-            cli.expect_ping().once().returning(|| {
-                Err(crate::infra::RedisCliError::CommandFailed(
-                    "connection refused".to_string(),
-                ))
-            });
-            cli.expect_dbsize().never();
-            cli.expect_scan_keys().never();
+        async fn connect_effect_dispatches_failure_when_factory_fails() {
+            let cli = MockRedisCli::new();
+            let mut factory = MockRedisCliFactory::new();
+            factory
+                .expect_create()
+                .once()
+                .withf(|dsn, read_only| dsn == "not-a-redis-dsn" && !*read_only)
+                .returning(|_, _| {
+                    Err(crate::infra::RedisCliError::Parse(
+                        "DSN must start with redis://".to_string(),
+                    ))
+                });
 
             let (tx, mut rx) = mpsc::channel(4);
-            let runner = EffectRunner::new(Arc::new(cli), tx);
+            let runner = EffectRunner::new(Arc::new(cli), Arc::new(factory), tx);
 
             runner
                 .run(vec![Effect::Connect {
-                    dsn: "redis://localhost".to_string(),
+                    dsn: "not-a-redis-dsn".to_string(),
+                    read_only: false,
                 }])
                 .await;
 
@@ -2227,7 +2473,9 @@ mod tests {
                 .expect("channel closed");
             assert_eq!(
                 action,
-                Action::ConnectFailed("redis-cli failed: connection refused".to_string())
+                Action::ConnectFailed(
+                    "failed to parse redis-cli output: DSN must start with redis://".to_string()
+                )
             );
         }
 
@@ -2240,7 +2488,7 @@ mod tests {
                 .returning(|_| Ok(vec![key("user:1:a"), key("user:2:b")]));
 
             let (tx, mut rx) = mpsc::channel(4);
-            let runner = EffectRunner::new(Arc::new(cli), tx);
+            let runner = EffectRunner::new(Arc::new(cli), Arc::new(MockRedisCliFactory::new()), tx);
 
             runner
                 .run(vec![Effect::SearchKeys {
@@ -2273,7 +2521,7 @@ mod tests {
                 .returning(|_, _| Ok(RedisValue::String("alice".to_string())));
 
             let (tx, mut rx) = mpsc::channel(4);
-            let runner = EffectRunner::new(Arc::new(cli), tx);
+            let runner = runner_with_cli(cli, tx);
 
             runner
                 .run(vec![Effect::FetchValue {
@@ -2307,7 +2555,7 @@ mod tests {
             cli.expect_fetch_value().never();
 
             let (tx, mut rx) = mpsc::channel(4);
-            let runner = EffectRunner::new(Arc::new(cli), tx);
+            let runner = runner_with_cli(cli, tx);
 
             runner
                 .run(vec![Effect::FetchValue {
@@ -2337,7 +2585,7 @@ mod tests {
                 .returning(|_| Ok("OK\n".to_string()));
 
             let (tx, mut rx) = mpsc::channel(4);
-            let runner = EffectRunner::new(Arc::new(cli), tx);
+            let runner = runner_with_cli(cli, tx);
 
             runner
                 .run(vec![Effect::ExecuteCommand {
@@ -2367,7 +2615,7 @@ mod tests {
             });
 
             let (tx, mut rx) = mpsc::channel(4);
-            let runner = EffectRunner::new(Arc::new(cli), tx);
+            let runner = runner_with_cli(cli, tx);
 
             runner
                 .run(vec![Effect::ExecuteCommand {
@@ -2396,7 +2644,7 @@ mod tests {
                 .returning(|_, _| Ok(1));
 
             let (tx, mut rx) = mpsc::channel(4);
-            let runner = EffectRunner::new(Arc::new(cli), tx);
+            let runner = runner_with_cli(cli, tx);
 
             runner
                 .run(vec![Effect::DeleteKey {
@@ -2426,7 +2674,7 @@ mod tests {
                 .returning(|_, _| Ok(2));
 
             let (tx, mut rx) = mpsc::channel(4);
-            let runner = EffectRunner::new(Arc::new(cli), tx);
+            let runner = runner_with_cli(cli, tx);
 
             runner
                 .run(vec![Effect::DeleteKey {
@@ -2460,7 +2708,7 @@ mod tests {
                 .returning(|_, _| Ok(false));
 
             let (tx, mut rx) = mpsc::channel(4);
-            let runner = EffectRunner::new(Arc::new(cli), tx);
+            let runner = runner_with_cli(cli, tx);
 
             runner
                 .run(vec![
@@ -2514,7 +2762,7 @@ mod tests {
                 });
 
             let (tx, mut rx) = mpsc::channel(4);
-            let runner = EffectRunner::new(Arc::new(cli), tx);
+            let runner = runner_with_cli(cli, tx);
 
             runner
                 .run(vec![
@@ -2557,7 +2805,7 @@ mod tests {
                 .returning(|| Ok(vec![(0, 2), (1, 0), (2, 7)]));
 
             let (tx, mut rx) = mpsc::channel(4);
-            let runner = EffectRunner::new(Arc::new(cli), tx);
+            let runner = runner_with_cli(cli, tx);
 
             runner.run(vec![Effect::LoadDbOverview]).await;
 
@@ -2582,7 +2830,7 @@ mod tests {
                 .returning(|_| ());
 
             let (tx, mut rx) = mpsc::channel(4);
-            let runner = EffectRunner::new(Arc::new(cli), tx);
+            let runner = runner_with_cli(cli, tx);
 
             runner.run(vec![Effect::SelectDb { db: 3 }]).await;
 
@@ -2597,7 +2845,7 @@ mod tests {
             let _ = std::fs::remove_file(&path);
 
             let (tx, mut rx) = mpsc::channel(4);
-            let runner = EffectRunner::new(Arc::new(cli), tx);
+            let runner = runner_with_cli(cli, tx);
 
             runner
                 .run(vec![Effect::ExportCsv {
