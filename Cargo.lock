@@ -2707,6 +2707,7 @@ dependencies = [
  "color-eyre",
  "csv",
  "mockall",
+ "nucleo-matcher",
  "ratatui",
  "sabiql-tui-kit",
  "tempfile",

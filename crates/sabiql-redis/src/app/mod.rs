@@ -1,10 +1,12 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
+use nucleo_matcher::{Config, Matcher};
 use tokio::sync::{RwLock, mpsc};
 
 use crate::domain::{RedisKey, RedisKind, RedisValue, redis_value_table};
-use crate::infra::{RedisCli, RedisCliFactory, RedisDsn};
+use crate::infra::{RedisCli, RedisCliFactory, RedisDsn, command_requires_confirmation};
 
 const DEFAULT_TABLE_VISIBLE_ROWS: usize = 20;
 
@@ -75,26 +77,13 @@ pub struct DbOverlayState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PendingWrite {
-    Delete { key: String, unlink: bool },
-    Persist { key: String },
+    Command { command: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfirmState {
     pub op: PendingWrite,
     pub prompt: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExpireInputState {
-    pub key: String,
-    pub input: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WriteRefresh {
-    ReloadKeys,
-    FetchValue { key: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,6 +99,7 @@ pub struct AppState {
     pub current_db: u8,
     pub connection_status: ConnectionStatus,
     pub keys: Vec<RedisKey>,
+    pub filtered_indices: Vec<usize>,
     pub search_pattern: String,
     pub filter_active: bool,
     pub selected_index: usize,
@@ -121,8 +111,6 @@ pub struct AppState {
     pub command_modal: CommandModalState,
     pub db_overlay: Option<DbOverlayState>,
     pub confirm_state: Option<ConfirmState>,
-    pub expire_input: Option<ExpireInputState>,
-    pub pending_write_refresh: Option<WriteRefresh>,
     pub connection_form: Option<ConnectionFormState>,
     pub status_message: Option<StatusMessage>,
     pub should_quit: bool,
@@ -142,6 +130,7 @@ impl AppState {
             current_db,
             connection_status: ConnectionStatus::Disconnected,
             keys: Vec::new(),
+            filtered_indices: Vec::new(),
             search_pattern: "*".to_string(),
             filter_active: false,
             selected_index: 0,
@@ -153,8 +142,6 @@ impl AppState {
             command_modal: CommandModalState::new(),
             db_overlay: None,
             confirm_state: None,
-            expire_input: None,
-            pending_write_refresh: None,
             connection_form: None,
             status_message: None,
             should_quit: false,
@@ -232,22 +219,8 @@ pub enum Action {
     ExportFailed {
         message: String,
     },
-    RequestDelete,
-    RequestUnlink,
-    RequestPersist,
-    OpenExpireInput,
-    ExpireInputDigit(char),
-    ExpireInputBackspace,
-    SubmitExpire,
     ConfirmWrite,
     CancelWrite,
-    CancelExpireInput,
-    WriteSucceeded {
-        message: String,
-    },
-    WriteFailed {
-        message: String,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -274,17 +247,6 @@ pub enum Effect {
         headers: Vec<String>,
         rows: Vec<Vec<String>>,
     },
-    DeleteKey {
-        key: String,
-        unlink: bool,
-    },
-    SetExpire {
-        key: String,
-        seconds: u64,
-    },
-    PersistKey {
-        key: String,
-    },
 }
 
 pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
@@ -301,12 +263,14 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             state.keys = keys;
             state.dbsize = dbsize;
             state.search_pattern = "*".to_string();
+            recompute_filtered_indices(state);
             clamp_selection_and_scroll(state);
             fetch_selected_key(state)
         }
         Action::ConnectFailed(message) => {
             state.connection_status = ConnectionStatus::Error(message);
             state.keys.clear();
+            recompute_filtered_indices(state);
             state.dbsize = None;
             state.selected_index = 0;
             state.scroll_offset = 0;
@@ -318,6 +282,8 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             state.keys = keys;
             state.selected_index = 0;
             state.scroll_offset = 0;
+            recompute_filtered_indices(state);
+            clamp_selection_and_scroll(state);
             fetch_selected_key(state)
         }
         Action::KeysScanFailed { message } => {
@@ -393,18 +359,23 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
                 return Vec::new();
             }
             state.search_pattern.push(ch);
-            Vec::new()
+            apply_filter_change(state)
         }
         Action::FilterBackspace => {
             if !state.filter_active {
                 return Vec::new();
             }
-            state.search_pattern.pop();
-            Vec::new()
+            if state.search_pattern.pop().is_none() {
+                return Vec::new();
+            }
+            apply_filter_change(state)
         }
         Action::ClearFilter => {
             state.filter_active = false;
             state.search_pattern = "*".to_string();
+            recompute_filtered_indices(state);
+            state.selected_index = 0;
+            state.scroll_offset = 0;
             vec![Effect::SearchKeys {
                 pattern: state.search_pattern.clone(),
             }]
@@ -412,6 +383,8 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
         Action::CommitFilter => {
             state.filter_active = false;
             state.search_pattern = normalized_search_pattern(&state.search_pattern);
+            recompute_filtered_indices(state);
+            clamp_selection_and_scroll(state);
             vec![Effect::SearchKeys {
                 pattern: state.search_pattern.clone(),
             }]
@@ -420,7 +393,6 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             if state.db_overlay.is_some()
                 || state.connection_form.is_some()
                 || state.confirm_state.is_some()
-                || state.expire_input.is_some()
                 || state.filter_active
             {
                 return Vec::new();
@@ -473,7 +445,6 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
                 || state.command_modal.is_open
                 || state.db_overlay.is_some()
                 || state.confirm_state.is_some()
-                || state.expire_input.is_some()
                 || state.connection_form.is_some()
             {
                 return Vec::new();
@@ -553,6 +524,24 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
                     CommandStatus::Error("Enter a Redis command.".to_string());
                 return Vec::new();
             }
+            let requires_confirmation =
+                match command_requires_confirmation(&command, state.read_only) {
+                    Ok(requires_confirmation) => requires_confirmation,
+                    Err(e) => {
+                        state.command_modal.status = CommandStatus::Error(e.to_string());
+                        return Vec::new();
+                    }
+                };
+            if requires_confirmation {
+                state.command_modal.status = CommandStatus::Idle;
+                state.confirm_state = Some(ConfirmState {
+                    op: PendingWrite::Command {
+                        command: command.clone(),
+                    },
+                    prompt: format!("Run this command? {command}"),
+                });
+                return Vec::new();
+            }
             state.command_modal.status = CommandStatus::Running;
             vec![Effect::ExecuteCommand { command }]
         }
@@ -577,7 +566,9 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             if !is_current_key(state, &key) {
                 return Vec::new();
             }
-            if let Some(redis_key) = state.keys.get_mut(state.selected_index) {
+            if let Some(redis_key) =
+                selected_full_index(state).and_then(|index| state.keys.get_mut(index))
+            {
                 redis_key.kind = kind;
                 redis_key.ttl = ttl;
             }
@@ -618,41 +609,10 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             )));
             Vec::new()
         }
-        Action::RequestDelete => request_delete(state, false),
-        Action::RequestUnlink => request_delete(state, true),
-        Action::RequestPersist => request_persist(state),
-        Action::OpenExpireInput => open_expire_input(state),
-        Action::ExpireInputDigit(ch) => {
-            if let Some(expire_input) = &mut state.expire_input
-                && ch.is_ascii_digit()
-            {
-                expire_input.input.push(ch);
-            }
-            Vec::new()
-        }
-        Action::ExpireInputBackspace => {
-            if let Some(expire_input) = &mut state.expire_input {
-                expire_input.input.pop();
-            }
-            Vec::new()
-        }
-        Action::SubmitExpire => submit_expire(state),
         Action::ConfirmWrite => confirm_write(state),
         Action::CancelWrite => {
             state.confirm_state = None;
-            Vec::new()
-        }
-        Action::CancelExpireInput => {
-            state.expire_input = None;
-            Vec::new()
-        }
-        Action::WriteSucceeded { message } => {
-            state.status_message = Some(StatusMessage::Success(message));
-            refresh_after_write(state)
-        }
-        Action::WriteFailed { message } => {
-            state.pending_write_refresh = None;
-            state.status_message = Some(StatusMessage::Error(message));
+            state.command_modal.status = CommandStatus::Idle;
             Vec::new()
         }
     }
@@ -661,6 +621,7 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
 fn reset_for_connect(state: &mut AppState) {
     state.connection_status = ConnectionStatus::Connecting;
     state.keys.clear();
+    state.filtered_indices.clear();
     state.search_pattern = "*".to_string();
     state.dbsize = None;
     state.selected_index = 0;
@@ -670,10 +631,7 @@ fn reset_for_connect(state: &mut AppState) {
 }
 
 fn key_navigation_blocked(state: &AppState) -> bool {
-    state.db_overlay.is_some()
-        || state.connection_form.is_some()
-        || state.confirm_state.is_some()
-        || state.expire_input.is_some()
+    state.db_overlay.is_some() || state.connection_form.is_some() || state.confirm_state.is_some()
 }
 
 fn overlay_or_modal_open(state: &AppState) -> bool {
@@ -681,7 +639,6 @@ fn overlay_or_modal_open(state: &AppState) -> bool {
         || state.connection_form.is_some()
         || state.command_modal.is_open
         || state.confirm_state.is_some()
-        || state.expire_input.is_some()
 }
 
 fn submit_connection_form(state: &mut AppState) -> Vec<Effect> {
@@ -733,142 +690,33 @@ fn dsn_with_db(dsn: &str, db: u8) -> String {
 }
 
 pub fn key_count(state: &AppState) -> usize {
-    state.keys.len()
+    state.filtered_indices.len()
+}
+
+fn selected_full_index(state: &AppState) -> Option<usize> {
+    state.filtered_indices.get(state.selected_index).copied()
 }
 
 fn selected_key(state: &AppState) -> Option<String> {
-    state
-        .keys
-        .get(state.selected_index)
+    selected_full_index(state)
+        .and_then(|index| state.keys.get(index))
         .map(|redis_key| redis_key.key.clone())
 }
 
-fn request_delete(state: &mut AppState, unlink: bool) -> Vec<Effect> {
-    if state.read_only {
-        deny_read_only_write(state);
-        return Vec::new();
-    }
-    if overlay_or_modal_open(state) || state.filter_active {
-        return Vec::new();
-    }
-    let Some(key) = selected_key(state) else {
-        return Vec::new();
-    };
-
-    let command = if unlink { "UNLINK" } else { "DEL" };
-    let verb = if unlink { "Unlink" } else { "Delete" };
-    state.confirm_state = Some(ConfirmState {
-        op: PendingWrite::Delete {
-            key: key.clone(),
-            unlink,
-        },
-        prompt: format!("{verb} key {key:?} with {command}?"),
-    });
-    Vec::new()
-}
-
-fn request_persist(state: &mut AppState) -> Vec<Effect> {
-    if state.read_only {
-        deny_read_only_write(state);
-        return Vec::new();
-    }
-    if overlay_or_modal_open(state) || state.filter_active {
-        return Vec::new();
-    }
-    let Some(key) = selected_key(state) else {
-        return Vec::new();
-    };
-
-    state.confirm_state = Some(ConfirmState {
-        op: PendingWrite::Persist { key: key.clone() },
-        prompt: format!("Remove expiry from key {key:?} with PERSIST?"),
-    });
-    Vec::new()
-}
-
-fn open_expire_input(state: &mut AppState) -> Vec<Effect> {
-    if state.read_only {
-        deny_read_only_write(state);
-        return Vec::new();
-    }
-    if overlay_or_modal_open(state) || state.filter_active {
-        return Vec::new();
-    }
-    let Some(key) = selected_key(state) else {
-        return Vec::new();
-    };
-
-    state.expire_input = Some(ExpireInputState {
-        key,
-        input: String::new(),
-    });
-    Vec::new()
-}
-
-fn submit_expire(state: &mut AppState) -> Vec<Effect> {
-    if state.read_only {
-        deny_read_only_write(state);
-        return Vec::new();
-    }
-
-    let Some(expire_input) = &state.expire_input else {
-        return Vec::new();
-    };
-    let input = expire_input.input.trim();
-    let Ok(seconds) = input.parse::<u64>() else {
-        state.status_message = Some(StatusMessage::Error(
-            "Enter expiry seconds as digits.".to_string(),
-        ));
-        return Vec::new();
-    };
-
-    let key = expire_input.key.clone();
-    state.expire_input = None;
-    state.pending_write_refresh = Some(WriteRefresh::FetchValue { key: key.clone() });
-    vec![Effect::SetExpire { key, seconds }]
-}
-
 fn confirm_write(state: &mut AppState) -> Vec<Effect> {
-    if state.read_only {
-        deny_read_only_write(state);
-        return Vec::new();
-    }
-
     let Some(confirm_state) = state.confirm_state.take() else {
         return Vec::new();
     };
     match confirm_state.op {
-        PendingWrite::Delete { key, unlink } => {
-            state.pending_write_refresh = Some(WriteRefresh::ReloadKeys);
-            vec![Effect::DeleteKey { key, unlink }]
-        }
-        PendingWrite::Persist { key } => {
-            state.pending_write_refresh = Some(WriteRefresh::FetchValue { key: key.clone() });
-            vec![Effect::PersistKey { key }]
+        PendingWrite::Command { command } => {
+            if let Err(e) = command_requires_confirmation(&command, state.read_only) {
+                state.command_modal.status = CommandStatus::Error(e.to_string());
+                return Vec::new();
+            }
+            state.command_modal.status = CommandStatus::Running;
+            vec![Effect::ExecuteCommand { command }]
         }
     }
-}
-
-fn refresh_after_write(state: &mut AppState) -> Vec<Effect> {
-    match state.pending_write_refresh.take() {
-        Some(WriteRefresh::ReloadKeys) => {
-            vec![Effect::Connect {
-                dsn: state.dsn.clone(),
-                read_only: state.read_only,
-            }]
-        }
-        Some(WriteRefresh::FetchValue { key }) if is_current_key(state, &key) => {
-            state.value_state = ValueState::Loading { key: key.clone() };
-            vec![Effect::FetchValue { key }]
-        }
-        Some(WriteRefresh::FetchValue { .. }) | None => Vec::new(),
-    }
-}
-
-fn deny_read_only_write(state: &mut AppState) {
-    state.status_message = Some(StatusMessage::Error(
-        "Read-only mode blocks write operations.".to_string(),
-    ));
 }
 
 fn is_current_key(state: &AppState, key: &str) -> bool {
@@ -891,6 +739,57 @@ fn fetch_selected_key(state: &mut AppState) -> Vec<Effect> {
     };
     state.value_state = ValueState::Loading { key: key.clone() };
     vec![Effect::FetchValue { key }]
+}
+
+fn apply_filter_change(state: &mut AppState) -> Vec<Effect> {
+    recompute_filtered_indices(state);
+    clamp_selection_and_scroll(state);
+    Vec::new()
+}
+
+fn recompute_filtered_indices(state: &mut AppState) {
+    let query = fuzzy_filter_query(&state.search_pattern);
+    if query.is_empty() {
+        state.filtered_indices = (0..state.keys.len()).collect();
+        return;
+    }
+
+    let mut matcher = Matcher::new(Config::DEFAULT);
+    let pattern = Pattern::parse(&query, CaseMatching::Ignore, Normalization::Smart);
+
+    state.filtered_indices = state
+        .keys
+        .iter()
+        .enumerate()
+        .filter_map(|(index, redis_key)| {
+            let mut indices = Vec::new();
+            let mut buf = Vec::new();
+            let haystack = nucleo_matcher::Utf32Str::new(&redis_key.key, &mut buf);
+            pattern
+                .indices(haystack, &mut matcher, &mut indices)
+                .map(|_| index)
+        })
+        .collect();
+}
+
+fn fuzzy_filter_query(pattern: &str) -> String {
+    let query = pattern.trim();
+    if query.is_empty() || query == "*" {
+        return String::new();
+    }
+
+    let mut output = String::new();
+    let mut in_bracket_expression = false;
+    for ch in query.chars() {
+        match ch {
+            '[' => in_bracket_expression = true,
+            ']' => in_bracket_expression = false,
+            '*' | '?' if !in_bracket_expression => {}
+            _ if in_bracket_expression => {}
+            _ => output.push(ch),
+        }
+    }
+    output
 }
 
 fn normalized_search_pattern(pattern: &str) -> String {
@@ -1063,49 +962,6 @@ impl EffectRunner {
                     };
                     let _ = self.action_tx.send(action).await;
                 }
-                Effect::DeleteKey { key, unlink } => {
-                    let cli = self.current_cli().await;
-                    let action = match cli.delete_key(&key, unlink).await {
-                        Ok(count) => Action::WriteSucceeded {
-                            message: deleted_message(count, unlink),
-                        },
-                        Err(e) => Action::WriteFailed {
-                            message: e.to_string(),
-                        },
-                    };
-                    let _ = self.action_tx.send(action).await;
-                }
-                Effect::SetExpire { key, seconds } => {
-                    let cli = self.current_cli().await;
-                    let action = match cli.set_expire(&key, seconds).await {
-                        Ok(true) => Action::WriteSucceeded {
-                            message: format!("TTL set to {seconds}s"),
-                        },
-                        Ok(false) => Action::WriteFailed {
-                            message: "EXPIRE did not apply; key may no longer exist".to_string(),
-                        },
-                        Err(e) => Action::WriteFailed {
-                            message: e.to_string(),
-                        },
-                    };
-                    let _ = self.action_tx.send(action).await;
-                }
-                Effect::PersistKey { key } => {
-                    let cli = self.current_cli().await;
-                    let action = match cli.persist_key(&key).await {
-                        Ok(true) => Action::WriteSucceeded {
-                            message: "Persisted key".to_string(),
-                        },
-                        Ok(false) => Action::WriteFailed {
-                            message: "PERSIST did not apply; key may not have an expiry"
-                                .to_string(),
-                        },
-                        Err(e) => Action::WriteFailed {
-                            message: e.to_string(),
-                        },
-                    };
-                    let _ = self.action_tx.send(action).await;
-                }
             }
         }
     }
@@ -1144,12 +1000,6 @@ impl EffectRunner {
     }
 }
 
-fn deleted_message(count: u64, unlink: bool) -> String {
-    let verb = if unlink { "Unlinked" } else { "Deleted" };
-    let noun = if count == 1 { "key" } else { "keys" };
-    format!("{verb} {count} {noun}")
-}
-
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -1159,6 +1009,11 @@ mod tests {
 
     fn key(name: &str) -> RedisKey {
         RedisKey::unknown(name)
+    }
+
+    fn set_keys(state: &mut AppState, keys: Vec<RedisKey>) {
+        state.keys = keys;
+        state.filtered_indices = (0..state.keys.len()).collect();
     }
 
     mod reducer {
@@ -1203,6 +1058,7 @@ mod tests {
             );
             assert_eq!(state.connection_status, ConnectionStatus::Connected);
             assert_eq!(state.keys, vec![key("z")]);
+            assert_eq!(state.filtered_indices, vec![0]);
             assert_eq!(state.selected_index, 0);
             assert_eq!(state.scroll_offset, 0);
             assert_eq!(state.dbsize, Some(10));
@@ -1217,7 +1073,7 @@ mod tests {
         #[test]
         fn select_next_and_prev_clamp_at_bounds() {
             let mut state = AppState::new("redis://localhost");
-            state.keys = vec![key("a"), key("b")];
+            set_keys(&mut state, vec![key("a"), key("b")]);
 
             assert_eq!(
                 reduce(&mut state, Action::SelectNext),
@@ -1284,7 +1140,7 @@ mod tests {
         #[test]
         fn value_loaded_populates_value_state_and_backfills_selected_key_metadata() {
             let mut state = AppState::new("redis://localhost");
-            state.keys = vec![key("a"), key("b")];
+            set_keys(&mut state, vec![key("a"), key("b")]);
             state.selected_index = 1;
             state.value_state = ValueState::Loading {
                 key: "b".to_string(),
@@ -1315,9 +1171,35 @@ mod tests {
         }
 
         #[test]
+        fn value_loaded_backfills_filtered_selection_full_key_metadata() {
+            let mut state = AppState::new("redis://localhost");
+            set_keys(&mut state, vec![key("a"), key("b")]);
+            state.filtered_indices = vec![1];
+            state.selected_index = 0;
+            state.value_state = ValueState::Loading {
+                key: "b".to_string(),
+            };
+
+            let effects = reduce(
+                &mut state,
+                Action::ValueLoaded {
+                    key: "b".to_string(),
+                    kind: RedisKind::List,
+                    ttl: Some(12),
+                    value: RedisValue::List(vec!["item".to_string()]),
+                },
+            );
+
+            assert!(effects.is_empty());
+            assert_eq!(state.keys[0].kind, RedisKind::Unknown);
+            assert_eq!(state.keys[1].kind, RedisKind::List);
+            assert_eq!(state.keys[1].ttl, Some(12));
+        }
+
+        #[test]
         fn stale_value_loaded_for_previous_selection_is_ignored() {
             let mut state = AppState::new("redis://localhost");
-            state.keys = vec![key("a"), key("b")];
+            set_keys(&mut state, vec![key("a"), key("b")]);
             state.selected_index = 1;
             state.value_state = ValueState::Loading {
                 key: "b".to_string(),
@@ -1346,7 +1228,7 @@ mod tests {
         #[test]
         fn value_fetch_failed_sets_failure_for_current_selection_only() {
             let mut state = AppState::new("redis://localhost");
-            state.keys = vec![key("a"), key("b")];
+            set_keys(&mut state, vec![key("a"), key("b")]);
             state.selected_index = 1;
             state.value_state = ValueState::Loading {
                 key: "b".to_string(),
@@ -1426,7 +1308,7 @@ mod tests {
         #[test]
         fn value_scroll_offset_resets_when_value_loaded_and_selection_changes() {
             let mut state = AppState::new("redis://localhost");
-            state.keys = vec![key("a"), key("b")];
+            set_keys(&mut state, vec![key("a"), key("b")]);
             state.value_scroll_offset = 3;
             state.value_state = ValueState::Loading {
                 key: "a".to_string(),
@@ -1597,20 +1479,102 @@ mod tests {
         }
 
         #[test]
-        fn submit_command_emits_execute_command_and_sets_running() {
+        fn submit_read_command_emits_execute_command_and_sets_running() {
             let mut state = AppState::new("redis://localhost");
             state.command_modal.is_open = true;
-            state.command_modal.input = " set k v ".to_string();
+            state.command_modal.input = " get k ".to_string();
 
             let effects = reduce(&mut state, Action::SubmitCommand);
 
             assert_eq!(
                 effects,
                 vec![Effect::ExecuteCommand {
-                    command: "set k v".to_string(),
+                    command: "get k".to_string(),
                 }]
             );
             assert_eq!(state.command_modal.status, CommandStatus::Running);
+        }
+
+        #[test]
+        fn submit_write_command_opens_confirmation_without_effect() {
+            let mut state = AppState::new("redis://localhost");
+            state.command_modal.is_open = true;
+            state.command_modal.input = " DEL key ".to_string();
+
+            let effects = reduce(&mut state, Action::SubmitCommand);
+
+            assert!(effects.is_empty());
+            assert_eq!(state.command_modal.status, CommandStatus::Idle);
+            assert_eq!(
+                state.confirm_state,
+                Some(ConfirmState {
+                    op: PendingWrite::Command {
+                        command: "DEL key".to_string(),
+                    },
+                    prompt: "Run this command? DEL key".to_string(),
+                })
+            );
+        }
+
+        #[test]
+        fn confirming_write_command_executes_pending_command() {
+            let mut state = AppState::new("redis://localhost");
+            state.command_modal.is_open = true;
+            state.command_modal.input = "DEL key".to_string();
+            state.confirm_state = Some(ConfirmState {
+                op: PendingWrite::Command {
+                    command: "DEL key".to_string(),
+                },
+                prompt: "Run this command? DEL key".to_string(),
+            });
+
+            let effects = reduce(&mut state, Action::ConfirmWrite);
+
+            assert_eq!(
+                effects,
+                vec![Effect::ExecuteCommand {
+                    command: "DEL key".to_string(),
+                }]
+            );
+            assert_eq!(state.confirm_state, None);
+            assert_eq!(state.command_modal.status, CommandStatus::Running);
+        }
+
+        #[test]
+        fn canceling_write_confirmation_returns_to_command_modal() {
+            let mut state = AppState::new("redis://localhost");
+            state.command_modal.is_open = true;
+            state.command_modal.input = "SET key value".to_string();
+            state.confirm_state = Some(ConfirmState {
+                op: PendingWrite::Command {
+                    command: "SET key value".to_string(),
+                },
+                prompt: "Run this command? SET key value".to_string(),
+            });
+
+            let effects = reduce(&mut state, Action::CancelWrite);
+
+            assert!(effects.is_empty());
+            assert_eq!(state.confirm_state, None);
+            assert!(state.command_modal.is_open);
+            assert_eq!(state.command_modal.input, "SET key value");
+            assert_eq!(state.command_modal.status, CommandStatus::Idle);
+        }
+
+        #[test]
+        fn read_only_submit_write_command_blocks_without_confirmation() {
+            let mut state = AppState::with_read_only("redis://localhost", true);
+            state.command_modal.is_open = true;
+            state.command_modal.input = "SET key value".to_string();
+
+            let effects = reduce(&mut state, Action::SubmitCommand);
+
+            assert!(effects.is_empty());
+            assert_eq!(state.confirm_state, None);
+            assert_eq!(
+                state.command_modal.status,
+                CommandStatus::Error("SET is blocked by read-only mode".to_string())
+            );
         }
 
         #[test]
@@ -1673,284 +1637,6 @@ mod tests {
                 state.command_modal.status,
                 CommandStatus::Error("ERR unknown command".to_string())
             );
-        }
-
-        #[test]
-        fn read_only_write_requests_set_status_without_effect() {
-            for action in [
-                Action::RequestDelete,
-                Action::RequestUnlink,
-                Action::RequestPersist,
-                Action::OpenExpireInput,
-                Action::SubmitExpire,
-            ] {
-                let mut state = AppState::with_read_only("redis://localhost", true);
-                state.keys = vec![key("a")];
-                state.expire_input = Some(ExpireInputState {
-                    key: "a".to_string(),
-                    input: "60".to_string(),
-                });
-
-                let effects = reduce(&mut state, action);
-
-                assert!(effects.is_empty());
-                assert_eq!(
-                    state.status_message,
-                    Some(StatusMessage::Error(
-                        "Read-only mode blocks write operations.".to_string()
-                    ))
-                );
-                assert_eq!(state.confirm_state, None);
-                assert!(state.pending_write_refresh.is_none());
-            }
-        }
-
-        #[test]
-        fn request_delete_confirm_and_cancel_follow_pending_operation() {
-            let mut state = AppState::new("redis://localhost");
-            state.keys = vec![key("space key")];
-
-            let effects = reduce(&mut state, Action::RequestDelete);
-
-            assert!(effects.is_empty());
-            assert_eq!(
-                state.confirm_state,
-                Some(ConfirmState {
-                    op: PendingWrite::Delete {
-                        key: "space key".to_string(),
-                        unlink: false,
-                    },
-                    prompt: "Delete key \"space key\" with DEL?".to_string(),
-                })
-            );
-
-            let effects = reduce(&mut state, Action::ConfirmWrite);
-
-            assert_eq!(
-                effects,
-                vec![Effect::DeleteKey {
-                    key: "space key".to_string(),
-                    unlink: false,
-                }]
-            );
-            assert_eq!(state.confirm_state, None);
-            assert_eq!(state.pending_write_refresh, Some(WriteRefresh::ReloadKeys));
-
-            assert!(reduce(&mut state, Action::RequestDelete).is_empty());
-            assert!(reduce(&mut state, Action::CancelWrite).is_empty());
-            assert_eq!(state.confirm_state, None);
-        }
-
-        #[test]
-        fn request_unlink_emits_unlink_delete_effect() {
-            let mut state = AppState::new("redis://localhost");
-            state.keys = vec![key("a")];
-
-            assert!(reduce(&mut state, Action::RequestUnlink).is_empty());
-            let effects = reduce(&mut state, Action::ConfirmWrite);
-
-            assert_eq!(
-                effects,
-                vec![Effect::DeleteKey {
-                    key: "a".to_string(),
-                    unlink: true,
-                }]
-            );
-        }
-
-        #[test]
-        fn request_persist_confirm_emits_persist_effect() {
-            let mut state = AppState::new("redis://localhost");
-            state.keys = vec![key("a")];
-
-            assert!(reduce(&mut state, Action::RequestPersist).is_empty());
-            let effects = reduce(&mut state, Action::ConfirmWrite);
-
-            assert_eq!(
-                effects,
-                vec![Effect::PersistKey {
-                    key: "a".to_string(),
-                }]
-            );
-            assert_eq!(
-                state.pending_write_refresh,
-                Some(WriteRefresh::FetchValue {
-                    key: "a".to_string()
-                })
-            );
-        }
-
-        #[test]
-        fn request_write_actions_are_noops_without_selected_key() {
-            for action in [
-                Action::RequestDelete,
-                Action::RequestUnlink,
-                Action::RequestPersist,
-                Action::OpenExpireInput,
-            ] {
-                let mut state = AppState::new("redis://localhost");
-
-                let effects = reduce(&mut state, action);
-
-                assert!(effects.is_empty());
-                assert_eq!(state.confirm_state, None);
-                assert_eq!(state.expire_input, None);
-                assert_eq!(state.status_message, None);
-            }
-        }
-
-        #[test]
-        fn expire_input_accepts_digits_and_backspace_only() {
-            let mut state = AppState::new("redis://localhost");
-            state.expire_input = Some(ExpireInputState {
-                key: "a".to_string(),
-                input: String::new(),
-            });
-
-            assert!(reduce(&mut state, Action::ExpireInputDigit('6')).is_empty());
-            assert!(reduce(&mut state, Action::ExpireInputDigit('x')).is_empty());
-            assert!(reduce(&mut state, Action::ExpireInputDigit('0')).is_empty());
-            assert_eq!(
-                state
-                    .expire_input
-                    .as_ref()
-                    .map(|input| input.input.as_str()),
-                Some("60")
-            );
-
-            assert!(reduce(&mut state, Action::ExpireInputBackspace).is_empty());
-            assert_eq!(
-                state
-                    .expire_input
-                    .as_ref()
-                    .map(|input| input.input.as_str()),
-                Some("6")
-            );
-        }
-
-        #[test]
-        fn submit_expire_rejects_empty_and_invalid_input_without_closing() {
-            for input in ["", "abc"] {
-                let mut state = AppState::new("redis://localhost");
-                state.expire_input = Some(ExpireInputState {
-                    key: "a".to_string(),
-                    input: input.to_string(),
-                });
-
-                let effects = reduce(&mut state, Action::SubmitExpire);
-
-                assert!(effects.is_empty());
-                assert_eq!(
-                    state.status_message,
-                    Some(StatusMessage::Error(
-                        "Enter expiry seconds as digits.".to_string()
-                    ))
-                );
-                assert!(state.expire_input.is_some());
-            }
-        }
-
-        #[test]
-        fn submit_expire_emits_effect_and_closes_overlay_for_valid_digits() {
-            let mut state = AppState::new("redis://localhost");
-            state.expire_input = Some(ExpireInputState {
-                key: "a".to_string(),
-                input: "60".to_string(),
-            });
-
-            let effects = reduce(&mut state, Action::SubmitExpire);
-
-            assert_eq!(
-                effects,
-                vec![Effect::SetExpire {
-                    key: "a".to_string(),
-                    seconds: 60,
-                }]
-            );
-            assert_eq!(state.expire_input, None);
-            assert_eq!(
-                state.pending_write_refresh,
-                Some(WriteRefresh::FetchValue {
-                    key: "a".to_string()
-                })
-            );
-        }
-
-        #[test]
-        fn write_success_after_delete_reloads_key_list() {
-            let mut state = AppState::new("redis://localhost");
-            state.pending_write_refresh = Some(WriteRefresh::ReloadKeys);
-
-            let effects = reduce(
-                &mut state,
-                Action::WriteSucceeded {
-                    message: "Deleted 1 key".to_string(),
-                },
-            );
-
-            assert_eq!(
-                effects,
-                vec![Effect::Connect {
-                    dsn: "redis://localhost".to_string(),
-                    read_only: false,
-                }]
-            );
-            assert_eq!(
-                state.status_message,
-                Some(StatusMessage::Success("Deleted 1 key".to_string()))
-            );
-            assert_eq!(state.pending_write_refresh, None);
-        }
-
-        #[test]
-        fn write_success_after_expire_or_persist_refetches_selected_value() {
-            for message in ["TTL set to 60s", "Persisted key"] {
-                let mut state = AppState::new("redis://localhost");
-                state.keys = vec![key("a")];
-                state.pending_write_refresh = Some(WriteRefresh::FetchValue {
-                    key: "a".to_string(),
-                });
-
-                let effects = reduce(
-                    &mut state,
-                    Action::WriteSucceeded {
-                        message: message.to_string(),
-                    },
-                );
-
-                assert_eq!(
-                    effects,
-                    vec![Effect::FetchValue {
-                        key: "a".to_string()
-                    }]
-                );
-                assert_eq!(
-                    state.value_state,
-                    ValueState::Loading {
-                        key: "a".to_string()
-                    }
-                );
-            }
-        }
-
-        #[test]
-        fn write_failure_sets_error_and_clears_pending_refresh() {
-            let mut state = AppState::new("redis://localhost");
-            state.pending_write_refresh = Some(WriteRefresh::ReloadKeys);
-
-            let effects = reduce(
-                &mut state,
-                Action::WriteFailed {
-                    message: "DENIED".to_string(),
-                },
-            );
-
-            assert!(effects.is_empty());
-            assert_eq!(
-                state.status_message,
-                Some(StatusMessage::Error("DENIED".to_string()))
-            );
-            assert_eq!(state.pending_write_refresh, None);
         }
 
         #[test]
@@ -2118,13 +1804,15 @@ mod tests {
         #[test]
         fn filter_input_edits_pattern_without_scanning() {
             let mut state = AppState::new("redis://localhost");
-            state.keys = vec![
-                key("user:1"),
-                key("session:1"),
-                key("user:settings"),
-                key("cache:1"),
-            ];
-            state.search_pattern.clear();
+            set_keys(
+                &mut state,
+                vec![
+                    key("user:1"),
+                    key("session:1"),
+                    key("user:settings"),
+                    key("cache:1"),
+                ],
+            );
 
             assert!(reduce(&mut state, Action::OpenFilter).is_empty());
             let effects = reduce(&mut state, Action::FilterInput('u'));
@@ -2139,8 +1827,34 @@ mod tests {
                     key("cache:1"),
                 ]
             );
+            assert_eq!(state.filtered_indices, vec![0, 2]);
             assert_eq!(state.selected_index, 0);
             assert!(effects.is_empty());
+        }
+
+        #[test]
+        fn filtered_navigation_fetches_visible_selection_key() {
+            let mut state = AppState::new("redis://localhost");
+            set_keys(
+                &mut state,
+                vec![key("alpha"), key("user:one"), key("beta"), key("user:two")],
+            );
+            state.filter_active = true;
+            state.search_pattern.clear();
+
+            assert!(reduce(&mut state, Action::FilterInput('u')).is_empty());
+            assert!(reduce(&mut state, Action::FilterInput('s')).is_empty());
+            assert_eq!(state.filtered_indices, vec![1, 3]);
+
+            let effects = reduce(&mut state, Action::SelectNext);
+
+            assert_eq!(state.selected_index, 1);
+            assert_eq!(
+                effects,
+                vec![Effect::FetchValue {
+                    key: "user:two".to_string()
+                }]
+            );
         }
 
         #[test]
@@ -2196,6 +1910,7 @@ mod tests {
             );
 
             assert_eq!(state.keys, vec![key("user:1"), key("user:2")]);
+            assert_eq!(state.filtered_indices, vec![0, 1]);
             assert_eq!(state.selected_index, 0);
             assert_eq!(state.scroll_offset, 0);
             assert_eq!(
@@ -2226,6 +1941,7 @@ mod tests {
             let effects = reduce(&mut state, Action::KeysScanned { keys: Vec::new() });
 
             assert!(state.keys.is_empty());
+            assert!(state.filtered_indices.is_empty());
             assert_eq!(state.selected_index, 0);
             assert_eq!(state.scroll_offset, 0);
             assert_eq!(state.value_state, ValueState::Empty);
@@ -2235,17 +1951,67 @@ mod tests {
         #[test]
         fn clearing_filter_resets_pattern_and_searches_all_keys() {
             let mut state = AppState::new("redis://localhost");
+            set_keys(&mut state, vec![key("user:1"), key("session:1")]);
             state.search_pattern = "user:*".to_string();
+            state.filtered_indices = vec![0];
             state.filter_active = true;
 
             let effects = reduce(&mut state, Action::ClearFilter);
 
             assert_eq!(state.search_pattern, "*");
+            assert_eq!(state.filtered_indices, vec![0, 1]);
             assert!(!state.filter_active);
             assert_eq!(
                 effects,
                 vec![Effect::SearchKeys {
                     pattern: "*".to_string()
+                }]
+            );
+        }
+
+        #[test]
+        fn keys_scanned_reapplies_active_fuzzy_filter_to_new_base_set() {
+            let mut state = AppState::new("redis://localhost");
+            state.search_pattern = "acct".to_string();
+            state.filter_active = false;
+
+            let effects = reduce(
+                &mut state,
+                Action::KeysScanned {
+                    keys: vec![key("user:acct:1"), key("session:1"), key("user:profile:1")],
+                },
+            );
+
+            assert_eq!(
+                state.keys,
+                vec![key("user:acct:1"), key("session:1"), key("user:profile:1"),]
+            );
+            assert_eq!(state.filtered_indices, vec![0]);
+            assert_eq!(
+                effects,
+                vec![Effect::FetchValue {
+                    key: "user:acct:1".to_string()
+                }]
+            );
+        }
+
+        #[test]
+        fn keys_scanned_keeps_backend_glob_matches_visible() {
+            let mut state = AppState::new("redis://localhost");
+            state.search_pattern = "user:*:[ab]".to_string();
+
+            let effects = reduce(
+                &mut state,
+                Action::KeysScanned {
+                    keys: vec![key("user:1:a"), key("user:2:b")],
+                },
+            );
+
+            assert_eq!(state.filtered_indices, vec![0, 1]);
+            assert_eq!(
+                effects,
+                vec![Effect::FetchValue {
+                    key: "user:1:a".to_string()
                 }]
             );
         }
@@ -2631,168 +2397,6 @@ mod tests {
                 action,
                 Action::CommandFailed {
                     message: "DEL is blocked".to_string(),
-                }
-            );
-        }
-
-        #[tokio::test]
-        async fn delete_key_effect_dispatches_success_message() {
-            let mut cli = MockRedisCli::new();
-            cli.expect_delete_key()
-                .once()
-                .withf(|key, unlink| key == "space key" && !*unlink)
-                .returning(|_, _| Ok(1));
-
-            let (tx, mut rx) = mpsc::channel(4);
-            let runner = runner_with_cli(cli, tx);
-
-            runner
-                .run(vec![Effect::DeleteKey {
-                    key: "space key".to_string(),
-                    unlink: false,
-                }])
-                .await;
-
-            let action = tokio::time::timeout(Duration::from_millis(500), rx.recv())
-                .await
-                .expect("action timeout")
-                .expect("channel closed");
-            assert_eq!(
-                action,
-                Action::WriteSucceeded {
-                    message: "Deleted 1 key".to_string(),
-                }
-            );
-        }
-
-        #[tokio::test]
-        async fn unlink_effect_dispatches_plural_success_message() {
-            let mut cli = MockRedisCli::new();
-            cli.expect_delete_key()
-                .once()
-                .withf(|key, unlink| key == "old key" && *unlink)
-                .returning(|_, _| Ok(2));
-
-            let (tx, mut rx) = mpsc::channel(4);
-            let runner = runner_with_cli(cli, tx);
-
-            runner
-                .run(vec![Effect::DeleteKey {
-                    key: "old key".to_string(),
-                    unlink: true,
-                }])
-                .await;
-
-            let action = tokio::time::timeout(Duration::from_millis(500), rx.recv())
-                .await
-                .expect("action timeout")
-                .expect("channel closed");
-            assert_eq!(
-                action,
-                Action::WriteSucceeded {
-                    message: "Unlinked 2 keys".to_string(),
-                }
-            );
-        }
-
-        #[tokio::test]
-        async fn set_expire_effect_dispatches_success_and_false_failure() {
-            let mut cli = MockRedisCli::new();
-            cli.expect_set_expire()
-                .once()
-                .withf(|key, seconds| key == "a" && *seconds == 60)
-                .returning(|_, _| Ok(true));
-            cli.expect_set_expire()
-                .once()
-                .withf(|key, seconds| key == "missing" && *seconds == 30)
-                .returning(|_, _| Ok(false));
-
-            let (tx, mut rx) = mpsc::channel(4);
-            let runner = runner_with_cli(cli, tx);
-
-            runner
-                .run(vec![
-                    Effect::SetExpire {
-                        key: "a".to_string(),
-                        seconds: 60,
-                    },
-                    Effect::SetExpire {
-                        key: "missing".to_string(),
-                        seconds: 30,
-                    },
-                ])
-                .await;
-
-            let success = tokio::time::timeout(Duration::from_millis(500), rx.recv())
-                .await
-                .expect("action timeout")
-                .expect("channel closed");
-            let failure = tokio::time::timeout(Duration::from_millis(500), rx.recv())
-                .await
-                .expect("action timeout")
-                .expect("channel closed");
-            assert_eq!(
-                success,
-                Action::WriteSucceeded {
-                    message: "TTL set to 60s".to_string(),
-                }
-            );
-            assert_eq!(
-                failure,
-                Action::WriteFailed {
-                    message: "EXPIRE did not apply; key may no longer exist".to_string(),
-                }
-            );
-        }
-
-        #[tokio::test]
-        async fn persist_key_effect_dispatches_success_and_error_failure() {
-            let mut cli = MockRedisCli::new();
-            cli.expect_persist_key()
-                .once()
-                .withf(|key| key == "a")
-                .returning(|_| Ok(true));
-            cli.expect_persist_key()
-                .once()
-                .withf(|key| key == "b")
-                .returning(|_| {
-                    Err(crate::infra::RedisCliError::CommandDenied(
-                        "PERSIST is blocked by read-only mode".to_string(),
-                    ))
-                });
-
-            let (tx, mut rx) = mpsc::channel(4);
-            let runner = runner_with_cli(cli, tx);
-
-            runner
-                .run(vec![
-                    Effect::PersistKey {
-                        key: "a".to_string(),
-                    },
-                    Effect::PersistKey {
-                        key: "b".to_string(),
-                    },
-                ])
-                .await;
-
-            let success = tokio::time::timeout(Duration::from_millis(500), rx.recv())
-                .await
-                .expect("action timeout")
-                .expect("channel closed");
-            let failure = tokio::time::timeout(Duration::from_millis(500), rx.recv())
-                .await
-                .expect("action timeout")
-                .expect("channel closed");
-            assert_eq!(
-                success,
-                Action::WriteSucceeded {
-                    message: "Persisted key".to_string(),
-                }
-            );
-            assert_eq!(
-                failure,
-                Action::WriteFailed {
-                    message: "PERSIST is blocked by read-only mode".to_string(),
                 }
             );
         }

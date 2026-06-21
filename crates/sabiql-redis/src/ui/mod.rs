@@ -11,7 +11,7 @@ use sabiql_tui_kit::theme::{DEFAULT_THEME, StatusTone};
 
 use crate::app::{
     AppState, CommandStatus, ConfirmState, ConnectionFormState, ConnectionStatus, DbOverlayState,
-    ExpireInputState, StatusMessage, ValueState,
+    StatusMessage, ValueState,
 };
 use crate::domain::{RedisValue, redis_value_table};
 
@@ -24,9 +24,9 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
     ])
     .split(area);
     let body = Layout::horizontal([
-        Constraint::Percentage(38),
+        Constraint::Min(40),
         Constraint::Length(1),
-        Constraint::Min(20),
+        Constraint::Length(72),
     ])
     .split(vertical[1]);
 
@@ -43,9 +43,6 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
     if let Some(form) = &state.connection_form {
         render_connection_form(frame, form);
     }
-    if let Some(expire_input) = &state.expire_input {
-        render_expire_input(frame, expire_input);
-    }
     if let Some(confirm_state) = &state.confirm_state {
         render_confirm_dialog(frame, confirm_state);
     }
@@ -55,25 +52,36 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let theme = DEFAULT_THEME;
     let (mut text, mut style) = match &state.connection_status {
         ConnectionStatus::Disconnected => (
-            format!("disconnected | {}", state.dsn),
+            format!("disconnected | db {} | {}", state.current_db, state.dsn),
             Style::default().fg(theme.semantic.text.secondary),
         ),
         ConnectionStatus::Connecting => (
-            format!("connecting | {}", state.dsn),
+            format!("connecting | db {} | {}", state.current_db, state.dsn),
             Style::default().fg(theme.semantic.status.pending),
         ),
         ConnectionStatus::Connected => {
+            let visible_count = if fuzzy_filter_query(&state.search_pattern).is_empty() {
+                state.keys.len().to_string()
+            } else {
+                format!("{}/{}", state.filtered_indices.len(), state.keys.len())
+            };
             let count = match state.dbsize {
-                Some(dbsize) => format!("{} scanned keys | dbsize {dbsize}", state.keys.len()),
-                None => format!("{} scanned keys", state.keys.len()),
+                Some(dbsize) => format!("{visible_count} scanned keys | dbsize {dbsize}"),
+                None => format!("{visible_count} scanned keys"),
             };
             (
-                format!("connected | {count} | {}", state.dsn),
+                format!(
+                    "connected | db {} | {count} | {}",
+                    state.current_db, state.dsn
+                ),
                 theme.status_style(StatusTone::Success),
             )
         }
         ConnectionStatus::Error(message) => (
-            format!("error | {message} | {}", state.dsn),
+            format!(
+                "error | db {} | {message} | {}",
+                state.current_db, state.dsn
+            ),
             theme.status_style(StatusTone::Error),
         ),
     };
@@ -106,8 +114,10 @@ fn render_keys(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let theme = DEFAULT_THEME;
     let headers = ["key", "type"];
     let widths = [Constraint::Min(10), Constraint::Length(10)];
-    let empty_message = if state.search_pattern == "*" {
+    let empty_message = if state.keys.is_empty() {
         "No keys found".to_string()
+    } else if fuzzy_filter_query(&state.search_pattern).is_empty() {
+        "No matching keys".to_string()
     } else {
         format!("No keys match pattern {}", state.search_pattern)
     };
@@ -122,13 +132,17 @@ fn render_keys(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         &StripedTableConfig {
             headers: &headers,
             widths: &widths,
-            total_items: state.keys.len(),
+            total_items: state.filtered_indices.len(),
             empty_message: empty_message.as_str(),
         },
         state.scroll_offset,
         &theme,
         |index| {
-            let Some(redis_key) = state.keys.get(index) else {
+            let Some(redis_key) = state
+                .filtered_indices
+                .get(index)
+                .and_then(|full_index| state.keys.get(*full_index))
+            else {
                 return vec![Cell::from(""), Cell::from("")];
             };
             let style = if index == state.selected_index {
@@ -246,11 +260,29 @@ fn ttl_label(ttl: Option<u64>) -> String {
     parts.join(" ")
 }
 
+fn fuzzy_filter_query(pattern: &str) -> String {
+    let query = pattern.trim();
+    if query.is_empty() || query == "*" {
+        return String::new();
+    }
+
+    let mut output = String::new();
+    let mut in_bracket_expression = false;
+    for ch in query.chars() {
+        match ch {
+            '[' => in_bracket_expression = true,
+            ']' => in_bracket_expression = false,
+            '*' | '?' if !in_bracket_expression => {}
+            _ if in_bracket_expression => {}
+            _ => output.push(ch),
+        }
+    }
+    output
+}
+
 fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let theme = DEFAULT_THEME;
-    let db_label = format!("db {}", state.current_db);
     let mut hints = Vec::new();
-    hints.push((db_label.as_str(), "current"));
     if state.read_only {
         hints.push(("[READ-ONLY]", "writes blocked"));
     }
@@ -259,9 +291,6 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         ("/", "search"),
         (":", "command"),
         ("c", "connect"),
-        ("x/X", "del/unlink"),
-        ("t", "expire"),
-        ("p", "persist"),
         ("e", "export"),
         ("q", "quit"),
     ]);
@@ -452,7 +481,7 @@ fn render_command_status(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             Style::default().fg(theme.semantic.text.muted),
         ),
         CommandStatus::Idle => (
-            "Blocked: FLUSHALL, FLUSHDB, DEL, UNLINK".to_string(),
+            "Write commands require confirmation before running.".to_string(),
             Style::default().fg(theme.semantic.text.muted),
         ),
         CommandStatus::Running => (
@@ -513,59 +542,6 @@ fn render_confirm_dialog(frame: &mut Frame<'_>, confirm_state: &ConfirmState) {
     );
 }
 
-fn render_expire_input(frame: &mut Frame<'_>, expire_input: &ExpireInputState) {
-    let theme = DEFAULT_THEME;
-    let (_, inner) = render_modal(
-        frame,
-        Constraint::Percentage(68),
-        Constraint::Length(9),
-        "Set Expiry",
-        " Enter:set  Esc:cancel ",
-        &theme,
-    );
-    let chunks = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Min(1),
-    ])
-    .split(inner);
-
-    frame.render_widget(
-        Paragraph::new(format!("key: {:?}", expire_input.key))
-            .style(Style::default().fg(theme.semantic.text.secondary))
-            .wrap(Wrap { trim: false }),
-        chunks[0],
-    );
-    render_expire_seconds_input(frame, chunks[1], expire_input);
-    frame.render_widget(
-        Paragraph::new("seconds").style(Style::default().fg(theme.semantic.text.muted)),
-        chunks[2],
-    );
-}
-
-fn render_expire_seconds_input(frame: &mut Frame<'_>, area: Rect, expire_input: &ExpireInputState) {
-    let theme = DEFAULT_THEME;
-    let prompt = "> ";
-    let visible_width = area
-        .width
-        .saturating_sub(prompt.len() as u16)
-        .saturating_sub(1) as usize;
-    let cursor_spans = text_cursor_spans(
-        &expire_input.input,
-        expire_input.input.chars().count(),
-        0,
-        visible_width,
-        &theme,
-    );
-    let mut spans = vec![Span::styled(
-        prompt,
-        Style::default().fg(theme.semantic.text.accent),
-    )];
-    spans.extend(cursor_spans);
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -574,7 +550,11 @@ mod tests {
     use ratatui::buffer::Buffer;
 
     fn render_to_string(state: &AppState) -> String {
-        let backend = TestBackend::new(120, 24);
+        render_to_string_with_size(state, 120, 24)
+    }
+
+    fn render_to_string_with_size(state: &AppState, width: u16, height: u16) -> String {
+        let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| render(frame, state)).unwrap();
         buffer_to_string(terminal.backend().buffer())
@@ -622,12 +602,27 @@ mod tests {
     }
 
     #[test]
-    fn footer_shows_current_db() {
+    fn header_shows_current_db_and_footer_omits_db_hint() {
         let state = AppState::new("redis://localhost:6379/3");
 
         let rendered = render_to_string(&state);
+        let lines = rendered.lines().collect::<Vec<_>>();
 
-        assert!(rendered.contains("db 3"));
+        assert!(lines.first().is_some_and(|line| line.contains("db 3")));
+        assert!(lines.last().is_some_and(|line| !line.contains("db 3")));
+    }
+
+    #[test]
+    fn footer_omits_removed_direct_write_hints() {
+        let state = AppState::new("redis://localhost");
+
+        let rendered = render_to_string(&state);
+        let footer = rendered.lines().last().unwrap_or_default();
+
+        assert!(!footer.contains("x/X"));
+        assert!(!footer.contains("expire"));
+        assert!(!footer.contains("persist"));
+        assert!(footer.contains("export"));
     }
 
     #[test]
@@ -651,17 +646,16 @@ mod tests {
     fn confirm_dialog_shows_prompt_and_yes_no_hint() {
         let mut state = AppState::new("redis://localhost");
         state.confirm_state = Some(ConfirmState {
-            op: crate::app::PendingWrite::Delete {
-                key: "a".to_string(),
-                unlink: false,
+            op: crate::app::PendingWrite::Command {
+                command: "DEL a".to_string(),
             },
-            prompt: "Delete key \"a\" with DEL?".to_string(),
+            prompt: "Run this command? DEL a".to_string(),
         });
 
         let rendered = render_to_string(&state);
 
         assert!(rendered.contains("Confirm Write"));
-        assert!(rendered.contains("Delete key \"a\" with DEL?"));
+        assert!(rendered.contains("Run this command? DEL a"));
         assert!(rendered.contains("[y]es / [n]o"));
     }
 
@@ -683,22 +677,6 @@ mod tests {
     }
 
     #[test]
-    fn expire_input_overlay_shows_key_input_and_seconds_hint() {
-        let mut state = AppState::new("redis://localhost");
-        state.expire_input = Some(ExpireInputState {
-            key: "a".to_string(),
-            input: "60".to_string(),
-        });
-
-        let rendered = render_to_string(&state);
-
-        assert!(rendered.contains("Set Expiry"));
-        assert!(rendered.contains("key: \"a\""));
-        assert!(rendered.contains("60"));
-        assert!(rendered.contains("seconds"));
-    }
-
-    #[test]
     fn command_modal_shows_read_only_hint_when_enabled() {
         let mut state = AppState::with_read_only("redis://localhost", true);
         state.command_modal.is_open = true;
@@ -709,7 +687,7 @@ mod tests {
     }
 
     #[test]
-    fn key_list_renders_state_keys_directly_and_shows_search_pattern() {
+    fn key_list_renders_filtered_keys_and_shows_search_pattern() {
         let mut state = AppState::new("redis://localhost");
         state.connection_status = ConnectionStatus::Connected;
         state.search_pattern = "user:*".to_string();
@@ -721,14 +699,15 @@ mod tests {
                 ttl: None,
             },
         ];
-        state.selected_index = 1;
+        state.filtered_indices = vec![0];
+        state.selected_index = 0;
 
         let rendered = render_to_string(&state);
 
         assert!(rendered.contains("search /user:*"));
         assert!(rendered.contains("user:1"));
-        assert!(rendered.contains("session:1"));
-        assert!(rendered.contains("string"));
+        assert!(!rendered.contains("session:1"));
+        assert!(rendered.contains("1/2 scanned keys"));
     }
 
     #[test]
@@ -736,9 +715,23 @@ mod tests {
         let mut state = AppState::new("redis://localhost");
         state.connection_status = ConnectionStatus::Connected;
         state.search_pattern = "missing:*".to_string();
+        state.keys = vec![crate::domain::RedisKey::unknown("user:1")];
+        state.filtered_indices = Vec::new();
 
         let rendered = render_to_string(&state);
 
         assert!(rendered.contains("No keys match pattern missing:*"));
+    }
+
+    #[test]
+    fn wide_key_list_keeps_long_keys_visible() {
+        let mut state = AppState::new("redis://localhost");
+        let long_key = "redis:key:list:primary:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string();
+        state.keys = vec![crate::domain::RedisKey::unknown(long_key.clone())];
+        state.filtered_indices = vec![0];
+
+        let rendered = render_to_string_with_size(&state, 160, 12);
+
+        assert!(rendered.contains(&long_key));
     }
 }

@@ -102,7 +102,6 @@ fn process_action(
 fn handle_event(event: InputEvent, state: &AppState) -> Option<Action> {
     match event {
         InputEvent::Key(combo) if state.confirm_state.is_some() => handle_confirm_key(combo),
-        InputEvent::Key(combo) if state.expire_input.is_some() => handle_expire_input_key(combo),
         InputEvent::Key(combo) if state.connection_form.is_some() => {
             handle_connection_form_key(combo)
         }
@@ -124,18 +123,6 @@ fn handle_event(event: InputEvent, state: &AppState) -> Option<Action> {
         }
         InputEvent::Key(combo) if combo == KeyCombo::plain(Key::Char('e')) => {
             Some(Action::RequestExportCsv)
-        }
-        InputEvent::Key(combo) if combo == KeyCombo::plain(Key::Char('x')) => {
-            Some(Action::RequestDelete)
-        }
-        InputEvent::Key(combo) if combo == KeyCombo::plain(Key::Char('X')) => {
-            Some(Action::RequestUnlink)
-        }
-        InputEvent::Key(combo) if combo == KeyCombo::plain(Key::Char('t')) => {
-            Some(Action::OpenExpireInput)
-        }
-        InputEvent::Key(combo) if combo == KeyCombo::plain(Key::Char('p')) => {
-            Some(Action::RequestPersist)
         }
         InputEvent::Key(combo) if combo == KeyCombo::plain(Key::Char('q')) => Some(Action::Quit),
         InputEvent::Key(combo) if combo == KeyCombo::ctrl(Key::Char('c')) => Some(Action::Quit),
@@ -175,18 +162,6 @@ fn handle_confirm_key(combo: KeyCombo) -> Option<Action> {
         {
             Some(Action::CancelWrite)
         }
-        _ => None,
-    }
-}
-
-fn handle_expire_input_key(combo: KeyCombo) -> Option<Action> {
-    match combo {
-        combo if combo == KeyCombo::plain(Key::Enter) => Some(Action::SubmitExpire),
-        combo if combo == KeyCombo::plain(Key::Esc) => Some(Action::CancelExpireInput),
-        combo if combo == KeyCombo::plain(Key::Backspace) => Some(Action::ExpireInputBackspace),
-        KeyCombo {
-            key: Key::Char(c), ..
-        } if c.is_ascii_digit() => Some(Action::ExpireInputDigit(c)),
         _ => None,
     }
 }
@@ -315,24 +290,24 @@ mod tests {
     }
 
     #[test]
-    fn write_keys_request_delete_unlink_expire_and_persist() {
+    fn removed_direct_write_keys_are_ignored() {
         let state = AppState::new("redis://localhost");
 
         assert_eq!(
             handle_event(InputEvent::Key(KeyCombo::plain(Key::Char('x'))), &state),
-            Some(Action::RequestDelete)
+            None
         );
         assert_eq!(
             handle_event(InputEvent::Key(KeyCombo::plain(Key::Char('X'))), &state),
-            Some(Action::RequestUnlink)
+            None
         );
         assert_eq!(
             handle_event(InputEvent::Key(KeyCombo::plain(Key::Char('t'))), &state),
-            Some(Action::OpenExpireInput)
+            None
         );
         assert_eq!(
             handle_event(InputEvent::Key(KeyCombo::plain(Key::Char('p'))), &state),
-            Some(Action::RequestPersist)
+            None
         );
     }
 
@@ -340,11 +315,10 @@ mod tests {
     fn confirm_overlay_routes_yes_no_and_swallows_other_keys() {
         let mut state = AppState::new("redis://localhost");
         state.confirm_state = Some(app::ConfirmState {
-            op: app::PendingWrite::Delete {
-                key: "a".to_string(),
-                unlink: false,
+            op: app::PendingWrite::Command {
+                command: "DEL a".to_string(),
             },
-            prompt: "Delete key \"a\" with DEL?".to_string(),
+            prompt: "Run this command? DEL a".to_string(),
         });
 
         assert_eq!(
@@ -369,36 +343,6 @@ mod tests {
         );
         assert_eq!(
             handle_event(InputEvent::Key(KeyCombo::plain(Key::Char('j'))), &state),
-            None
-        );
-    }
-
-    #[test]
-    fn expire_input_routes_digits_submit_backspace_and_escape() {
-        let mut state = AppState::new("redis://localhost");
-        state.expire_input = Some(app::ExpireInputState {
-            key: "a".to_string(),
-            input: String::new(),
-        });
-
-        assert_eq!(
-            handle_event(InputEvent::Key(KeyCombo::plain(Key::Char('6'))), &state),
-            Some(Action::ExpireInputDigit('6'))
-        );
-        assert_eq!(
-            handle_event(InputEvent::Key(KeyCombo::plain(Key::Backspace)), &state),
-            Some(Action::ExpireInputBackspace)
-        );
-        assert_eq!(
-            handle_event(InputEvent::Key(KeyCombo::plain(Key::Enter)), &state),
-            Some(Action::SubmitExpire)
-        );
-        assert_eq!(
-            handle_event(InputEvent::Key(KeyCombo::plain(Key::Esc)), &state),
-            Some(Action::CancelExpireInput)
-        );
-        assert_eq!(
-            handle_event(InputEvent::Key(KeyCombo::plain(Key::Char('x'))), &state),
             None
         );
     }
