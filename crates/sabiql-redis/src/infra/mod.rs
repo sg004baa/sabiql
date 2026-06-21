@@ -43,6 +43,9 @@ pub trait RedisCli: Send + Sync {
     async fn key_type_and_ttl(&self, key: &str) -> Result<(RedisKind, Option<u64>), RedisCliError>;
     async fn fetch_value(&self, key: &str, kind: RedisKind) -> Result<RedisValue, RedisCliError>;
     async fn execute_command(&self, command: &str) -> Result<String, RedisCliError>;
+    async fn delete_key(&self, key: &str, unlink: bool) -> Result<u64, RedisCliError>;
+    async fn set_expire(&self, key: &str, seconds: u64) -> Result<bool, RedisCliError>;
+    async fn persist_key(&self, key: &str) -> Result<bool, RedisCliError>;
 }
 
 #[cfg_attr(test, mockall::automock)]
@@ -425,6 +428,23 @@ pub fn parse_ttl_reply(stdout: &str) -> Result<Option<u64>, RedisCliError> {
     }
 }
 
+pub fn parse_u64_reply(stdout: &str, command: &str) -> Result<u64, RedisCliError> {
+    let reply = stdout.trim();
+    reply
+        .parse::<u64>()
+        .map_err(|_| RedisCliError::Parse(format!("invalid {command} reply: {reply:?}")))
+}
+
+pub fn parse_bool_integer_reply(stdout: &str, command: &str) -> Result<bool, RedisCliError> {
+    match parse_u64_reply(stdout, command)? {
+        0 => Ok(false),
+        1 => Ok(true),
+        other => Err(RedisCliError::Parse(format!(
+            "invalid {command} boolean reply: {other}"
+        ))),
+    }
+}
+
 pub fn parse_string_value(stdout: &str) -> Result<RedisValue, RedisCliError> {
     Ok(RedisValue::String(trim_command_newline(stdout).to_string()))
 }
@@ -603,6 +623,16 @@ impl RedisCliSubprocess {
 
     pub fn read_only(&self) -> bool {
         self.read_only
+    }
+
+    fn ensure_write_allowed(&self, command: &str) -> Result<(), RedisCliError> {
+        if self.read_only {
+            Err(RedisCliError::CommandDenied(format!(
+                "{command} is blocked by read-only mode"
+            )))
+        } else {
+            Ok(())
+        }
     }
 
     async fn scan_value_lines(
@@ -822,6 +852,31 @@ impl RedisCli for RedisCliSubprocess {
     async fn execute_command(&self, command: &str) -> Result<String, RedisCliError> {
         ensure_command_allowed(command, self.read_only)?;
         self.run_command(&command_args(command)).await
+    }
+
+    async fn delete_key(&self, key: &str, unlink: bool) -> Result<u64, RedisCliError> {
+        let command = if unlink { "UNLINK" } else { "DEL" };
+        self.ensure_write_allowed(command)?;
+        let stdout = self
+            .run_command(&[command.to_string(), key.to_string()])
+            .await?;
+        parse_u64_reply(&stdout, command)
+    }
+
+    async fn set_expire(&self, key: &str, seconds: u64) -> Result<bool, RedisCliError> {
+        self.ensure_write_allowed("EXPIRE")?;
+        let stdout = self
+            .run_command(&["EXPIRE".to_string(), key.to_string(), seconds.to_string()])
+            .await?;
+        parse_bool_integer_reply(&stdout, "EXPIRE")
+    }
+
+    async fn persist_key(&self, key: &str) -> Result<bool, RedisCliError> {
+        self.ensure_write_allowed("PERSIST")?;
+        let stdout = self
+            .run_command(&["PERSIST".to_string(), key.to_string()])
+            .await?;
+        parse_bool_integer_reply(&stdout, "PERSIST")
     }
 }
 
@@ -1079,6 +1134,17 @@ mod tests {
     }
 
     #[test]
+    fn parses_integer_write_replies() {
+        assert_eq!(parse_u64_reply("2\n", "DEL"), Ok(2));
+        assert_eq!(parse_bool_integer_reply("1\n", "EXPIRE"), Ok(true));
+        assert_eq!(parse_bool_integer_reply("0\n", "PERSIST"), Ok(false));
+        assert!(matches!(
+            parse_bool_integer_reply("2\n", "EXPIRE"),
+            Err(RedisCliError::Parse(_))
+        ));
+    }
+
+    #[test]
     fn parses_string_value() {
         assert_eq!(
             parse_string_value("hello\n"),
@@ -1281,6 +1347,20 @@ mod tests {
 
         assert!(!read_write.read_only);
         assert!(read_only.read_only);
+    }
+
+    #[tokio::test]
+    async fn typed_write_methods_are_denied_in_read_only_mode() {
+        let cli = RedisCliSubprocess::with_read_only("redis://localhost", true).unwrap();
+
+        for result in [
+            cli.delete_key("key with spaces", false).await.map(|_| ()),
+            cli.delete_key("key with spaces", true).await.map(|_| ()),
+            cli.set_expire("key with spaces", 60).await.map(|_| ()),
+            cli.persist_key("key with spaces").await.map(|_| ()),
+        ] {
+            assert!(matches!(result, Err(RedisCliError::CommandDenied(_))));
+        }
     }
 
     #[tokio::test]

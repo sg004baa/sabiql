@@ -10,8 +10,8 @@ use sabiql_tui_kit::primitives::molecules::{
 use sabiql_tui_kit::theme::{DEFAULT_THEME, StatusTone};
 
 use crate::app::{
-    AppState, CommandStatus, ConnectionFormState, ConnectionStatus, DbOverlayState, StatusMessage,
-    ValueState,
+    AppState, CommandStatus, ConfirmState, ConnectionFormState, ConnectionStatus, DbOverlayState,
+    ExpireInputState, StatusMessage, ValueState,
 };
 use crate::domain::{RedisValue, redis_value_table};
 
@@ -42,6 +42,12 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
     }
     if let Some(form) = &state.connection_form {
         render_connection_form(frame, form);
+    }
+    if let Some(expire_input) = &state.expire_input {
+        render_expire_input(frame, expire_input);
+    }
+    if let Some(confirm_state) = &state.confirm_state {
+        render_confirm_dialog(frame, confirm_state);
     }
 }
 
@@ -253,6 +259,9 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         ("/", "search"),
         (":", "command"),
         ("c", "connect"),
+        ("x/X", "del/unlink"),
+        ("t", "expire"),
+        ("p", "persist"),
         ("e", "export"),
         ("q", "quit"),
     ]);
@@ -475,6 +484,88 @@ fn render_command_output(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     );
 }
 
+fn render_confirm_dialog(frame: &mut Frame<'_>, confirm_state: &ConfirmState) {
+    let theme = DEFAULT_THEME;
+    let (_, inner) = render_modal(
+        frame,
+        Constraint::Percentage(64),
+        Constraint::Length(7),
+        "Confirm Write",
+        " Enter/y:yes  Esc/n:no ",
+        &theme,
+    );
+    let chunks = Layout::vertical([
+        Constraint::Min(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+
+    frame.render_widget(
+        Paragraph::new(confirm_state.prompt.clone())
+            .style(Style::default().fg(theme.semantic.text.primary))
+            .wrap(Wrap { trim: false }),
+        chunks[0],
+    );
+    frame.render_widget(
+        Paragraph::new("[y]es / [n]o").style(Style::default().fg(theme.semantic.text.accent)),
+        chunks[1],
+    );
+}
+
+fn render_expire_input(frame: &mut Frame<'_>, expire_input: &ExpireInputState) {
+    let theme = DEFAULT_THEME;
+    let (_, inner) = render_modal(
+        frame,
+        Constraint::Percentage(68),
+        Constraint::Length(9),
+        "Set Expiry",
+        " Enter:set  Esc:cancel ",
+        &theme,
+    );
+    let chunks = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(1),
+    ])
+    .split(inner);
+
+    frame.render_widget(
+        Paragraph::new(format!("key: {:?}", expire_input.key))
+            .style(Style::default().fg(theme.semantic.text.secondary))
+            .wrap(Wrap { trim: false }),
+        chunks[0],
+    );
+    render_expire_seconds_input(frame, chunks[1], expire_input);
+    frame.render_widget(
+        Paragraph::new("seconds").style(Style::default().fg(theme.semantic.text.muted)),
+        chunks[2],
+    );
+}
+
+fn render_expire_seconds_input(frame: &mut Frame<'_>, area: Rect, expire_input: &ExpireInputState) {
+    let theme = DEFAULT_THEME;
+    let prompt = "> ";
+    let visible_width = area
+        .width
+        .saturating_sub(prompt.len() as u16)
+        .saturating_sub(1) as usize;
+    let cursor_spans = text_cursor_spans(
+        &expire_input.input,
+        expire_input.input.chars().count(),
+        0,
+        visible_width,
+        &theme,
+    );
+    let mut spans = vec![Span::styled(
+        prompt,
+        Style::default().fg(theme.semantic.text.accent),
+    )];
+    spans.extend(cursor_spans);
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -557,6 +648,24 @@ mod tests {
     }
 
     #[test]
+    fn confirm_dialog_shows_prompt_and_yes_no_hint() {
+        let mut state = AppState::new("redis://localhost");
+        state.confirm_state = Some(ConfirmState {
+            op: crate::app::PendingWrite::Delete {
+                key: "a".to_string(),
+                unlink: false,
+            },
+            prompt: "Delete key \"a\" with DEL?".to_string(),
+        });
+
+        let rendered = render_to_string(&state);
+
+        assert!(rendered.contains("Confirm Write"));
+        assert!(rendered.contains("Delete key \"a\" with DEL?"));
+        assert!(rendered.contains("[y]es / [n]o"));
+    }
+
+    #[test]
     fn connection_form_shows_dsn_read_only_and_hints() {
         let mut state = AppState::new("redis://localhost");
         state.connection_form = Some(ConnectionFormState {
@@ -571,6 +680,22 @@ mod tests {
         assert!(rendered.contains("read-only:"));
         assert!(rendered.contains("on"));
         assert!(rendered.contains("Tab:read-only"));
+    }
+
+    #[test]
+    fn expire_input_overlay_shows_key_input_and_seconds_hint() {
+        let mut state = AppState::new("redis://localhost");
+        state.expire_input = Some(ExpireInputState {
+            key: "a".to_string(),
+            input: "60".to_string(),
+        });
+
+        let rendered = render_to_string(&state);
+
+        assert!(rendered.contains("Set Expiry"));
+        assert!(rendered.contains("key: \"a\""));
+        assert!(rendered.contains("60"));
+        assert!(rendered.contains("seconds"));
     }
 
     #[test]
