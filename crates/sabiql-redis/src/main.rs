@@ -220,6 +220,8 @@ fn handle_modal_key(combo: KeyCombo) -> Option<Action> {
         combo if combo == KeyCombo::plain(Key::Enter) => Some(Action::SubmitCommand),
         combo if combo == KeyCombo::plain(Key::Esc) => Some(Action::CloseCommandModal),
         combo if combo == KeyCombo::plain(Key::Backspace) => Some(Action::CommandBackspace),
+        combo if combo == KeyCombo::plain(Key::Up) => Some(Action::CommandHistoryPrev),
+        combo if combo == KeyCombo::plain(Key::Down) => Some(Action::CommandHistoryNext),
         KeyCombo {
             key: Key::Char(c), ..
         } => Some(Action::CommandInput(c)),
@@ -518,6 +520,14 @@ mod tests {
         assert_eq!(
             handle_event(InputEvent::Key(KeyCombo::plain(Key::Backspace)), &state),
             Some(Action::CommandBackspace)
+        );
+        assert_eq!(
+            handle_event(InputEvent::Key(KeyCombo::plain(Key::Up)), &state),
+            Some(Action::CommandHistoryPrev)
+        );
+        assert_eq!(
+            handle_event(InputEvent::Key(KeyCombo::plain(Key::Down)), &state),
+            Some(Action::CommandHistoryNext)
         );
         assert_eq!(
             handle_event(InputEvent::Key(KeyCombo::plain(Key::Esc)), &state),

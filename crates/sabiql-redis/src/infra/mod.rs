@@ -339,6 +339,32 @@ fn command_args(command: &str) -> Vec<String> {
         .collect()
 }
 
+fn command_output_result(stdout: &str) -> Result<String, RedisCliError> {
+    let first_line = stdout.lines().find(|line| !line.trim().is_empty());
+    if first_line.is_some_and(is_redis_error_line) {
+        return Err(RedisCliError::CommandFailed(stdout.trim().to_string()));
+    }
+    Ok(stdout.to_string())
+}
+
+fn is_redis_error_line(line: &str) -> bool {
+    const ERROR_PREFIXES: &[&str] = &[
+        "(error)",
+        "ERR ",
+        "WRONGTYPE ",
+        "NOAUTH ",
+        "NOPERM ",
+        "READONLY ",
+        "BUSY ",
+        "LOADING ",
+        "OOM ",
+        "MISCONF ",
+    ];
+
+    let line = line.trim_start();
+    ERROR_PREFIXES.iter().any(|prefix| line.starts_with(prefix))
+}
+
 pub fn serialize_csv(headers: &[String], rows: &[Vec<String>]) -> Result<Vec<u8>, RedisCliError> {
     let mut writer = csv::WriterBuilder::new()
         .terminator(csv::Terminator::Any(b'\n'))
@@ -820,7 +846,8 @@ impl RedisCli for RedisCliSubprocess {
 
     async fn execute_command(&self, command: &str) -> Result<String, RedisCliError> {
         ensure_command_allowed(command, self.read_only)?;
-        self.run_command(&command_args(command)).await
+        let stdout = self.run_command(&command_args(command)).await?;
+        command_output_result(&stdout)
     }
 }
 
@@ -1275,6 +1302,30 @@ mod tests {
                 "expected read-only denial for {command:?}, got {err:?}"
             );
         }
+    }
+
+    #[test]
+    fn command_output_result_rejects_redis_error_replies() {
+        for output in [
+            "(error) ERR syntax error\n",
+            "ERR unknown command 'NOPE'\n",
+            "WRONGTYPE Operation against a key holding the wrong kind of value\n",
+            "NOAUTH Authentication required.\n",
+        ] {
+            assert_eq!(
+                command_output_result(output),
+                Err(RedisCliError::CommandFailed(output.trim().to_string()))
+            );
+        }
+    }
+
+    #[test]
+    fn command_output_result_accepts_regular_output() {
+        assert_eq!(command_output_result("OK\n"), Ok("OK\n".to_string()));
+        assert_eq!(
+            command_output_result("value before an error-like line\nERR data\n"),
+            Ok("value before an error-like line\nERR data\n".to_string())
+        );
     }
 
     #[test]

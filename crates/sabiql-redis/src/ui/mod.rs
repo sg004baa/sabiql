@@ -32,6 +32,7 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
 
     render_status(frame, vertical[0], state);
     render_keys(frame, body[0], state);
+    render_body_divider(frame, body[1]);
     render_value_pane(frame, body[2], state);
     render_footer(frame, vertical[2], state);
     if state.command_modal.is_open {
@@ -155,6 +156,15 @@ fn render_keys(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                 Cell::from(redis_key.kind.to_string()).style(style),
             ]
         },
+    );
+}
+
+fn render_body_divider(frame: &mut Frame<'_>, area: Rect) {
+    let theme = DEFAULT_THEME;
+    let divider = (0..area.height).map(|_| "│").collect::<Vec<_>>().join("\n");
+    frame.render_widget(
+        Paragraph::new(divider).style(Style::default().fg(theme.semantic.surface.unfocus_border)),
+        area,
     );
 }
 
@@ -651,6 +661,21 @@ mod tests {
     }
 
     #[test]
+    fn body_renders_vertical_divider_between_keys_and_value() {
+        let state = AppState::new("redis://localhost");
+        let width = 160;
+        let height = 12;
+        let divider_x = width - 108 - 1;
+
+        let rendered = render_to_string_with_size(&state, width, height);
+        let lines = rendered.lines().collect::<Vec<_>>();
+
+        for line in &lines[1..height as usize - 1] {
+            assert_eq!(line.chars().nth(divider_x as usize), Some('│'));
+        }
+    }
+
+    #[test]
     fn db_overlay_shows_database_rows() {
         let mut state = AppState::new("redis://localhost");
         state.db_overlay = Some(DbOverlayState {
@@ -710,6 +735,31 @@ mod tests {
         let rendered = render_to_string(&state);
 
         assert!(rendered.contains("Read-only mode blocks writes"));
+    }
+
+    #[test]
+    fn command_modal_shows_success_status_and_output() {
+        let mut state = AppState::new("redis://localhost");
+        state.command_modal.is_open = true;
+        state.command_modal.status = CommandStatus::Success("PONG\n".to_string());
+
+        let rendered = render_to_string(&state);
+
+        assert!(rendered.contains("OK"));
+        assert!(rendered.contains("PONG"));
+    }
+
+    #[test]
+    fn command_modal_shows_error_status_and_output() {
+        let mut state = AppState::new("redis://localhost");
+        state.command_modal.is_open = true;
+        state.command_modal.status = CommandStatus::Error("ERR unknown command 'NOPE'".to_string());
+
+        let rendered = render_to_string(&state);
+
+        assert!(rendered.contains("Error"));
+        assert!(!rendered.contains("OK"));
+        assert!(rendered.contains("ERR unknown command 'NOPE'"));
     }
 
     #[test]

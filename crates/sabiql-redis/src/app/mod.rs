@@ -51,6 +51,9 @@ pub struct CommandModalState {
     pub is_open: bool,
     pub input: String,
     pub status: CommandStatus,
+    pub history: Vec<String>,
+    pub history_cursor: Option<usize>,
+    pub history_draft: String,
 }
 
 impl CommandModalState {
@@ -59,6 +62,9 @@ impl CommandModalState {
             is_open: false,
             input: String::new(),
             status: CommandStatus::Idle,
+            history: Vec::new(),
+            history_cursor: None,
+            history_draft: String::new(),
         }
     }
 }
@@ -201,6 +207,8 @@ pub enum Action {
     },
     CommandInput(char),
     CommandBackspace,
+    CommandHistoryPrev,
+    CommandHistoryNext,
     SubmitCommand,
     CommandSucceeded {
         output: String,
@@ -414,10 +422,12 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             state.command_modal.is_open = true;
             state.command_modal.input.clear();
             state.command_modal.status = CommandStatus::Idle;
+            reset_command_history_navigation(&mut state.command_modal);
             Vec::new()
         }
         Action::CloseCommandModal => {
             state.command_modal.is_open = false;
+            reset_command_history_navigation(&mut state.command_modal);
             Vec::new()
         }
         Action::OpenConnectionForm => {
@@ -535,6 +545,7 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             if state.command_modal.is_open
                 && !matches!(state.command_modal.status, CommandStatus::Running)
             {
+                reset_command_history_navigation(&mut state.command_modal);
                 state.command_modal.input.push(ch);
             }
             Vec::new()
@@ -543,7 +554,24 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             if state.command_modal.is_open
                 && !matches!(state.command_modal.status, CommandStatus::Running)
             {
+                reset_command_history_navigation(&mut state.command_modal);
                 state.command_modal.input.pop();
+            }
+            Vec::new()
+        }
+        Action::CommandHistoryPrev => {
+            if state.command_modal.is_open
+                && !matches!(state.command_modal.status, CommandStatus::Running)
+            {
+                select_previous_command_history(&mut state.command_modal);
+            }
+            Vec::new()
+        }
+        Action::CommandHistoryNext => {
+            if state.command_modal.is_open
+                && !matches!(state.command_modal.status, CommandStatus::Running)
+            {
+                select_next_command_history(&mut state.command_modal);
             }
             Vec::new()
         }
@@ -575,6 +603,7 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
                 });
                 return Vec::new();
             }
+            push_command_history(&mut state.command_modal, &command);
             state.command_modal.status = CommandStatus::Running;
             vec![Effect::ExecuteCommand { command }]
         }
@@ -672,6 +701,49 @@ fn overlay_or_modal_open(state: &AppState) -> bool {
         || state.connection_form.is_some()
         || state.command_modal.is_open
         || state.confirm_state.is_some()
+}
+
+fn push_command_history(modal: &mut CommandModalState, command: &str) {
+    if modal.history.last().is_none_or(|last| last != command) {
+        modal.history.push(command.to_string());
+    }
+    reset_command_history_navigation(modal);
+}
+
+fn select_previous_command_history(modal: &mut CommandModalState) {
+    if modal.history.is_empty() {
+        return;
+    }
+
+    let index = if let Some(index) = modal.history_cursor {
+        index.saturating_sub(1)
+    } else {
+        modal.history_draft.clone_from(&modal.input);
+        modal.history.len() - 1
+    };
+    modal.history_cursor = Some(index);
+    modal.input.clone_from(&modal.history[index]);
+}
+
+fn select_next_command_history(modal: &mut CommandModalState) {
+    let Some(index) = modal.history_cursor else {
+        return;
+    };
+
+    if index + 1 < modal.history.len() {
+        let next_index = index + 1;
+        modal.history_cursor = Some(next_index);
+        modal.input.clone_from(&modal.history[next_index]);
+    } else {
+        modal.history_cursor = None;
+        modal.input.clone_from(&modal.history_draft);
+        modal.history_draft.clear();
+    }
+}
+
+fn reset_command_history_navigation(modal: &mut CommandModalState) {
+    modal.history_cursor = None;
+    modal.history_draft.clear();
 }
 
 fn insert_connection_form_char(form: &mut ConnectionFormState, ch: char) {
@@ -773,6 +845,7 @@ fn confirm_write(state: &mut AppState) -> Vec<Effect> {
                 state.command_modal.status = CommandStatus::Error(e.to_string());
                 return Vec::new();
             }
+            push_command_history(&mut state.command_modal, &command);
             state.command_modal.status = CommandStatus::Running;
             vec![Effect::ExecuteCommand { command }]
         }
@@ -994,7 +1067,7 @@ impl EffectRunner {
                     let action = match cli.execute_command(&command).await {
                         Ok(output) => Action::CommandSucceeded { output },
                         Err(e) => Action::CommandFailed {
-                            message: e.to_string(),
+                            message: command_error_message(e),
                         },
                     };
                     let _ = self.action_tx.send(action).await;
@@ -1061,6 +1134,13 @@ impl EffectRunner {
         let (kind, ttl) = cli.key_type_and_ttl(key).await?;
         let value = cli.fetch_value(key, kind).await?;
         Ok((kind, ttl, value))
+    }
+}
+
+fn command_error_message(error: crate::infra::RedisCliError) -> String {
+    match error {
+        crate::infra::RedisCliError::CommandFailed(message) => message,
+        error => error.to_string(),
     }
 }
 
@@ -1639,6 +1719,93 @@ mod tests {
                 }]
             );
             assert_eq!(state.command_modal.status, CommandStatus::Running);
+        }
+
+        #[test]
+        fn submit_command_appends_history_and_skips_consecutive_duplicates() {
+            let mut state = AppState::new("redis://localhost");
+            state.command_modal.is_open = true;
+            state.command_modal.input = " get k ".to_string();
+
+            assert_eq!(
+                reduce(&mut state, Action::SubmitCommand),
+                vec![Effect::ExecuteCommand {
+                    command: "get k".to_string(),
+                }]
+            );
+            assert_eq!(state.command_modal.history, vec!["get k".to_string()]);
+            assert_eq!(state.command_modal.history_cursor, None);
+
+            state.command_modal.status = CommandStatus::Idle;
+            state.command_modal.input = "get k".to_string();
+            assert_eq!(
+                reduce(&mut state, Action::SubmitCommand),
+                vec![Effect::ExecuteCommand {
+                    command: "get k".to_string(),
+                }]
+            );
+            assert_eq!(state.command_modal.history, vec!["get k".to_string()]);
+
+            state.command_modal.status = CommandStatus::Idle;
+            state.command_modal.input = "get other".to_string();
+            assert_eq!(
+                reduce(&mut state, Action::SubmitCommand),
+                vec![Effect::ExecuteCommand {
+                    command: "get other".to_string(),
+                }]
+            );
+            assert_eq!(
+                state.command_modal.history,
+                vec!["get k".to_string(), "get other".to_string()]
+            );
+        }
+
+        #[test]
+        fn command_history_prev_next_restore_draft_and_clamp_at_bounds() {
+            let mut state = AppState::new("redis://localhost");
+            state.command_modal.is_open = true;
+            state.command_modal.input = "draft".to_string();
+            state.command_modal.history = vec!["get a".to_string(), "get b".to_string()];
+
+            assert!(reduce(&mut state, Action::CommandHistoryPrev).is_empty());
+            assert_eq!(state.command_modal.input, "get b");
+            assert_eq!(state.command_modal.history_cursor, Some(1));
+            assert_eq!(state.command_modal.history_draft, "draft");
+
+            assert!(reduce(&mut state, Action::CommandHistoryPrev).is_empty());
+            assert_eq!(state.command_modal.input, "get a");
+            assert_eq!(state.command_modal.history_cursor, Some(0));
+
+            assert!(reduce(&mut state, Action::CommandHistoryPrev).is_empty());
+            assert_eq!(state.command_modal.input, "get a");
+            assert_eq!(state.command_modal.history_cursor, Some(0));
+
+            assert!(reduce(&mut state, Action::CommandHistoryNext).is_empty());
+            assert_eq!(state.command_modal.input, "get b");
+            assert_eq!(state.command_modal.history_cursor, Some(1));
+
+            assert!(reduce(&mut state, Action::CommandHistoryNext).is_empty());
+            assert_eq!(state.command_modal.input, "draft");
+            assert_eq!(state.command_modal.history_cursor, None);
+
+            assert!(reduce(&mut state, Action::CommandHistoryNext).is_empty());
+            assert_eq!(state.command_modal.input, "draft");
+            assert_eq!(state.command_modal.history_cursor, None);
+        }
+
+        #[test]
+        fn command_history_navigation_is_noop_without_history() {
+            let mut state = AppState::new("redis://localhost");
+            state.command_modal.is_open = true;
+            state.command_modal.input = "draft".to_string();
+
+            assert!(reduce(&mut state, Action::CommandHistoryPrev).is_empty());
+            assert_eq!(state.command_modal.input, "draft");
+            assert_eq!(state.command_modal.history_cursor, None);
+
+            assert!(reduce(&mut state, Action::CommandHistoryNext).is_empty());
+            assert_eq!(state.command_modal.input, "draft");
+            assert_eq!(state.command_modal.history_cursor, None);
         }
 
         #[test]
@@ -2595,6 +2762,36 @@ mod tests {
                 action,
                 Action::CommandFailed {
                     message: "DEL is blocked".to_string(),
+                }
+            );
+        }
+
+        #[tokio::test]
+        async fn execute_command_effect_preserves_redis_error_reply_body() {
+            let mut cli = MockRedisCli::new();
+            cli.expect_execute_command().once().returning(|_| {
+                Err(crate::infra::RedisCliError::CommandFailed(
+                    "ERR unknown command 'NOPE'".to_string(),
+                ))
+            });
+
+            let (tx, mut rx) = mpsc::channel(4);
+            let runner = runner_with_cli(cli, tx);
+
+            runner
+                .run(vec![Effect::ExecuteCommand {
+                    command: "NOPE".to_string(),
+                }])
+                .await;
+
+            let action = tokio::time::timeout(Duration::from_millis(500), rx.recv())
+                .await
+                .expect("action timeout")
+                .expect("channel closed");
+            assert_eq!(
+                action,
+                Action::CommandFailed {
+                    message: "ERR unknown command 'NOPE'".to_string(),
                 }
             );
         }
