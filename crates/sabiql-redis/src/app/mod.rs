@@ -5,7 +5,9 @@ use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher};
 use tokio::sync::{RwLock, mpsc};
 
-use crate::domain::{RedisKey, RedisKind, RedisValue, redis_value_table};
+use crate::domain::{
+    RedisKey, RedisKind, RedisValue, redis_string_display_value, redis_value_table,
+};
 use crate::infra::{RedisCli, RedisCliFactory, RedisDsn, command_requires_confirmation};
 
 const DEFAULT_TABLE_VISIBLE_ROWS: usize = 20;
@@ -90,6 +92,7 @@ pub struct ConfirmState {
 pub struct ConnectionFormState {
     pub dsn: String,
     pub read_only: bool,
+    pub cursor: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -174,11 +177,14 @@ pub enum Action {
     FilterBackspace,
     ClearFilter,
     CommitFilter,
+    Reload,
     OpenCommandModal,
     CloseCommandModal,
     OpenConnectionForm,
     ConnectionFormInput(char),
     ConnectionFormBackspace,
+    ConnectionFormCursorLeft,
+    ConnectionFormCursorRight,
     ToggleConnectionFormReadOnly,
     SubmitConnectionForm,
     CancelConnectionForm,
@@ -389,6 +395,14 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
                 pattern: state.search_pattern.clone(),
             }]
         }
+        Action::Reload => {
+            if overlay_or_modal_open(state) || state.filter_active {
+                return Vec::new();
+            }
+            vec![Effect::SearchKeys {
+                pattern: state.search_pattern.clone(),
+            }]
+        }
         Action::OpenCommandModal => {
             if state.db_overlay.is_some()
                 || state.connection_form.is_some()
@@ -413,18 +427,37 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             state.connection_form = Some(ConnectionFormState {
                 dsn: state.dsn.clone(),
                 read_only: state.read_only,
+                cursor: state.dsn.chars().count(),
             });
             Vec::new()
         }
         Action::ConnectionFormInput(ch) => {
             if let Some(form) = &mut state.connection_form {
-                form.dsn.push(ch);
+                insert_connection_form_char(form, ch);
             }
             Vec::new()
         }
         Action::ConnectionFormBackspace => {
             if let Some(form) = &mut state.connection_form {
-                form.dsn.pop();
+                backspace_connection_form_char(form);
+            }
+            Vec::new()
+        }
+        Action::ConnectionFormCursorLeft => {
+            if let Some(form) = &mut state.connection_form {
+                let char_count = form.dsn.chars().count();
+                form.cursor = form.cursor.min(char_count).saturating_sub(1);
+            }
+            Vec::new()
+        }
+        Action::ConnectionFormCursorRight => {
+            if let Some(form) = &mut state.connection_form {
+                let char_count = form.dsn.chars().count();
+                form.cursor = form
+                    .cursor
+                    .min(char_count)
+                    .saturating_add(1)
+                    .min(char_count);
             }
             Vec::new()
         }
@@ -641,6 +674,33 @@ fn overlay_or_modal_open(state: &AppState) -> bool {
         || state.confirm_state.is_some()
 }
 
+fn insert_connection_form_char(form: &mut ConnectionFormState, ch: char) {
+    let cursor = form.cursor.min(form.dsn.chars().count());
+    let byte_index = byte_index_at_char(&form.dsn, cursor);
+    form.dsn.insert(byte_index, ch);
+    form.cursor = cursor + 1;
+}
+
+fn backspace_connection_form_char(form: &mut ConnectionFormState) {
+    let cursor = form.cursor.min(form.dsn.chars().count());
+    if cursor == 0 {
+        form.cursor = 0;
+        return;
+    }
+
+    let start = byte_index_at_char(&form.dsn, cursor - 1);
+    let end = byte_index_at_char(&form.dsn, cursor);
+    form.dsn.replace_range(start..end, "");
+    form.cursor = cursor - 1;
+}
+
+fn byte_index_at_char(input: &str, char_index: usize) -> usize {
+    input
+        .char_indices()
+        .nth(char_index)
+        .map_or(input.len(), |(index, _)| index)
+}
+
 fn submit_connection_form(state: &mut AppState) -> Vec<Effect> {
     let Some(form) = state.connection_form.take() else {
         return Vec::new();
@@ -725,10 +785,14 @@ fn is_current_key(state: &AppState, key: &str) -> bool {
 
 fn value_row_count(value: &RedisValue) -> usize {
     match value {
-        RedisValue::String(_) => 1,
+        RedisValue::String(value) => line_count(&redis_string_display_value(value)),
         RedisValue::List(rows) | RedisValue::Set(rows) => rows.len(),
         RedisValue::Hash(rows) | RedisValue::ZSet(rows) | RedisValue::Stream(rows) => rows.len(),
     }
+}
+
+fn line_count(value: &str) -> usize {
+    value.split('\n').count()
 }
 
 fn fetch_selected_key(state: &mut AppState) -> Vec<Effect> {
@@ -1289,6 +1353,25 @@ mod tests {
         }
 
         #[test]
+        fn value_scroll_down_uses_pretty_json_string_row_count() {
+            let mut state = AppState::new("redis://localhost");
+            let value = RedisValue::String(r#"{"items":[1,2]}"#.to_string());
+            assert_eq!(value_row_count(&value), 6);
+            state.value_state = ValueState::Loaded {
+                key: "json".to_string(),
+                kind: RedisKind::String,
+                ttl: None,
+                value,
+            };
+
+            for _ in 0..6 {
+                assert!(reduce(&mut state, Action::ValueScrollDown).is_empty());
+            }
+
+            assert_eq!(state.value_scroll_offset, 5);
+        }
+
+        #[test]
         fn value_scroll_up_saturates_at_zero() {
             let mut state = AppState::new("redis://localhost");
             state.value_state = ValueState::Loaded {
@@ -1402,6 +1485,7 @@ mod tests {
                 Some(ConnectionFormState {
                     dsn: "redis://localhost:6380/2".to_string(),
                     read_only: true,
+                    cursor: "redis://localhost:6380/2".chars().count(),
                 })
             );
         }
@@ -1412,6 +1496,7 @@ mod tests {
             state.connection_form = Some(ConnectionFormState {
                 dsn: "redis://localhost".to_string(),
                 read_only: true,
+                cursor: "redis://localhost".chars().count(),
             });
 
             assert!(reduce(&mut state, Action::ConnectionFormInput('/')).is_empty());
@@ -1440,6 +1525,66 @@ mod tests {
         }
 
         #[test]
+        fn connection_form_edits_at_cursor_position() {
+            let mut state = AppState::new("redis://localhost");
+            state.connection_form = Some(ConnectionFormState {
+                dsn: "abcd".to_string(),
+                read_only: false,
+                cursor: 2,
+            });
+
+            assert!(reduce(&mut state, Action::ConnectionFormInput('X')).is_empty());
+            assert_eq!(
+                state.connection_form.as_ref().map(|form| form.dsn.as_str()),
+                Some("abXcd")
+            );
+            assert_eq!(
+                state.connection_form.as_ref().map(|form| form.cursor),
+                Some(3)
+            );
+
+            assert!(reduce(&mut state, Action::ConnectionFormBackspace).is_empty());
+            assert_eq!(
+                state.connection_form.as_ref().map(|form| form.dsn.as_str()),
+                Some("abcd")
+            );
+            assert_eq!(
+                state.connection_form.as_ref().map(|form| form.cursor),
+                Some(2)
+            );
+        }
+
+        #[test]
+        fn connection_form_cursor_left_and_right_clamp_at_bounds() {
+            let mut state = AppState::new("redis://localhost");
+            state.connection_form = Some(ConnectionFormState {
+                dsn: "abc".to_string(),
+                read_only: false,
+                cursor: 0,
+            });
+
+            assert!(reduce(&mut state, Action::ConnectionFormCursorLeft).is_empty());
+            assert_eq!(
+                state.connection_form.as_ref().map(|form| form.cursor),
+                Some(0)
+            );
+
+            assert!(reduce(&mut state, Action::ConnectionFormCursorRight).is_empty());
+            assert_eq!(
+                state.connection_form.as_ref().map(|form| form.cursor),
+                Some(1)
+            );
+
+            assert!(reduce(&mut state, Action::ConnectionFormCursorRight).is_empty());
+            assert!(reduce(&mut state, Action::ConnectionFormCursorRight).is_empty());
+            assert!(reduce(&mut state, Action::ConnectionFormCursorRight).is_empty());
+            assert_eq!(
+                state.connection_form.as_ref().map(|form| form.cursor),
+                Some(3)
+            );
+        }
+
+        #[test]
         fn submit_connection_form_updates_state_and_emits_connect() {
             let mut state = AppState::new("redis://localhost:6379/0");
             state.keys = vec![key("a"), key("b")];
@@ -1455,6 +1600,7 @@ mod tests {
             state.connection_form = Some(ConnectionFormState {
                 dsn: "redis://cache.example.com:6380/4".to_string(),
                 read_only: true,
+                cursor: "redis://cache.example.com:6380/4".chars().count(),
             });
 
             let effects = reduce(&mut state, Action::SubmitConnectionForm);
@@ -1967,6 +2113,58 @@ mod tests {
                     pattern: "*".to_string()
                 }]
             );
+        }
+
+        #[test]
+        fn reload_searches_with_current_pattern() {
+            let mut state = AppState::new("redis://localhost");
+            state.search_pattern = "user:*".to_string();
+
+            let effects = reduce(&mut state, Action::Reload);
+
+            assert_eq!(
+                effects,
+                vec![Effect::SearchKeys {
+                    pattern: "user:*".to_string()
+                }]
+            );
+        }
+
+        #[test]
+        fn reload_is_blocked_by_overlays_modals_and_active_filter() {
+            let mut state = AppState::new("redis://localhost");
+            state.search_pattern = "user:*".to_string();
+            state.filter_active = true;
+            assert!(reduce(&mut state, Action::Reload).is_empty());
+
+            let mut state = AppState::new("redis://localhost");
+            state.connection_form = Some(ConnectionFormState {
+                dsn: "redis://localhost".to_string(),
+                read_only: false,
+                cursor: "redis://localhost".chars().count(),
+            });
+            assert!(reduce(&mut state, Action::Reload).is_empty());
+
+            let mut state = AppState::new("redis://localhost");
+            state.command_modal.is_open = true;
+            assert!(reduce(&mut state, Action::Reload).is_empty());
+
+            let mut state = AppState::new("redis://localhost");
+            state.db_overlay = Some(DbOverlayState {
+                entries: Vec::new(),
+                selected: 0,
+                loading: true,
+            });
+            assert!(reduce(&mut state, Action::Reload).is_empty());
+
+            let mut state = AppState::new("redis://localhost");
+            state.confirm_state = Some(ConfirmState {
+                op: PendingWrite::Command {
+                    command: "DEL key".to_string(),
+                },
+                prompt: "Run this command? DEL key".to_string(),
+            });
+            assert!(reduce(&mut state, Action::Reload).is_empty());
         }
 
         #[test]

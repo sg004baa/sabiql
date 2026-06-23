@@ -13,7 +13,7 @@ use crate::app::{
     AppState, CommandStatus, ConfirmState, ConnectionFormState, ConnectionStatus, DbOverlayState,
     StatusMessage, ValueState,
 };
-use crate::domain::{RedisValue, redis_value_table};
+use crate::domain::{RedisValue, redis_string_display_value, redis_value_table};
 
 pub fn render(frame: &mut Frame<'_>, state: &AppState) {
     let area = frame.area();
@@ -26,7 +26,7 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
     let body = Layout::horizontal([
         Constraint::Min(40),
         Constraint::Length(1),
-        Constraint::Length(72),
+        Constraint::Length(108),
     ])
     .split(vertical[1]);
 
@@ -188,7 +188,18 @@ fn render_value_pane(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                 chunks[0],
                 &format!("value | {key} | type {kind} | {}", ttl_label(*ttl)),
             );
-            render_value_table(frame, chunks[1], value, state.value_scroll_offset);
+            match value {
+                RedisValue::String(value) => {
+                    render_value_string(frame, chunks[1], value, state.value_scroll_offset);
+                }
+                RedisValue::List(_)
+                | RedisValue::Set(_)
+                | RedisValue::Hash(_)
+                | RedisValue::ZSet(_)
+                | RedisValue::Stream(_) => {
+                    render_value_table(frame, chunks[1], value, state.value_scroll_offset);
+                }
+            }
         }
     }
 }
@@ -224,6 +235,18 @@ fn render_value_table(frame: &mut Frame<'_>, area: Rect, value: &RedisValue, off
                 .map(|value| Cell::from(value.clone()))
                 .collect()
         },
+    );
+}
+
+fn render_value_string(frame: &mut Frame<'_>, area: Rect, value: &str, offset: usize) {
+    let theme = DEFAULT_THEME;
+    let scroll_offset = u16::try_from(offset).unwrap_or(u16::MAX);
+    frame.render_widget(
+        Paragraph::new(redis_string_display_value(value))
+            .style(Style::default().fg(theme.semantic.text.primary))
+            .wrap(Wrap { trim: false })
+            .scroll((scroll_offset, 0)),
+        area,
     );
 }
 
@@ -291,6 +314,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         ("/", "search"),
         (":", "command"),
         ("c", "connect"),
+        ("r", "reload"),
         ("e", "export"),
         ("q", "quit"),
     ]);
@@ -395,7 +419,7 @@ fn render_connection_form(frame: &mut Frame<'_>, form: &ConnectionFormState) {
 fn render_connection_dsn_input(frame: &mut Frame<'_>, area: Rect, form: &ConnectionFormState) {
     let theme = DEFAULT_THEME;
     let prompt = "dsn: ";
-    let cursor = form.dsn.chars().count();
+    let cursor = form.cursor.min(form.dsn.chars().count());
     let visible_width = area
         .width
         .saturating_sub(prompt.len() as u16)
@@ -622,6 +646,7 @@ mod tests {
         assert!(!footer.contains("x/X"));
         assert!(!footer.contains("expire"));
         assert!(!footer.contains("persist"));
+        assert!(footer.contains("reload"));
         assert!(footer.contains("export"));
     }
 
@@ -665,6 +690,7 @@ mod tests {
         state.connection_form = Some(ConnectionFormState {
             dsn: "redis://cache.example.com:6380/2".to_string(),
             read_only: true,
+            cursor: "redis://cache.example.com:6380/2".chars().count(),
         });
 
         let rendered = render_to_string(&state);
@@ -724,13 +750,51 @@ mod tests {
     }
 
     #[test]
+    fn value_pane_pretty_prints_json_string() {
+        let mut state = AppState::new("redis://localhost");
+        state.value_state = ValueState::Loaded {
+            key: "json".to_string(),
+            kind: crate::domain::RedisKind::String,
+            ttl: None,
+            value: RedisValue::String(r#"{"items":[1,2]}"#.to_string()),
+        };
+
+        let rendered = render_to_string_with_size(&state, 160, 12);
+
+        assert!(rendered.contains("\"items\": ["));
+        assert!(rendered.contains("    1,"));
+        assert!(rendered.contains("    2"));
+    }
+
+    #[test]
+    fn value_pane_wraps_long_string_values() {
+        let mut state = AppState::new("redis://localhost");
+        state.value_state = ValueState::Loaded {
+            key: "long".to_string(),
+            kind: crate::domain::RedisKind::String,
+            ttl: None,
+            value: RedisValue::String(
+                "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda \
+                 alpha beta gamma delta epsilon zeta eta theta iota kappa lambda \
+                 alpha beta gamma delta epsilon zeta eta theta iota kappa lambda tail-value"
+                    .to_string(),
+            ),
+        };
+
+        let rendered = render_to_string_with_size(&state, 150, 12);
+
+        assert!(rendered.contains("alpha beta gamma"));
+        assert!(rendered.contains("tail-value"));
+    }
+
+    #[test]
     fn wide_key_list_keeps_long_keys_visible() {
         let mut state = AppState::new("redis://localhost");
         let long_key = "redis:key:list:primary:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string();
         state.keys = vec![crate::domain::RedisKey::unknown(long_key.clone())];
         state.filtered_indices = vec![0];
 
-        let rendered = render_to_string_with_size(&state, 160, 12);
+        let rendered = render_to_string_with_size(&state, 220, 12);
 
         assert!(rendered.contains(&long_key));
     }

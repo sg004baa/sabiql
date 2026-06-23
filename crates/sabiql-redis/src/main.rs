@@ -124,6 +124,7 @@ fn handle_event(event: InputEvent, state: &AppState) -> Option<Action> {
         InputEvent::Key(combo) if combo == KeyCombo::plain(Key::Char('e')) => {
             Some(Action::RequestExportCsv)
         }
+        InputEvent::Key(combo) if combo == KeyCombo::plain(Key::Char('r')) => Some(Action::Reload),
         InputEvent::Key(combo) if combo == KeyCombo::plain(Key::Char('q')) => Some(Action::Quit),
         InputEvent::Key(combo) if combo == KeyCombo::ctrl(Key::Char('c')) => Some(Action::Quit),
         InputEvent::Key(combo) if combo == KeyCombo::plain(Key::Char('J')) => {
@@ -171,6 +172,8 @@ fn handle_connection_form_key(combo: KeyCombo) -> Option<Action> {
         combo if combo == KeyCombo::plain(Key::Enter) => Some(Action::SubmitConnectionForm),
         combo if combo == KeyCombo::plain(Key::Esc) => Some(Action::CancelConnectionForm),
         combo if combo == KeyCombo::plain(Key::Backspace) => Some(Action::ConnectionFormBackspace),
+        combo if combo == KeyCombo::plain(Key::Left) => Some(Action::ConnectionFormCursorLeft),
+        combo if combo == KeyCombo::plain(Key::Right) => Some(Action::ConnectionFormCursorRight),
         combo if combo == KeyCombo::plain(Key::Tab) => Some(Action::ToggleConnectionFormReadOnly),
         KeyCombo {
             key: Key::Char(c),
@@ -281,6 +284,15 @@ mod tests {
     }
 
     #[test]
+    fn r_key_requests_reload() {
+        let state = AppState::new("redis://localhost");
+
+        let action = handle_event(InputEvent::Key(KeyCombo::plain(Key::Char('r'))), &state);
+
+        assert_eq!(action, Some(Action::Reload));
+    }
+
+    #[test]
     fn d_key_opens_db_overlay() {
         let state = AppState::new("redis://localhost");
 
@@ -362,6 +374,7 @@ mod tests {
         state.connection_form = Some(app::ConnectionFormState {
             dsn: "redis://localhost".to_string(),
             read_only: false,
+            cursor: "redis://localhost".chars().count(),
         });
 
         assert_eq!(
@@ -383,6 +396,14 @@ mod tests {
             Some(Action::ConnectionFormBackspace)
         );
         assert_eq!(
+            handle_event(InputEvent::Key(KeyCombo::plain(Key::Left)), &state),
+            Some(Action::ConnectionFormCursorLeft)
+        );
+        assert_eq!(
+            handle_event(InputEvent::Key(KeyCombo::plain(Key::Right)), &state),
+            Some(Action::ConnectionFormCursorRight)
+        );
+        assert_eq!(
             handle_event(InputEvent::Key(KeyCombo::plain(Key::Tab)), &state),
             Some(Action::ToggleConnectionFormReadOnly)
         );
@@ -402,6 +423,7 @@ mod tests {
         state.connection_form = Some(app::ConnectionFormState {
             dsn: "redis://localhost".to_string(),
             read_only: false,
+            cursor: "redis://localhost".chars().count(),
         });
 
         assert_eq!(

@@ -101,6 +101,12 @@ pub fn redis_value_table(value: &RedisValue) -> RedisValueTable {
     }
 }
 
+pub fn redis_string_display_value(value: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(value)
+        .and_then(|json| serde_json::to_string_pretty(&json))
+        .unwrap_or_else(|_| value.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,6 +117,21 @@ mod tests {
 
         assert_eq!(table.headers, vec!["value"]);
         assert_eq!(table.rows, vec![vec!["hello".to_string()]]);
+    }
+
+    #[test]
+    fn json_string_value_formats_pretty() {
+        assert_eq!(
+            redis_string_display_value(r#"{"items":[1,2]}"#),
+            "{\n  \"items\": [\n    1,\n    2\n  ]\n}"
+        );
+    }
+
+    #[test]
+    fn non_json_string_value_is_returned_unchanged() {
+        let text = "plain text with {braces}";
+
+        assert_eq!(redis_string_display_value(text), text);
     }
 
     #[test]
