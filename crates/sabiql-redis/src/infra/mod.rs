@@ -43,9 +43,6 @@ pub trait RedisCli: Send + Sync {
     async fn key_type_and_ttl(&self, key: &str) -> Result<(RedisKind, Option<u64>), RedisCliError>;
     async fn fetch_value(&self, key: &str, kind: RedisKind) -> Result<RedisValue, RedisCliError>;
     async fn execute_command(&self, command: &str) -> Result<String, RedisCliError>;
-    async fn delete_key(&self, key: &str, unlink: bool) -> Result<u64, RedisCliError>;
-    async fn set_expire(&self, key: &str, seconds: u64) -> Result<bool, RedisCliError>;
-    async fn persist_key(&self, key: &str) -> Result<bool, RedisCliError>;
 }
 
 #[cfg_attr(test, mockall::automock)]
@@ -231,8 +228,6 @@ fn scan_keys_command_args(cursor: &str, pattern: &str) -> [String; 6] {
     ]
 }
 
-const DESTRUCTIVE_COMMANDS: &[&str] = &["FLUSHALL", "FLUSHDB", "DEL", "UNLINK"];
-
 const READ_ONLY_COMMANDS: &[&str] = &[
     "PING",
     "ECHO",
@@ -312,6 +307,13 @@ const READ_ONLY_COMMANDS: &[&str] = &[
 ];
 
 pub fn ensure_command_allowed(command: &str, read_only: bool) -> Result<(), RedisCliError> {
+    command_requires_confirmation(command, read_only).map(|_| ())
+}
+
+pub fn command_requires_confirmation(
+    command: &str,
+    read_only: bool,
+) -> Result<bool, RedisCliError> {
     let Some(first_token) = command.split_whitespace().next() else {
         return Err(RedisCliError::CommandDenied(
             "Enter a Redis command.".to_string(),
@@ -319,19 +321,13 @@ pub fn ensure_command_allowed(command: &str, read_only: bool) -> Result<(), Redi
     };
 
     let upper = first_token.to_ascii_uppercase();
-    if DESTRUCTIVE_COMMANDS.contains(&upper.as_str()) {
-        return Err(RedisCliError::CommandDenied(format!(
-            "{upper} is blocked by the destructive-command guard"
-        )));
-    }
-
     if read_only && !READ_ONLY_COMMANDS.contains(&upper.as_str()) {
         return Err(RedisCliError::CommandDenied(format!(
             "{upper} is blocked by read-only mode"
         )));
     }
 
-    Ok(())
+    Ok(!READ_ONLY_COMMANDS.contains(&upper.as_str()))
 }
 
 fn command_args(command: &str) -> Vec<String> {
@@ -341,6 +337,32 @@ fn command_args(command: &str) -> Vec<String> {
         .split_whitespace()
         .map(ToString::to_string)
         .collect()
+}
+
+fn command_output_result(stdout: &str) -> Result<String, RedisCliError> {
+    let first_line = stdout.lines().find(|line| !line.trim().is_empty());
+    if first_line.is_some_and(is_redis_error_line) {
+        return Err(RedisCliError::CommandFailed(stdout.trim().to_string()));
+    }
+    Ok(stdout.to_string())
+}
+
+fn is_redis_error_line(line: &str) -> bool {
+    const ERROR_PREFIXES: &[&str] = &[
+        "(error)",
+        "ERR ",
+        "WRONGTYPE ",
+        "NOAUTH ",
+        "NOPERM ",
+        "READONLY ",
+        "BUSY ",
+        "LOADING ",
+        "OOM ",
+        "MISCONF ",
+    ];
+
+    let line = line.trim_start();
+    ERROR_PREFIXES.iter().any(|prefix| line.starts_with(prefix))
 }
 
 pub fn serialize_csv(headers: &[String], rows: &[Vec<String>]) -> Result<Vec<u8>, RedisCliError> {
@@ -425,23 +447,6 @@ pub fn parse_ttl_reply(stdout: &str) -> Result<Option<u64>, RedisCliError> {
         Ok(None)
     } else {
         Ok(Some(ttl as u64))
-    }
-}
-
-pub fn parse_u64_reply(stdout: &str, command: &str) -> Result<u64, RedisCliError> {
-    let reply = stdout.trim();
-    reply
-        .parse::<u64>()
-        .map_err(|_| RedisCliError::Parse(format!("invalid {command} reply: {reply:?}")))
-}
-
-pub fn parse_bool_integer_reply(stdout: &str, command: &str) -> Result<bool, RedisCliError> {
-    match parse_u64_reply(stdout, command)? {
-        0 => Ok(false),
-        1 => Ok(true),
-        other => Err(RedisCliError::Parse(format!(
-            "invalid {command} boolean reply: {other}"
-        ))),
     }
 }
 
@@ -623,16 +628,6 @@ impl RedisCliSubprocess {
 
     pub fn read_only(&self) -> bool {
         self.read_only
-    }
-
-    fn ensure_write_allowed(&self, command: &str) -> Result<(), RedisCliError> {
-        if self.read_only {
-            Err(RedisCliError::CommandDenied(format!(
-                "{command} is blocked by read-only mode"
-            )))
-        } else {
-            Ok(())
-        }
     }
 
     async fn scan_value_lines(
@@ -851,32 +846,8 @@ impl RedisCli for RedisCliSubprocess {
 
     async fn execute_command(&self, command: &str) -> Result<String, RedisCliError> {
         ensure_command_allowed(command, self.read_only)?;
-        self.run_command(&command_args(command)).await
-    }
-
-    async fn delete_key(&self, key: &str, unlink: bool) -> Result<u64, RedisCliError> {
-        let command = if unlink { "UNLINK" } else { "DEL" };
-        self.ensure_write_allowed(command)?;
-        let stdout = self
-            .run_command(&[command.to_string(), key.to_string()])
-            .await?;
-        parse_u64_reply(&stdout, command)
-    }
-
-    async fn set_expire(&self, key: &str, seconds: u64) -> Result<bool, RedisCliError> {
-        self.ensure_write_allowed("EXPIRE")?;
-        let stdout = self
-            .run_command(&["EXPIRE".to_string(), key.to_string(), seconds.to_string()])
-            .await?;
-        parse_bool_integer_reply(&stdout, "EXPIRE")
-    }
-
-    async fn persist_key(&self, key: &str) -> Result<bool, RedisCliError> {
-        self.ensure_write_allowed("PERSIST")?;
-        let stdout = self
-            .run_command(&["PERSIST".to_string(), key.to_string()])
-            .await?;
-        parse_bool_integer_reply(&stdout, "PERSIST")
+        let stdout = self.run_command(&command_args(command)).await?;
+        command_output_result(&stdout)
     }
 }
 
@@ -1134,17 +1105,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_integer_write_replies() {
-        assert_eq!(parse_u64_reply("2\n", "DEL"), Ok(2));
-        assert_eq!(parse_bool_integer_reply("1\n", "EXPIRE"), Ok(true));
-        assert_eq!(parse_bool_integer_reply("0\n", "PERSIST"), Ok(false));
-        assert!(matches!(
-            parse_bool_integer_reply("2\n", "EXPIRE"),
-            Err(RedisCliError::Parse(_))
-        ));
-    }
-
-    #[test]
     fn parses_string_value() {
         assert_eq!(
             parse_string_value("hello\n"),
@@ -1246,24 +1206,36 @@ mod tests {
     }
 
     #[test]
-    fn command_guard_rejects_required_destructive_commands() {
+    fn command_guard_allows_write_commands_in_read_write_mode() {
         for command in ["flushall", "  FLUSHDB  ", "Del key1", "\tDeL\tkey1\n"] {
-            assert!(
-                matches!(
-                    ensure_command_allowed(command, false),
-                    Err(RedisCliError::CommandDenied(_))
-                ),
-                "expected command to be denied: {command:?}"
+            assert_eq!(
+                ensure_command_allowed(command, false),
+                Ok(()),
+                "expected command to be allowed after UI confirmation: {command:?}"
             );
         }
     }
 
     #[test]
-    fn command_guard_rejects_destructive_sibling_unlink() {
-        assert!(matches!(
-            ensure_command_allowed("UNLINK key1", false),
-            Err(RedisCliError::CommandDenied(_))
-        ));
+    fn command_confirmation_detects_writes_in_read_write_mode() {
+        for command in ["SET k v", "UNLINK key1", "FLUSHDB", "EVAL script 0"] {
+            assert_eq!(
+                command_requires_confirmation(command, false),
+                Ok(true),
+                "expected command to require confirmation: {command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn command_confirmation_skips_read_commands() {
+        for command in ["GET foo", " scan 0 ", "\tping\n"] {
+            assert_eq!(
+                command_requires_confirmation(command, false),
+                Ok(false),
+                "expected command to run without confirmation: {command:?}"
+            );
+        }
     }
 
     #[test]
@@ -1333,11 +1305,27 @@ mod tests {
     }
 
     #[test]
-    fn command_guard_still_rejects_destructive_commands_in_read_only_mode() {
-        assert!(matches!(
-            ensure_command_allowed("FLUSHALL", true),
-            Err(RedisCliError::CommandDenied(_))
-        ));
+    fn command_output_result_rejects_redis_error_replies() {
+        for output in [
+            "(error) ERR syntax error\n",
+            "ERR unknown command 'NOPE'\n",
+            "WRONGTYPE Operation against a key holding the wrong kind of value\n",
+            "NOAUTH Authentication required.\n",
+        ] {
+            assert_eq!(
+                command_output_result(output),
+                Err(RedisCliError::CommandFailed(output.trim().to_string()))
+            );
+        }
+    }
+
+    #[test]
+    fn command_output_result_accepts_regular_output() {
+        assert_eq!(command_output_result("OK\n"), Ok("OK\n".to_string()));
+        assert_eq!(
+            command_output_result("value before an error-like line\nERR data\n"),
+            Ok("value before an error-like line\nERR data\n".to_string())
+        );
     }
 
     #[test]
@@ -1347,20 +1335,6 @@ mod tests {
 
         assert!(!read_write.read_only);
         assert!(read_only.read_only);
-    }
-
-    #[tokio::test]
-    async fn typed_write_methods_are_denied_in_read_only_mode() {
-        let cli = RedisCliSubprocess::with_read_only("redis://localhost", true).unwrap();
-
-        for result in [
-            cli.delete_key("key with spaces", false).await.map(|_| ()),
-            cli.delete_key("key with spaces", true).await.map(|_| ()),
-            cli.set_expire("key with spaces", 60).await.map(|_| ()),
-            cli.persist_key("key with spaces").await.map(|_| ()),
-        ] {
-            assert!(matches!(result, Err(RedisCliError::CommandDenied(_))));
-        }
     }
 
     #[tokio::test]
