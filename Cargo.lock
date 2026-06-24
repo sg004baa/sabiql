@@ -2267,7 +2267,7 @@ dependencies = [
  "bitflags 2.13.0",
  "compact_str",
  "critical-section",
- "hashbrown 0.17.0",
+ "hashbrown 0.17.1",
  "itertools",
  "kasuari",
  "lru 0.18.0",
