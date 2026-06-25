@@ -131,8 +131,7 @@ fn render_keys(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         format!("No keys match pattern {}", state.search_pattern)
     };
     let selected_style = Style::default()
-        .bg(theme.component.table.result_row_active_bg)
-        .fg(theme.semantic.text.primary)
+        .fg(theme.semantic.text.accent)
         .add_modifier(Modifier::BOLD);
 
     render_striped_table(
@@ -156,13 +155,15 @@ fn render_keys(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             else {
                 return vec![Cell::from(""), Cell::from("")];
             };
-            let style = if index == state.selected_index {
+            let is_selected = index == state.selected_index;
+            let style = if is_selected {
                 selected_style
             } else {
                 Style::default().fg(theme.semantic.text.primary)
             };
+            let marker = if is_selected { "> " } else { "  " };
             vec![
-                Cell::from(redis_key.key.clone()).style(style),
+                Cell::from(format!("{marker}{}", redis_key.key)).style(style),
                 Cell::from(redis_key.kind.to_string()).style(style),
             ]
         },
@@ -947,7 +948,7 @@ mod tests {
         let rendered = render_to_string(&state);
 
         assert!(rendered.contains("search /user:*"));
-        assert!(rendered.contains("user:1"));
+        assert!(rendered.contains("> user:1"));
         assert!(!rendered.contains("session:1"));
         assert!(rendered.contains("1/2 scanned keys"));
     }
