@@ -705,10 +705,10 @@ mod tests {
         let rendered = render_to_string_with_size(&state, width, height);
         let lines = rendered.lines().collect::<Vec<_>>();
 
-        assert_eq!(lines[1].chars().nth(0), Some(' '));
+        assert_eq!(lines[1].chars().next(), Some(' '));
         assert!(lines[1].contains("key"));
         assert!(lines[1].contains("type"));
-        assert_eq!(lines[2].chars().nth(0), Some(' '));
+        assert_eq!(lines[2].chars().next(), Some(' '));
         assert_eq!(
             lines[2].chars().nth(KEY_PANE_LEFT_PADDING as usize),
             Some('─')
