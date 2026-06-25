@@ -306,6 +306,245 @@ const READ_ONLY_COMMANDS: &[&str] = &[
     "PFCOUNT",
 ];
 
+static REDIS_COMMANDS: &[&str] = &[
+    "ACL",
+    "APPEND",
+    "AUTH",
+    "BGREWRITEAOF",
+    "BGSAVE",
+    "BITCOUNT",
+    "BITFIELD",
+    "BITFIELD_RO",
+    "BITOP",
+    "BITPOS",
+    "BLMOVE",
+    "BLPOP",
+    "BRPOP",
+    "BRPOPLPUSH",
+    "BZMPOP",
+    "BZPOPMAX",
+    "BZPOPMIN",
+    "CLIENT",
+    "CLUSTER",
+    "COMMAND",
+    "CONFIG",
+    "COPY",
+    "DBSIZE",
+    "DEBUG",
+    "DECR",
+    "DECRBY",
+    "DEL",
+    "DISCARD",
+    "DUMP",
+    "ECHO",
+    "EVAL",
+    "EVALSHA",
+    "EXEC",
+    "EXISTS",
+    "EXPIRE",
+    "EXPIREAT",
+    "EXPIRETIME",
+    "FAILOVER",
+    "FLUSHALL",
+    "FLUSHDB",
+    "GEOADD",
+    "GEODIST",
+    "GEOHASH",
+    "GEOPOS",
+    "GEORADIUS",
+    "GEORADIUSBYMEMBER",
+    "GEOSEARCH",
+    "GEOSEARCHSTORE",
+    "GET",
+    "GETBIT",
+    "GETDEL",
+    "GETEX",
+    "GETRANGE",
+    "GETSET",
+    "HDEL",
+    "HELLO",
+    "HEXISTS",
+    "HEXPIRE",
+    "HEXPIREAT",
+    "HEXPIRETIME",
+    "HGET",
+    "HGETALL",
+    "HINCRBY",
+    "HINCRBYFLOAT",
+    "HKEYS",
+    "HLEN",
+    "HMGET",
+    "HMSET",
+    "HPERSIST",
+    "HPEXPIRE",
+    "HPEXPIREAT",
+    "HPEXPIRETIME",
+    "HPTTL",
+    "HRANDFIELD",
+    "HSCAN",
+    "HSET",
+    "HSETNX",
+    "HSTRLEN",
+    "HTTL",
+    "HVALS",
+    "INCR",
+    "INCRBY",
+    "INCRBYFLOAT",
+    "INFO",
+    "KEYS",
+    "LASTSAVE",
+    "LINDEX",
+    "LINSERT",
+    "LLEN",
+    "LMOVE",
+    "LOLWUT",
+    "LPOP",
+    "LPOS",
+    "LPUSH",
+    "LPUSHX",
+    "LRANGE",
+    "LREM",
+    "LSET",
+    "LTRIM",
+    "MEMORY",
+    "MGET",
+    "MIGRATE",
+    "MONITOR",
+    "MOVE",
+    "MSET",
+    "MSETNX",
+    "MULTI",
+    "OBJECT",
+    "PERSIST",
+    "PEXPIRE",
+    "PEXPIREAT",
+    "PEXPIRETIME",
+    "PFADD",
+    "PFCOUNT",
+    "PFMERGE",
+    "PING",
+    "PTTL",
+    "PUBLISH",
+    "PUBSUB",
+    "RANDOMKEY",
+    "READONLY",
+    "READWRITE",
+    "RENAME",
+    "RENAMENX",
+    "REPLICAOF",
+    "RESTORE",
+    "ROLE",
+    "RPOP",
+    "RPOPLPUSH",
+    "RPUSH",
+    "RPUSHX",
+    "SADD",
+    "SAVE",
+    "SCAN",
+    "SCARD",
+    "SDIFF",
+    "SDIFFSTORE",
+    "SELECT",
+    "SET",
+    "SETBIT",
+    "SETEX",
+    "SETNX",
+    "SETRANGE",
+    "SHUTDOWN",
+    "SINTER",
+    "SINTERCARD",
+    "SINTERSTORE",
+    "SISMEMBER",
+    "SLAVEOF",
+    "SMEMBERS",
+    "SMISMEMBER",
+    "SMOVE",
+    "SORT",
+    "SORT_RO",
+    "SPOP",
+    "SRANDMEMBER",
+    "SREM",
+    "SSCAN",
+    "STRLEN",
+    "SUBSCRIBE",
+    "SUBSTR",
+    "SUNION",
+    "SUNIONSTORE",
+    "SWAPDB",
+    "TIME",
+    "TOUCH",
+    "TTL",
+    "TYPE",
+    "UNLINK",
+    "UNSUBSCRIBE",
+    "UNWATCH",
+    "WAIT",
+    "WATCH",
+    "XACK",
+    "XADD",
+    "XAUTOCLAIM",
+    "XCLAIM",
+    "XDEL",
+    "XGROUP",
+    "XINFO",
+    "XLEN",
+    "XPENDING",
+    "XRANGE",
+    "XREAD",
+    "XREADGROUP",
+    "XREVRANGE",
+    "XTRIM",
+    "ZADD",
+    "ZCARD",
+    "ZCOUNT",
+    "ZDIFF",
+    "ZDIFFSTORE",
+    "ZINCRBY",
+    "ZINTER",
+    "ZINTERCARD",
+    "ZINTERSTORE",
+    "ZLEXCOUNT",
+    "ZMPOP",
+    "ZMSCORE",
+    "ZPOPMAX",
+    "ZPOPMIN",
+    "ZRANDMEMBER",
+    "ZRANGE",
+    "ZRANGEBYLEX",
+    "ZRANGEBYSCORE",
+    "ZRANGESTORE",
+    "ZRANK",
+    "ZREM",
+    "ZREMRANGEBYLEX",
+    "ZREMRANGEBYRANK",
+    "ZREMRANGEBYSCORE",
+    "ZREVRANGE",
+    "ZREVRANGEBYLEX",
+    "ZREVRANGEBYSCORE",
+    "ZREVRANK",
+    "ZSCAN",
+    "ZSCORE",
+    "ZUNION",
+    "ZUNIONSTORE",
+];
+
+pub fn complete_command(prefix: &str) -> Vec<String> {
+    if prefix.is_empty() {
+        return Vec::new();
+    }
+
+    let prefix = prefix.to_ascii_uppercase();
+    let mut candidates = REDIS_COMMANDS
+        .iter()
+        .copied()
+        .filter(|command| command.starts_with(&prefix))
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    candidates.sort_unstable();
+    candidates.dedup();
+    candidates
+}
+
 pub fn ensure_command_allowed(command: &str, read_only: bool) -> Result<(), RedisCliError> {
     command_requires_confirmation(command, read_only).map(|_| ())
 }
@@ -1203,6 +1442,45 @@ mod tests {
         let path = unique_csv_path(dir.path(), "user_1");
 
         assert_eq!(path, dir.path().join("user_1-1.csv"));
+    }
+
+    #[test]
+    fn command_completion_matches_prefix() {
+        assert_eq!(complete_command("GETR"), vec!["GETRANGE".to_string()]);
+    }
+
+    #[test]
+    fn command_completion_is_case_insensitive() {
+        assert_eq!(
+            complete_command("hget"),
+            vec!["HGET".to_string(), "HGETALL".to_string()]
+        );
+    }
+
+    #[test]
+    fn command_completion_returns_sorted_output() {
+        let candidates = complete_command("Z");
+
+        assert!(
+            candidates
+                .windows(2)
+                .all(|pair| pair[0].as_str() <= pair[1].as_str())
+        );
+    }
+
+    #[test]
+    fn command_completion_returns_no_candidates_for_empty_prefix() {
+        assert!(complete_command("").is_empty());
+    }
+
+    #[test]
+    fn redis_commands_include_every_read_only_command() {
+        for command in READ_ONLY_COMMANDS {
+            assert!(
+                REDIS_COMMANDS.contains(command),
+                "missing read-only command from completion list: {command}"
+            );
+        }
     }
 
     #[test]

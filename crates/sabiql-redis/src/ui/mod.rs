@@ -497,6 +497,7 @@ fn render_command_modal(frame: &mut Frame<'_>, state: &AppState) {
     render_command_input(frame, chunks[0], state);
     render_command_status(frame, chunks[1], state);
     render_command_output(frame, chunks[2], state);
+    render_command_completion(frame, chunks[0], inner, state);
 }
 
 fn render_command_input(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
@@ -524,6 +525,80 @@ fn render_command_input(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     )];
     spans.extend(cursor_spans);
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+fn render_command_completion(
+    frame: &mut Frame<'_>,
+    input_area: Rect,
+    modal_inner: Rect,
+    state: &AppState,
+) {
+    let completion = &state.command_modal.completion;
+    if !completion.visible || completion.candidates.is_empty() {
+        return;
+    }
+
+    let popup_y = input_area.y.saturating_add(input_area.height);
+    let modal_bottom = modal_inner.y.saturating_add(modal_inner.height);
+    let available_height = modal_bottom.saturating_sub(popup_y);
+    if available_height < 3 {
+        return;
+    }
+
+    let visible_rows = completion
+        .candidates
+        .len()
+        .min(6)
+        .min(usize::from(available_height.saturating_sub(2)));
+    if visible_rows == 0 {
+        return;
+    }
+
+    let theme = DEFAULT_THEME;
+    let popup_area = Rect {
+        x: input_area.x,
+        y: popup_y,
+        width: input_area.width,
+        height: (visible_rows as u16)
+            .saturating_add(2)
+            .min(available_height),
+    };
+    let selected = completion.selected.min(completion.candidates.len() - 1);
+    let scroll_offset = selected.saturating_sub(visible_rows.saturating_sub(1));
+    let selected_style = Style::default()
+        .bg(theme.component.table.result_row_active_bg)
+        .fg(theme.semantic.text.primary)
+        .add_modifier(Modifier::BOLD);
+    let headers = ["command"];
+    let widths = [Constraint::Min(10)];
+
+    render_striped_table(
+        frame,
+        popup_area,
+        &StripedTableConfig {
+            headers: &headers,
+            widths: &widths,
+            header_bottom_margin: 0,
+            header_separator: false,
+            total_items: completion.candidates.len(),
+            empty_message: "",
+        },
+        scroll_offset,
+        &theme,
+        |index| {
+            let style = if index == selected {
+                selected_style
+            } else {
+                Style::default().fg(theme.semantic.text.primary)
+            };
+            let candidate = completion
+                .candidates
+                .get(index)
+                .cloned()
+                .unwrap_or_default();
+            vec![Cell::from(candidate).style(style)]
+        },
+    );
 }
 
 fn render_command_status(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
@@ -814,6 +889,27 @@ mod tests {
 
         assert!(rendered.contains("OK"));
         assert!(rendered.contains("PONG"));
+    }
+
+    #[test]
+    fn command_modal_shows_completion_candidates() {
+        let mut state = AppState::new("redis://localhost");
+        state.command_modal.is_open = true;
+        state.command_modal.input = "GET".to_string();
+        state.command_modal.cursor = 3;
+        state.command_modal.completion.candidates = vec![
+            "GET".to_string(),
+            "GETBIT".to_string(),
+            "GETRANGE".to_string(),
+        ];
+        state.command_modal.completion.selected = 1;
+        state.command_modal.completion.visible = true;
+
+        let rendered = render_to_string(&state);
+
+        assert!(rendered.contains("command"));
+        assert!(rendered.contains("GETBIT"));
+        assert!(rendered.contains("GETRANGE"));
     }
 
     #[test]
