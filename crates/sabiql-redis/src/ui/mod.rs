@@ -2,7 +2,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Cell, Paragraph, Wrap};
+use ratatui::widgets::{Cell, Clear, Paragraph, Wrap};
 use sabiql_tui_kit::primitives::atoms::text_cursor_spans;
 use sabiql_tui_kit::primitives::molecules::{
     StripedTableConfig, hint_line, render_modal, render_striped_table,
@@ -572,6 +572,9 @@ fn render_command_completion(
     let headers = ["command"];
     let widths = [Constraint::Min(10)];
 
+    // Paint an opaque background so the underlying output placeholder does not
+    // bleed through the completion popup.
+    frame.render_widget(Clear, popup_area);
     render_striped_table(
         frame,
         popup_area,

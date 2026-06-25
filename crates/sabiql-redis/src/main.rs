@@ -226,7 +226,9 @@ fn handle_modal_key(combo: KeyCombo) -> Option<Action> {
         combo if combo == KeyCombo::plain(Key::Up) => Some(Action::CommandHistoryPrev),
         combo if combo == KeyCombo::plain(Key::Down) => Some(Action::CommandHistoryNext),
         combo if combo == KeyCombo::plain(Key::Tab) => Some(Action::CommandCompleteNext),
-        combo if combo == KeyCombo::plain(Key::BackTab) => Some(Action::CommandCompletePrev),
+        // Shift+Tab arrives as BackTab carrying the SHIFT modifier, so match the
+        // key regardless of modifiers rather than only the bare combo.
+        combo if combo.key == Key::BackTab => Some(Action::CommandCompletePrev),
         KeyCombo {
             key: Key::Char(c), ..
         } => Some(Action::CommandInput(c)),
@@ -548,6 +550,10 @@ mod tests {
         );
         assert_eq!(
             handle_event(InputEvent::Key(KeyCombo::plain(Key::BackTab)), &state),
+            Some(Action::CommandCompletePrev)
+        );
+        assert_eq!(
+            handle_event(InputEvent::Key(KeyCombo::shift(Key::BackTab)), &state),
             Some(Action::CommandCompletePrev)
         );
         assert_eq!(
