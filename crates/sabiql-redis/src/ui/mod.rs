@@ -15,6 +15,9 @@ use crate::app::{
 };
 use crate::domain::{RedisValue, redis_string_display_value, redis_value_table};
 
+const KEY_PANE_LEFT_PADDING: u16 = 1;
+const VALUE_PANE_WIDTH: u16 = 96;
+
 pub fn render(frame: &mut Frame<'_>, state: &AppState) {
     let area = frame.area();
     let vertical = Layout::vertical([
@@ -26,7 +29,7 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
     let body = Layout::horizontal([
         Constraint::Min(40),
         Constraint::Length(1),
-        Constraint::Length(108),
+        Constraint::Length(VALUE_PANE_WIDTH),
     ])
     .split(vertical[1]);
 
@@ -113,6 +116,11 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
 
 fn render_keys(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let theme = DEFAULT_THEME;
+    let area = Rect {
+        x: area.x.saturating_add(KEY_PANE_LEFT_PADDING),
+        width: area.width.saturating_sub(KEY_PANE_LEFT_PADDING),
+        ..area
+    };
     let headers = ["key", "type"];
     let widths = [Constraint::Min(10), Constraint::Length(10)];
     let empty_message = if state.keys.is_empty() {
@@ -133,6 +141,8 @@ fn render_keys(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         &StripedTableConfig {
             headers: &headers,
             widths: &widths,
+            header_bottom_margin: 1,
+            header_separator: true,
             total_items: state.filtered_indices.len(),
             empty_message: empty_message.as_str(),
         },
@@ -234,6 +244,8 @@ fn render_value_table(frame: &mut Frame<'_>, area: Rect, value: &RedisValue, off
         &StripedTableConfig {
             headers: &table.headers,
             widths: &widths,
+            header_bottom_margin: 0,
+            header_separator: false,
             total_items: table.rows.len(),
             empty_message: "No value rows",
         },
@@ -362,6 +374,8 @@ fn render_db_overlay(frame: &mut Frame<'_>, overlay: &DbOverlayState) {
         &StripedTableConfig {
             headers: &headers,
             widths: &widths,
+            header_bottom_margin: 0,
+            header_separator: false,
             total_items: overlay.entries.len(),
             empty_message: if overlay.loading {
                 "Loading..."
@@ -582,16 +596,21 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
+    use ratatui::style::Modifier;
 
     fn render_to_string(state: &AppState) -> String {
         render_to_string_with_size(state, 120, 24)
     }
 
     fn render_to_string_with_size(state: &AppState, width: u16, height: u16) -> String {
+        buffer_to_string(&render_buffer_with_size(state, width, height))
+    }
+
+    fn render_buffer_with_size(state: &AppState, width: u16, height: u16) -> Buffer {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| render(frame, state)).unwrap();
-        buffer_to_string(terminal.backend().buffer())
+        terminal.backend().buffer().clone()
     }
 
     fn buffer_to_string(buffer: &Buffer) -> String {
@@ -665,13 +684,56 @@ mod tests {
         let state = AppState::new("redis://localhost");
         let width = 160;
         let height = 12;
-        let divider_x = width - 108 - 1;
+        let divider_x = (width - VALUE_PANE_WIDTH - 1) as usize;
 
         let rendered = render_to_string_with_size(&state, width, height);
         let lines = rendered.lines().collect::<Vec<_>>();
 
         for line in &lines[1..height as usize - 1] {
-            assert_eq!(line.chars().nth(divider_x as usize), Some('│'));
+            assert_eq!(line.chars().nth(divider_x), Some('│'));
+        }
+    }
+
+    #[test]
+    fn key_list_keeps_header_text_separator_and_rows_separate() {
+        let mut state = AppState::new("redis://localhost");
+        state.keys = vec![crate::domain::RedisKey::unknown("user:1")];
+        state.filtered_indices = vec![0];
+        let width = 160;
+        let height = 12;
+
+        let rendered = render_to_string_with_size(&state, width, height);
+        let lines = rendered.lines().collect::<Vec<_>>();
+
+        assert_eq!(lines[1].chars().next(), Some(' '));
+        assert!(lines[1].contains("key"));
+        assert!(lines[1].contains("type"));
+        assert_eq!(lines[2].chars().next(), Some(' '));
+        assert_eq!(
+            lines[2].chars().nth(KEY_PANE_LEFT_PADDING as usize),
+            Some('─')
+        );
+        assert!(!lines[2].contains("user:1"));
+        assert!(lines[3].contains("user:1"));
+    }
+
+    #[test]
+    fn key_list_header_uses_separate_separator_line() {
+        let mut state = AppState::new("redis://localhost");
+        state.keys = vec![crate::domain::RedisKey::unknown("user:1")];
+        state.filtered_indices = vec![0];
+
+        let buffer = render_buffer_with_size(&state, 160, 12);
+        let rendered = buffer_to_string(&buffer);
+        let header = rendered.lines().nth(1).unwrap_or_default();
+        let separator = rendered.lines().nth(2).unwrap_or_default();
+        let type_start = header.find("type").unwrap();
+        let type_end = type_start + "type".len();
+
+        assert_eq!(separator.chars().nth(type_start), Some('─'));
+        for x in type_start..type_end {
+            let cell = buffer.cell((x as u16, 1)).unwrap();
+            assert!(!cell.modifier.contains(Modifier::UNDERLINED));
         }
     }
 

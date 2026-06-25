@@ -11,6 +11,8 @@ use crate::theme::ThemePalette;
 pub struct StripedTableConfig<'b> {
     pub headers: &'b [&'b str],
     pub widths: &'b [Constraint],
+    pub header_bottom_margin: u16,
+    pub header_separator: bool,
     pub total_items: usize,
     pub empty_message: &'b str,
 }
@@ -28,17 +30,21 @@ pub fn render_striped_table<'a>(
         return;
     }
 
-    let header = Row::new(config.headers.iter().map(|&h| Cell::from(h)))
-        .style(
-            Style::default()
-                .add_modifier(Modifier::BOLD)
-                .add_modifier(Modifier::UNDERLINED)
-                .fg(theme.semantic.text.primary),
-        )
-        .height(1);
+    let mut header_style = Style::default()
+        .add_modifier(Modifier::BOLD)
+        .fg(theme.semantic.text.primary);
+    if !config.header_separator {
+        header_style = header_style.add_modifier(Modifier::UNDERLINED);
+    }
 
-    // -2: header (1) + scroll indicator (1)
-    let visible_rows = area.height.saturating_sub(2) as usize;
+    let header = Row::new(config.headers.iter().map(|&h| Cell::from(h)))
+        .style(header_style)
+        .height(1)
+        .bottom_margin(config.header_bottom_margin);
+
+    // Header (1) + optional header margin + scroll indicator (1).
+    let reserved_rows = 2u16.saturating_add(config.header_bottom_margin);
+    let visible_rows = area.height.saturating_sub(reserved_rows) as usize;
     let clamped_scroll_offset =
         clamp_scroll_offset(scroll_offset, visible_rows, config.total_items);
 
@@ -59,6 +65,21 @@ pub fn render_striped_table<'a>(
         .header(header)
         .style(Style::default().fg(theme.semantic.text.primary));
     frame.render_widget(table_widget, area);
+
+    if config.header_separator && area.height > 1 {
+        let separator = "─".repeat(area.width as usize);
+        let separator_area = Rect {
+            x: area.x,
+            y: area.y + 1,
+            width: area.width,
+            height: 1,
+        };
+        frame.render_widget(
+            Paragraph::new(separator)
+                .style(Style::default().fg(theme.semantic.surface.unfocus_border)),
+            separator_area,
+        );
+    }
 
     render_vertical_scroll_indicator_bar(
         frame,
