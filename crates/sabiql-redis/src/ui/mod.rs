@@ -502,14 +502,19 @@ fn render_command_modal(frame: &mut Frame<'_>, state: &AppState) {
 fn render_command_input(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let theme = DEFAULT_THEME;
     let prompt = "> ";
+    let cursor = state
+        .command_modal
+        .cursor
+        .min(state.command_modal.input.chars().count());
     let visible_width = area
         .width
         .saturating_sub(prompt.len() as u16)
         .saturating_sub(1) as usize;
+    let viewport = cursor.saturating_sub(visible_width.saturating_sub(1));
     let cursor_spans = text_cursor_spans(
         &state.command_modal.input,
-        state.command_modal.input.chars().count(),
-        0,
+        cursor,
+        viewport,
         visible_width,
         &theme,
     );
