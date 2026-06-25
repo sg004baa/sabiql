@@ -455,6 +455,8 @@ impl Inspector {
             &StripedTableConfig {
                 headers: &headers,
                 widths: &widths,
+                header_bottom_margin: 0,
+                header_separator: false,
                 total_items: table.indexes.len(),
                 empty_message: "No indexes",
             },
@@ -508,6 +510,8 @@ impl Inspector {
             &StripedTableConfig {
                 headers: &headers,
                 widths: &widths,
+                header_bottom_margin: 0,
+                header_separator: false,
                 total_items: table.foreign_keys.len(),
                 empty_message: "No foreign keys",
             },
@@ -646,6 +650,8 @@ impl Inspector {
             &StripedTableConfig {
                 headers: &headers,
                 widths: &widths,
+                header_bottom_margin: 0,
+                header_separator: false,
                 total_items: table.triggers.len(),
                 empty_message: "No triggers",
             },
