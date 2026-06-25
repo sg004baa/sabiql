@@ -106,6 +106,7 @@ fn handle_event(event: InputEvent, state: &AppState) -> Option<Action> {
             handle_connection_form_key(combo)
         }
         InputEvent::Key(combo) if state.db_overlay.is_some() => handle_db_overlay_key(combo),
+        InputEvent::Paste(text) if state.command_modal.is_open => Some(Action::CommandPaste(text)),
         InputEvent::Key(combo) if state.command_modal.is_open => handle_modal_key(combo),
         InputEvent::Key(combo) if state.filter_active => handle_filter_key(combo),
         InputEvent::Resize(width, height) => Some(Action::Resize(width, height)),
@@ -220,6 +221,8 @@ fn handle_modal_key(combo: KeyCombo) -> Option<Action> {
         combo if combo == KeyCombo::plain(Key::Enter) => Some(Action::SubmitCommand),
         combo if combo == KeyCombo::plain(Key::Esc) => Some(Action::CloseCommandModal),
         combo if combo == KeyCombo::plain(Key::Backspace) => Some(Action::CommandBackspace),
+        combo if combo == KeyCombo::plain(Key::Left) => Some(Action::CommandCursorLeft),
+        combo if combo == KeyCombo::plain(Key::Right) => Some(Action::CommandCursorRight),
         combo if combo == KeyCombo::plain(Key::Up) => Some(Action::CommandHistoryPrev),
         combo if combo == KeyCombo::plain(Key::Down) => Some(Action::CommandHistoryNext),
         KeyCombo {
@@ -509,7 +512,7 @@ mod tests {
     }
 
     #[test]
-    fn modal_routes_enter_backspace_and_escape() {
+    fn modal_routes_editing_navigation_submit_and_escape() {
         let mut state = AppState::new("redis://localhost");
         state.command_modal.is_open = true;
 
@@ -520,6 +523,14 @@ mod tests {
         assert_eq!(
             handle_event(InputEvent::Key(KeyCombo::plain(Key::Backspace)), &state),
             Some(Action::CommandBackspace)
+        );
+        assert_eq!(
+            handle_event(InputEvent::Key(KeyCombo::plain(Key::Left)), &state),
+            Some(Action::CommandCursorLeft)
+        );
+        assert_eq!(
+            handle_event(InputEvent::Key(KeyCombo::plain(Key::Right)), &state),
+            Some(Action::CommandCursorRight)
         );
         assert_eq!(
             handle_event(InputEvent::Key(KeyCombo::plain(Key::Up)), &state),
@@ -533,6 +544,16 @@ mod tests {
             handle_event(InputEvent::Key(KeyCombo::plain(Key::Esc)), &state),
             Some(Action::CloseCommandModal)
         );
+    }
+
+    #[test]
+    fn modal_routes_paste_to_command_paste() {
+        let mut state = AppState::new("redis://localhost");
+        state.command_modal.is_open = true;
+
+        let action = handle_event(InputEvent::Paste("PING".to_string()), &state);
+
+        assert_eq!(action, Some(Action::CommandPaste("PING".to_string())));
     }
 
     #[test]

@@ -50,6 +50,7 @@ pub enum CommandStatus {
 pub struct CommandModalState {
     pub is_open: bool,
     pub input: String,
+    pub cursor: usize,
     pub status: CommandStatus,
     pub history: Vec<String>,
     pub history_cursor: Option<usize>,
@@ -61,6 +62,7 @@ impl CommandModalState {
         Self {
             is_open: false,
             input: String::new(),
+            cursor: 0,
             status: CommandStatus::Idle,
             history: Vec::new(),
             history_cursor: None,
@@ -207,6 +209,9 @@ pub enum Action {
     },
     CommandInput(char),
     CommandBackspace,
+    CommandCursorLeft,
+    CommandCursorRight,
+    CommandPaste(String),
     CommandHistoryPrev,
     CommandHistoryNext,
     SubmitCommand,
@@ -421,6 +426,7 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             }
             state.command_modal.is_open = true;
             state.command_modal.input.clear();
+            state.command_modal.cursor = 0;
             state.command_modal.status = CommandStatus::Idle;
             reset_command_history_navigation(&mut state.command_modal);
             Vec::new()
@@ -546,7 +552,7 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
                 && !matches!(state.command_modal.status, CommandStatus::Running)
             {
                 reset_command_history_navigation(&mut state.command_modal);
-                state.command_modal.input.push(ch);
+                insert_command_modal_char(&mut state.command_modal, ch);
             }
             Vec::new()
         }
@@ -555,7 +561,40 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
                 && !matches!(state.command_modal.status, CommandStatus::Running)
             {
                 reset_command_history_navigation(&mut state.command_modal);
-                state.command_modal.input.pop();
+                backspace_command_modal_char(&mut state.command_modal);
+            }
+            Vec::new()
+        }
+        Action::CommandCursorLeft => {
+            if state.command_modal.is_open
+                && !matches!(state.command_modal.status, CommandStatus::Running)
+            {
+                let char_count = state.command_modal.input.chars().count();
+                state.command_modal.cursor =
+                    state.command_modal.cursor.min(char_count).saturating_sub(1);
+            }
+            Vec::new()
+        }
+        Action::CommandCursorRight => {
+            if state.command_modal.is_open
+                && !matches!(state.command_modal.status, CommandStatus::Running)
+            {
+                let char_count = state.command_modal.input.chars().count();
+                state.command_modal.cursor = state
+                    .command_modal
+                    .cursor
+                    .min(char_count)
+                    .saturating_add(1)
+                    .min(char_count);
+            }
+            Vec::new()
+        }
+        Action::CommandPaste(text) => {
+            if state.command_modal.is_open
+                && !matches!(state.command_modal.status, CommandStatus::Running)
+            {
+                reset_command_history_navigation(&mut state.command_modal);
+                insert_command_modal_text(&mut state.command_modal, &text);
             }
             Vec::new()
         }
@@ -609,6 +648,7 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
         }
         Action::CommandSucceeded { output } => {
             state.command_modal.input.clear();
+            state.command_modal.cursor = 0;
             state.command_modal.status = CommandStatus::Success(output);
             vec![Effect::Connect {
                 dsn: state.dsn.clone(),
@@ -723,6 +763,7 @@ fn select_previous_command_history(modal: &mut CommandModalState) {
     };
     modal.history_cursor = Some(index);
     modal.input.clone_from(&modal.history[index]);
+    modal.cursor = modal.input.chars().count();
 }
 
 fn select_next_command_history(modal: &mut CommandModalState) {
@@ -734,9 +775,11 @@ fn select_next_command_history(modal: &mut CommandModalState) {
         let next_index = index + 1;
         modal.history_cursor = Some(next_index);
         modal.input.clone_from(&modal.history[next_index]);
+        modal.cursor = modal.input.chars().count();
     } else {
         modal.history_cursor = None;
         modal.input.clone_from(&modal.history_draft);
+        modal.cursor = modal.input.chars().count();
         modal.history_draft.clear();
     }
 }
@@ -744,6 +787,33 @@ fn select_next_command_history(modal: &mut CommandModalState) {
 fn reset_command_history_navigation(modal: &mut CommandModalState) {
     modal.history_cursor = None;
     modal.history_draft.clear();
+}
+
+fn insert_command_modal_char(modal: &mut CommandModalState, ch: char) {
+    let cursor = modal.cursor.min(modal.input.chars().count());
+    let byte_index = byte_index_at_char(&modal.input, cursor);
+    modal.input.insert(byte_index, ch);
+    modal.cursor = cursor + 1;
+}
+
+fn backspace_command_modal_char(modal: &mut CommandModalState) {
+    let cursor = modal.cursor.min(modal.input.chars().count());
+    if cursor == 0 {
+        modal.cursor = 0;
+        return;
+    }
+
+    let start = byte_index_at_char(&modal.input, cursor - 1);
+    let end = byte_index_at_char(&modal.input, cursor);
+    modal.input.replace_range(start..end, "");
+    modal.cursor = cursor - 1;
+}
+
+fn insert_command_modal_text(modal: &mut CommandModalState, text: &str) {
+    let cursor = modal.cursor.min(modal.input.chars().count());
+    let byte_index = byte_index_at_char(&modal.input, cursor);
+    modal.input.insert_str(byte_index, text);
+    modal.cursor = cursor + text.chars().count();
 }
 
 fn insert_connection_form_char(form: &mut ConnectionFormState, ch: char) {
@@ -1539,18 +1609,73 @@ mod tests {
             assert!(reduce(&mut state, Action::OpenCommandModal).is_empty());
             assert!(state.command_modal.is_open);
             assert_eq!(state.command_modal.input, "");
+            assert_eq!(state.command_modal.cursor, 0);
             assert_eq!(state.command_modal.status, CommandStatus::Idle);
 
             assert!(reduce(&mut state, Action::CommandInput('s')).is_empty());
             assert!(reduce(&mut state, Action::CommandInput('e')).is_empty());
             assert!(reduce(&mut state, Action::CommandInput('t')).is_empty());
             assert_eq!(state.command_modal.input, "set");
+            assert_eq!(state.command_modal.cursor, 3);
 
             assert!(reduce(&mut state, Action::CommandBackspace).is_empty());
             assert_eq!(state.command_modal.input, "se");
+            assert_eq!(state.command_modal.cursor, 2);
 
             assert!(reduce(&mut state, Action::CloseCommandModal).is_empty());
             assert!(!state.command_modal.is_open);
+        }
+
+        #[test]
+        fn command_modal_edits_at_cursor_position() {
+            let mut state = AppState::new("redis://localhost");
+            state.command_modal.is_open = true;
+            state.command_modal.input = "abcd".to_string();
+            state.command_modal.cursor = 2;
+
+            assert!(reduce(&mut state, Action::CommandInput('X')).is_empty());
+            assert_eq!(state.command_modal.input, "abXcd");
+            assert_eq!(state.command_modal.cursor, 3);
+
+            assert!(reduce(&mut state, Action::CommandBackspace).is_empty());
+            assert_eq!(state.command_modal.input, "abcd");
+            assert_eq!(state.command_modal.cursor, 2);
+        }
+
+        #[test]
+        fn command_modal_cursor_left_and_right_clamp_at_bounds() {
+            let mut state = AppState::new("redis://localhost");
+            state.command_modal.is_open = true;
+            state.command_modal.input = "abc".to_string();
+            state.command_modal.cursor = 0;
+
+            assert!(reduce(&mut state, Action::CommandCursorLeft).is_empty());
+            assert_eq!(state.command_modal.cursor, 0);
+
+            assert!(reduce(&mut state, Action::CommandCursorRight).is_empty());
+            assert_eq!(state.command_modal.cursor, 1);
+
+            assert!(reduce(&mut state, Action::CommandCursorRight).is_empty());
+            assert!(reduce(&mut state, Action::CommandCursorRight).is_empty());
+            assert!(reduce(&mut state, Action::CommandCursorRight).is_empty());
+            assert_eq!(state.command_modal.cursor, 3);
+        }
+
+        #[test]
+        fn command_modal_paste_inserts_at_cursor_position() {
+            let mut state = AppState::new("redis://localhost");
+            state.command_modal.is_open = true;
+            state.command_modal.input = "LR".to_string();
+            state.command_modal.cursor = 1;
+            state.command_modal.history_cursor = Some(0);
+            state.command_modal.history_draft = "draft".to_string();
+
+            assert!(reduce(&mut state, Action::CommandPaste("eft".to_string())).is_empty());
+
+            assert_eq!(state.command_modal.input, "LeftR");
+            assert_eq!(state.command_modal.cursor, 4);
+            assert_eq!(state.command_modal.history_cursor, None);
+            assert_eq!(state.command_modal.history_draft, "");
         }
 
         #[test]
@@ -1769,27 +1894,33 @@ mod tests {
 
             assert!(reduce(&mut state, Action::CommandHistoryPrev).is_empty());
             assert_eq!(state.command_modal.input, "get b");
+            assert_eq!(state.command_modal.cursor, "get b".chars().count());
             assert_eq!(state.command_modal.history_cursor, Some(1));
             assert_eq!(state.command_modal.history_draft, "draft");
 
             assert!(reduce(&mut state, Action::CommandHistoryPrev).is_empty());
             assert_eq!(state.command_modal.input, "get a");
+            assert_eq!(state.command_modal.cursor, "get a".chars().count());
             assert_eq!(state.command_modal.history_cursor, Some(0));
 
             assert!(reduce(&mut state, Action::CommandHistoryPrev).is_empty());
             assert_eq!(state.command_modal.input, "get a");
+            assert_eq!(state.command_modal.cursor, "get a".chars().count());
             assert_eq!(state.command_modal.history_cursor, Some(0));
 
             assert!(reduce(&mut state, Action::CommandHistoryNext).is_empty());
             assert_eq!(state.command_modal.input, "get b");
+            assert_eq!(state.command_modal.cursor, "get b".chars().count());
             assert_eq!(state.command_modal.history_cursor, Some(1));
 
             assert!(reduce(&mut state, Action::CommandHistoryNext).is_empty());
             assert_eq!(state.command_modal.input, "draft");
+            assert_eq!(state.command_modal.cursor, "draft".chars().count());
             assert_eq!(state.command_modal.history_cursor, None);
 
             assert!(reduce(&mut state, Action::CommandHistoryNext).is_empty());
             assert_eq!(state.command_modal.input, "draft");
+            assert_eq!(state.command_modal.cursor, "draft".chars().count());
             assert_eq!(state.command_modal.history_cursor, None);
         }
 
@@ -1910,6 +2041,7 @@ mod tests {
             let mut state = AppState::new("redis://localhost");
             state.command_modal.is_open = true;
             state.command_modal.input = "set k v".to_string();
+            state.command_modal.cursor = "set k v".chars().count();
             state.command_modal.status = CommandStatus::Running;
 
             let effects = reduce(
@@ -1920,6 +2052,7 @@ mod tests {
             );
 
             assert_eq!(state.command_modal.input, "");
+            assert_eq!(state.command_modal.cursor, 0);
             assert_eq!(
                 state.command_modal.status,
                 CommandStatus::Success("OK\n".to_string())
