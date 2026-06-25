@@ -8,7 +8,9 @@ use tokio::sync::{RwLock, mpsc};
 use crate::domain::{
     RedisKey, RedisKind, RedisValue, redis_string_display_value, redis_value_table,
 };
-use crate::infra::{RedisCli, RedisCliFactory, RedisDsn, command_requires_confirmation};
+use crate::infra::{
+    RedisCli, RedisCliFactory, RedisDsn, command_requires_confirmation, complete_command,
+};
 
 const DEFAULT_TABLE_VISIBLE_ROWS: usize = 20;
 
@@ -55,6 +57,14 @@ pub struct CommandModalState {
     pub history: Vec<String>,
     pub history_cursor: Option<usize>,
     pub history_draft: String,
+    pub completion: CommandCompletionState,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CommandCompletionState {
+    pub candidates: Vec<String>,
+    pub selected: usize,
+    pub visible: bool,
 }
 
 impl CommandModalState {
@@ -67,6 +77,7 @@ impl CommandModalState {
             history: Vec::new(),
             history_cursor: None,
             history_draft: String::new(),
+            completion: CommandCompletionState::default(),
         }
     }
 }
@@ -214,6 +225,8 @@ pub enum Action {
     CommandPaste(String),
     CommandHistoryPrev,
     CommandHistoryNext,
+    CommandCompleteNext,
+    CommandCompletePrev,
     SubmitCommand,
     CommandSucceeded {
         output: String,
@@ -429,11 +442,17 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             state.command_modal.cursor = 0;
             state.command_modal.status = CommandStatus::Idle;
             reset_command_history_navigation(&mut state.command_modal);
+            hide_command_completion(&mut state.command_modal);
             Vec::new()
         }
         Action::CloseCommandModal => {
+            if state.command_modal.is_open && state.command_modal.completion.visible {
+                hide_command_completion(&mut state.command_modal);
+                return Vec::new();
+            }
             state.command_modal.is_open = false;
             reset_command_history_navigation(&mut state.command_modal);
+            hide_command_completion(&mut state.command_modal);
             Vec::new()
         }
         Action::OpenConnectionForm => {
@@ -551,6 +570,7 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             if state.command_modal.is_open
                 && !matches!(state.command_modal.status, CommandStatus::Running)
             {
+                hide_command_completion(&mut state.command_modal);
                 reset_command_history_navigation(&mut state.command_modal);
                 insert_command_modal_char(&mut state.command_modal, ch);
             }
@@ -560,6 +580,7 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             if state.command_modal.is_open
                 && !matches!(state.command_modal.status, CommandStatus::Running)
             {
+                hide_command_completion(&mut state.command_modal);
                 reset_command_history_navigation(&mut state.command_modal);
                 backspace_command_modal_char(&mut state.command_modal);
             }
@@ -569,6 +590,7 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             if state.command_modal.is_open
                 && !matches!(state.command_modal.status, CommandStatus::Running)
             {
+                hide_command_completion(&mut state.command_modal);
                 let char_count = state.command_modal.input.chars().count();
                 state.command_modal.cursor =
                     state.command_modal.cursor.min(char_count).saturating_sub(1);
@@ -579,6 +601,7 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             if state.command_modal.is_open
                 && !matches!(state.command_modal.status, CommandStatus::Running)
             {
+                hide_command_completion(&mut state.command_modal);
                 let char_count = state.command_modal.input.chars().count();
                 state.command_modal.cursor = state
                     .command_modal
@@ -593,6 +616,7 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             if state.command_modal.is_open
                 && !matches!(state.command_modal.status, CommandStatus::Running)
             {
+                hide_command_completion(&mut state.command_modal);
                 reset_command_history_navigation(&mut state.command_modal);
                 insert_command_modal_text(&mut state.command_modal, &text);
             }
@@ -602,6 +626,7 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             if state.command_modal.is_open
                 && !matches!(state.command_modal.status, CommandStatus::Running)
             {
+                hide_command_completion(&mut state.command_modal);
                 select_previous_command_history(&mut state.command_modal);
             }
             Vec::new()
@@ -610,12 +635,68 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             if state.command_modal.is_open
                 && !matches!(state.command_modal.status, CommandStatus::Running)
             {
+                hide_command_completion(&mut state.command_modal);
                 select_next_command_history(&mut state.command_modal);
+            }
+            Vec::new()
+        }
+        Action::CommandCompleteNext => {
+            if !state.command_modal.is_open
+                || matches!(state.command_modal.status, CommandStatus::Running)
+            {
+                return Vec::new();
+            }
+
+            if state.command_modal.completion.visible {
+                let count = state.command_modal.completion.candidates.len();
+                if count == 0 {
+                    hide_command_completion(&mut state.command_modal);
+                } else {
+                    state.command_modal.completion.selected =
+                        (state.command_modal.completion.selected + 1) % count;
+                }
+                return Vec::new();
+            }
+
+            let prefix = first_command_token(&state.command_modal.input);
+            let candidates = complete_command(prefix);
+            match candidates.len() {
+                0 => {}
+                1 => {
+                    state.command_modal.completion.candidates = candidates;
+                    state.command_modal.completion.selected = 0;
+                    state.command_modal.completion.visible = true;
+                    accept_command_completion(&mut state.command_modal);
+                }
+                _ => {
+                    state.command_modal.completion.candidates = candidates;
+                    state.command_modal.completion.selected = 0;
+                    state.command_modal.completion.visible = true;
+                }
+            }
+            Vec::new()
+        }
+        Action::CommandCompletePrev => {
+            if state.command_modal.is_open
+                && !matches!(state.command_modal.status, CommandStatus::Running)
+                && state.command_modal.completion.visible
+            {
+                let count = state.command_modal.completion.candidates.len();
+                if count == 0 {
+                    hide_command_completion(&mut state.command_modal);
+                } else {
+                    state.command_modal.completion.selected =
+                        (state.command_modal.completion.selected + count - 1) % count;
+                }
             }
             Vec::new()
         }
         Action::SubmitCommand => {
             if !state.command_modal.is_open {
+                return Vec::new();
+            }
+            if state.command_modal.completion.visible {
+                accept_command_completion(&mut state.command_modal);
                 return Vec::new();
             }
             let command = state.command_modal.input.trim().to_string();
@@ -787,6 +868,48 @@ fn select_next_command_history(modal: &mut CommandModalState) {
 fn reset_command_history_navigation(modal: &mut CommandModalState) {
     modal.history_cursor = None;
     modal.history_draft.clear();
+}
+
+fn hide_command_completion(modal: &mut CommandModalState) {
+    modal.completion.candidates.clear();
+    modal.completion.selected = 0;
+    modal.completion.visible = false;
+}
+
+fn accept_command_completion(modal: &mut CommandModalState) {
+    let Some(candidate) = modal
+        .completion
+        .candidates
+        .get(modal.completion.selected)
+        .cloned()
+    else {
+        hide_command_completion(modal);
+        return;
+    };
+    let remainder = command_completion_remainder(&modal.input);
+    modal.input = if remainder.is_empty() {
+        format!("{candidate} ")
+    } else {
+        format!("{candidate} {remainder}")
+    };
+    modal.cursor = candidate.chars().count() + 1;
+    hide_command_completion(modal);
+    reset_command_history_navigation(modal);
+}
+
+fn first_command_token(input: &str) -> &str {
+    input.split_whitespace().next().unwrap_or("")
+}
+
+fn command_completion_remainder(input: &str) -> &str {
+    let Some((token_start, _)) = input.char_indices().find(|(_, ch)| !ch.is_whitespace()) else {
+        return "";
+    };
+    let token_end = input[token_start..]
+        .char_indices()
+        .find(|(_, ch)| ch.is_whitespace())
+        .map_or(input.len(), |(offset, _)| token_start + offset);
+    input[token_end..].trim_start()
 }
 
 fn insert_command_modal_char(modal: &mut CommandModalState, ch: char) {
@@ -1676,6 +1799,115 @@ mod tests {
             assert_eq!(state.command_modal.cursor, 4);
             assert_eq!(state.command_modal.history_cursor, None);
             assert_eq!(state.command_modal.history_draft, "");
+        }
+
+        #[test]
+        fn command_completion_tab_with_multiple_matches_opens_popup() {
+            let mut state = AppState::new("redis://localhost");
+            state.command_modal.is_open = true;
+            state.command_modal.input = "GET".to_string();
+            state.command_modal.cursor = 3;
+
+            assert!(reduce(&mut state, Action::CommandCompleteNext).is_empty());
+
+            assert!(state.command_modal.completion.visible);
+            assert_eq!(state.command_modal.completion.selected, 0);
+            assert!(state.command_modal.completion.candidates.len() > 1);
+            assert_eq!(state.command_modal.input, "GET");
+        }
+
+        #[test]
+        fn command_completion_tab_with_single_match_accepts_candidate() {
+            let mut state = AppState::new("redis://localhost");
+            state.command_modal.is_open = true;
+            state.command_modal.input = "PIN".to_string();
+            state.command_modal.cursor = 3;
+            state.command_modal.history_cursor = Some(0);
+            state.command_modal.history_draft = "draft".to_string();
+
+            assert!(reduce(&mut state, Action::CommandCompleteNext).is_empty());
+
+            assert_eq!(state.command_modal.input, "PING ");
+            assert_eq!(state.command_modal.cursor, "PING ".chars().count());
+            assert!(!state.command_modal.completion.visible);
+            assert!(state.command_modal.completion.candidates.is_empty());
+            assert_eq!(state.command_modal.history_cursor, None);
+            assert_eq!(state.command_modal.history_draft, "");
+        }
+
+        #[test]
+        fn command_completion_tab_cycles_selection_when_visible() {
+            let mut state = AppState::new("redis://localhost");
+            state.command_modal.is_open = true;
+            state.command_modal.input = "GET".to_string();
+            state.command_modal.cursor = 3;
+            assert!(reduce(&mut state, Action::CommandCompleteNext).is_empty());
+            let count = state.command_modal.completion.candidates.len();
+
+            assert!(reduce(&mut state, Action::CommandCompleteNext).is_empty());
+
+            assert_eq!(state.command_modal.completion.selected, 1 % count);
+        }
+
+        #[test]
+        fn command_completion_backtab_cycles_selection_back() {
+            let mut state = AppState::new("redis://localhost");
+            state.command_modal.is_open = true;
+            state.command_modal.input = "GET".to_string();
+            state.command_modal.cursor = 3;
+            assert!(reduce(&mut state, Action::CommandCompleteNext).is_empty());
+            let count = state.command_modal.completion.candidates.len();
+
+            assert!(reduce(&mut state, Action::CommandCompletePrev).is_empty());
+
+            assert_eq!(state.command_modal.completion.selected, count - 1);
+        }
+
+        #[test]
+        fn command_completion_submit_accepts_visible_candidate_without_submitting() {
+            let mut state = AppState::new("redis://localhost");
+            state.command_modal.is_open = true;
+            state.command_modal.input = "GET".to_string();
+            state.command_modal.cursor = 3;
+            assert!(reduce(&mut state, Action::CommandCompleteNext).is_empty());
+
+            let effects = reduce(&mut state, Action::SubmitCommand);
+
+            assert!(effects.is_empty());
+            assert_eq!(state.command_modal.input, "GET ");
+            assert_eq!(state.command_modal.cursor, "GET ".chars().count());
+            assert!(!state.command_modal.completion.visible);
+            assert_eq!(state.command_modal.status, CommandStatus::Idle);
+        }
+
+        #[test]
+        fn command_completion_escape_hides_popup_and_keeps_modal_open() {
+            let mut state = AppState::new("redis://localhost");
+            state.command_modal.is_open = true;
+            state.command_modal.input = "GET".to_string();
+            state.command_modal.cursor = 3;
+            assert!(reduce(&mut state, Action::CommandCompleteNext).is_empty());
+
+            assert!(reduce(&mut state, Action::CloseCommandModal).is_empty());
+
+            assert!(state.command_modal.is_open);
+            assert!(!state.command_modal.completion.visible);
+            assert!(state.command_modal.completion.candidates.is_empty());
+        }
+
+        #[test]
+        fn command_completion_input_hides_popup() {
+            let mut state = AppState::new("redis://localhost");
+            state.command_modal.is_open = true;
+            state.command_modal.input = "GET".to_string();
+            state.command_modal.cursor = 3;
+            assert!(reduce(&mut state, Action::CommandCompleteNext).is_empty());
+
+            assert!(reduce(&mut state, Action::CommandInput('X')).is_empty());
+
+            assert_eq!(state.command_modal.input, "GETX");
+            assert!(!state.command_modal.completion.visible);
+            assert!(state.command_modal.completion.candidates.is_empty());
         }
 
         #[test]

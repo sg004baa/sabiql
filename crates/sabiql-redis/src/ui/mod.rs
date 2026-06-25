@@ -2,7 +2,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Cell, Paragraph, Wrap};
+use ratatui::widgets::{Cell, Clear, Paragraph, Wrap};
 use sabiql_tui_kit::primitives::atoms::text_cursor_spans;
 use sabiql_tui_kit::primitives::molecules::{
     StripedTableConfig, hint_line, render_modal, render_striped_table,
@@ -131,8 +131,7 @@ fn render_keys(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         format!("No keys match pattern {}", state.search_pattern)
     };
     let selected_style = Style::default()
-        .bg(theme.component.table.result_row_active_bg)
-        .fg(theme.semantic.text.primary)
+        .fg(theme.semantic.text.accent)
         .add_modifier(Modifier::BOLD);
 
     render_striped_table(
@@ -156,13 +155,15 @@ fn render_keys(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             else {
                 return vec![Cell::from(""), Cell::from("")];
             };
-            let style = if index == state.selected_index {
+            let is_selected = index == state.selected_index;
+            let style = if is_selected {
                 selected_style
             } else {
                 Style::default().fg(theme.semantic.text.primary)
             };
+            let marker = if is_selected { "> " } else { "  " };
             vec![
-                Cell::from(redis_key.key.clone()).style(style),
+                Cell::from(format!("{marker}{}", redis_key.key)).style(style),
                 Cell::from(redis_key.kind.to_string()).style(style),
             ]
         },
@@ -497,6 +498,7 @@ fn render_command_modal(frame: &mut Frame<'_>, state: &AppState) {
     render_command_input(frame, chunks[0], state);
     render_command_status(frame, chunks[1], state);
     render_command_output(frame, chunks[2], state);
+    render_command_completion(frame, chunks[0], inner, state);
 }
 
 fn render_command_input(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
@@ -524,6 +526,83 @@ fn render_command_input(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     )];
     spans.extend(cursor_spans);
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+fn render_command_completion(
+    frame: &mut Frame<'_>,
+    input_area: Rect,
+    modal_inner: Rect,
+    state: &AppState,
+) {
+    let completion = &state.command_modal.completion;
+    if !completion.visible || completion.candidates.is_empty() {
+        return;
+    }
+
+    let popup_y = input_area.y.saturating_add(input_area.height);
+    let modal_bottom = modal_inner.y.saturating_add(modal_inner.height);
+    let available_height = modal_bottom.saturating_sub(popup_y);
+    if available_height < 3 {
+        return;
+    }
+
+    let visible_rows = completion
+        .candidates
+        .len()
+        .min(6)
+        .min(usize::from(available_height.saturating_sub(2)));
+    if visible_rows == 0 {
+        return;
+    }
+
+    let theme = DEFAULT_THEME;
+    let popup_area = Rect {
+        x: input_area.x,
+        y: popup_y,
+        width: input_area.width,
+        height: (visible_rows as u16)
+            .saturating_add(2)
+            .min(available_height),
+    };
+    let selected = completion.selected.min(completion.candidates.len() - 1);
+    let scroll_offset = selected.saturating_sub(visible_rows.saturating_sub(1));
+    let selected_style = Style::default()
+        .bg(theme.component.table.result_row_active_bg)
+        .fg(theme.semantic.text.primary)
+        .add_modifier(Modifier::BOLD);
+    let headers = ["command"];
+    let widths = [Constraint::Min(10)];
+
+    // Paint an opaque background so the underlying output placeholder does not
+    // bleed through the completion popup.
+    frame.render_widget(Clear, popup_area);
+    render_striped_table(
+        frame,
+        popup_area,
+        &StripedTableConfig {
+            headers: &headers,
+            widths: &widths,
+            header_bottom_margin: 0,
+            header_separator: false,
+            total_items: completion.candidates.len(),
+            empty_message: "",
+        },
+        scroll_offset,
+        &theme,
+        |index| {
+            let style = if index == selected {
+                selected_style
+            } else {
+                Style::default().fg(theme.semantic.text.primary)
+            };
+            let candidate = completion
+                .candidates
+                .get(index)
+                .cloned()
+                .unwrap_or_default();
+            vec![Cell::from(candidate).style(style)]
+        },
+    );
 }
 
 fn render_command_status(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
@@ -817,6 +896,27 @@ mod tests {
     }
 
     #[test]
+    fn command_modal_shows_completion_candidates() {
+        let mut state = AppState::new("redis://localhost");
+        state.command_modal.is_open = true;
+        state.command_modal.input = "GET".to_string();
+        state.command_modal.cursor = 3;
+        state.command_modal.completion.candidates = vec![
+            "GET".to_string(),
+            "GETBIT".to_string(),
+            "GETRANGE".to_string(),
+        ];
+        state.command_modal.completion.selected = 1;
+        state.command_modal.completion.visible = true;
+
+        let rendered = render_to_string(&state);
+
+        assert!(rendered.contains("command"));
+        assert!(rendered.contains("GETBIT"));
+        assert!(rendered.contains("GETRANGE"));
+    }
+
+    #[test]
     fn command_modal_shows_error_status_and_output() {
         let mut state = AppState::new("redis://localhost");
         state.command_modal.is_open = true;
@@ -848,7 +948,7 @@ mod tests {
         let rendered = render_to_string(&state);
 
         assert!(rendered.contains("search /user:*"));
-        assert!(rendered.contains("user:1"));
+        assert!(rendered.contains("> user:1"));
         assert!(!rendered.contains("session:1"));
         assert!(rendered.contains("1/2 scanned keys"));
     }
