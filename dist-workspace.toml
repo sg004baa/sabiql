@@ -1,5 +1,8 @@
 [workspace]
-members = ["cargo:crates/sabiql"]
+members = [
+    "cargo:crates/sabiql",
+    "cargo:crates/sabiql-redis"
+]
 
 # Config for 'dist'
 [dist]
