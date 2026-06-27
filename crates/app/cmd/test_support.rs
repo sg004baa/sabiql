@@ -6,14 +6,14 @@ use tokio::sync::mpsc;
 
 use crate::cmd::cache::TtlCache;
 use crate::cmd::runner::{EffectRunner, EffectRunnerBuilder};
-use crate::domain::connection::{ConnectionProfile, ServiceEntry};
+use crate::domain::connection::ConnectionProfile;
 use crate::domain::query_history::QueryHistoryEntry;
 use crate::domain::{ConnectionId, DatabaseMetadata, ErTableInfo, QueryResult, QuerySource};
 use crate::ports::outbound::{
     ClipboardError, ClipboardWriter, ConfigWriter, ConfigWriterError, ConnectionStore, DsnBuilder,
     ErDiagramExporter, ErExportResult, ErLogWriter, FolderOpenError, FolderOpener,
-    MetadataProvider, PgServiceEntryReader, QueryExecutor, QueryHistoryError, QueryHistoryStore,
-    ServiceFileError, SettingsStore, SettingsStoreError,
+    MetadataProvider, QueryExecutor, QueryHistoryError, QueryHistoryStore, SettingsStore,
+    SettingsStoreError,
 };
 use crate::update::action::Action;
 
@@ -51,13 +51,6 @@ pub struct NoopDsnBuilder;
 impl DsnBuilder for NoopDsnBuilder {
     fn build_dsn(&self, _profile: &ConnectionProfile) -> String {
         String::new()
-    }
-}
-
-pub struct NoopPgServiceEntryReader;
-impl PgServiceEntryReader for NoopPgServiceEntryReader {
-    fn read_services(&self) -> Result<(Vec<ServiceEntry>, PathBuf), ServiceFileError> {
-        Ok((vec![], PathBuf::new()))
     }
 }
 
@@ -148,7 +141,6 @@ pub fn make_runner_builder(
         .settings_store(Arc::new(NoopSettingsStore))
         .metadata_cache(cache)
         .action_tx(action_tx)
-        .pg_service_entry_reader(Arc::new(NoopPgServiceEntryReader))
 }
 
 pub fn sample_metadata() -> DatabaseMetadata {

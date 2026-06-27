@@ -131,7 +131,7 @@ impl ConnectionSetup {
             Self::render_dropdown_items(
                 frame,
                 chunks[0],
-                DatabaseType::ALL.iter().map(ToString::to_string).collect(),
+                DatabaseType::RDB.iter().map(ToString::to_string).collect(),
                 form_state.db_type_dropdown.selected_index,
                 theme,
             );

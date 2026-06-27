@@ -1,5 +1,5 @@
 [workspace]
-members = ["cargo:crates/sabiql"]
+members = ["cargo:crates/sabiql-shell"]
 
 # Config for 'dist'
 [dist]

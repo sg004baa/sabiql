@@ -1,8 +1,6 @@
 use super::{ExecBinding, KeyBinding, ModeRow};
 use super::{Key, KeyCombo};
-use crate::update::action::{
-    Action, ListMotion, ListTarget, ModalKind, ScrollAmount, ScrollDirection, ScrollTarget,
-};
+use crate::update::action::{Action, ScrollAmount, ScrollDirection, ScrollTarget};
 
 // =============================================================================
 // Connection Setup
@@ -96,7 +94,7 @@ pub const CONNECTION_ERROR_ROWS: &[ModeRow] = &[
         desc_short: "Switch",
         description: "Switch to another connection",
         bindings: &[ExecBinding {
-            action: Action::OpenModal(ModalKind::ConnectionSelector),
+            action: Action::RequestConnectionSwitch,
             combos: &[KeyCombo::plain(Key::Char('s'))],
         }],
     },
@@ -170,93 +168,6 @@ pub const CONNECTION_ERROR_ROWS: &[ModeRow] = &[
         bindings: &[ExecBinding {
             action: Action::RetryServiceConnection,
             combos: &[KeyCombo::plain(Key::Char('r'))],
-        }],
-    },
-];
-
-// =============================================================================
-// Connection Selector
-// =============================================================================
-
-pub const CONNECTION_SELECTOR_ROWS: &[ModeRow] = &[
-    ModeRow {
-        key_short: "Enter",
-        key: "Enter",
-        desc_short: "Confirm",
-        description: "Confirm selection",
-        bindings: &[ExecBinding {
-            action: Action::ConfirmConnectionSelection,
-            combos: &[KeyCombo::plain(Key::Enter)],
-        }],
-    },
-    ModeRow {
-        key_short: "^N/^P/↑↓",
-        key: "Ctrl+N / Ctrl+P / ↑ / ↓ / j / k",
-        desc_short: "Nav",
-        description: "Select connection",
-        bindings: &[
-            ExecBinding {
-                action: Action::ListSelect {
-                    target: ListTarget::ConnectionList,
-                    motion: ListMotion::Next,
-                },
-                combos: &[
-                    KeyCombo::plain(Key::Char('j')),
-                    KeyCombo::plain(Key::Down),
-                    KeyCombo::ctrl(Key::Char('n')),
-                ],
-            },
-            ExecBinding {
-                action: Action::ListSelect {
-                    target: ListTarget::ConnectionList,
-                    motion: ListMotion::Previous,
-                },
-                combos: &[
-                    KeyCombo::plain(Key::Char('k')),
-                    KeyCombo::plain(Key::Up),
-                    KeyCombo::ctrl(Key::Char('p')),
-                ],
-            },
-        ],
-    },
-    ModeRow {
-        key_short: "n",
-        key: "n",
-        desc_short: "New",
-        description: "New connection",
-        bindings: &[ExecBinding {
-            action: Action::OpenModal(ModalKind::ConnectionSetup),
-            combos: &[KeyCombo::plain(Key::Char('n'))],
-        }],
-    },
-    ModeRow {
-        key_short: "e",
-        key: "e",
-        desc_short: "Edit",
-        description: "Edit connection",
-        bindings: &[ExecBinding {
-            action: Action::RequestEditSelectedConnection,
-            combos: &[KeyCombo::plain(Key::Char('e'))],
-        }],
-    },
-    ModeRow {
-        key_short: "d",
-        key: "d",
-        desc_short: "Delete",
-        description: "Delete connection",
-        bindings: &[ExecBinding {
-            action: Action::RequestDeleteSelectedConnection,
-            combos: &[KeyCombo::plain(Key::Char('d'))],
-        }],
-    },
-    ModeRow {
-        key_short: "Esc/q",
-        key: "Esc / q",
-        desc_short: "Close",
-        description: "Close selector",
-        bindings: &[ExecBinding {
-            action: Action::Escape,
-            combos: &[KeyCombo::plain(Key::Esc), KeyCombo::plain(Key::Char('q'))],
         }],
     },
 ];

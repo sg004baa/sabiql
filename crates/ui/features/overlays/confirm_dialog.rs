@@ -44,7 +44,6 @@ impl ConfirmDialog {
     fn intent_border_color(intent: Option<&ConfirmIntent>, theme: &ThemePalette) -> Option<Color> {
         match intent {
             Some(ConfirmIntent::DisableReadOnly) => Some(theme.semantic.status.warning),
-            Some(ConfirmIntent::DeleteConnection(_)) => Some(theme.semantic.status.error),
             _ => None,
         }
     }

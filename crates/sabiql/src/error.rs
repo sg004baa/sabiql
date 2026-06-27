@@ -15,7 +15,10 @@ use crossterm::{
 pub fn install_hooks() -> Result<()> {
     let hook_builder = color_eyre::config::HookBuilder::default().display_env_section(false);
     let (panic_hook, eyre_hook) = hook_builder.into_hooks();
-    eyre_hook.install()?;
+    // The shared shell can run multiple TUI libraries in one process. The
+    // first color-eyre report hook remains valid; the terminal panic hook below
+    // is replaced on every entry so it always matches the active TUI.
+    let _ = eyre_hook.install();
 
     panic::set_hook(Box::new(move |panic_info| {
         let _ = restore_terminal();

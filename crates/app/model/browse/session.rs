@@ -1,13 +1,9 @@
 use std::sync::Arc;
 
-use crate::domain::{
-    ConnectionId, DatabaseMetadata, MetadataState, QueryResult, Table, TableSummary,
-};
+use crate::domain::{ConnectionId, DatabaseMetadata, MetadataState, Table, TableSummary};
 use crate::model::browse::query_execution::{PaginationState, QueryExecution};
 use crate::model::browse::result_history::ResultHistory;
-use crate::model::connection::cache::ConnectionCache;
 use crate::model::connection::state::ConnectionState;
-use crate::model::shared::inspector_tab::InspectorTab;
 
 // # Invariants
 //
@@ -126,45 +122,6 @@ impl BrowseSession {
         self.is_reloading = false;
     }
 
-    // ── Cache operations ─────────────────────────────────────────────
-
-    pub fn to_cache(
-        &self,
-        explorer_selected: usize,
-        inspector_tab: InspectorTab,
-        query_result: Option<Arc<QueryResult>>,
-        result_history: ResultHistory,
-    ) -> ConnectionCache {
-        ConnectionCache {
-            metadata: self.metadata.clone(),
-            table_detail: self.table_detail.clone(),
-            selected_table_key: self.selected_table_key.clone(),
-            query_result,
-            result_history,
-            explorer_selected,
-            inspector_tab,
-        }
-    }
-
-    // Caller must also call `result_interaction.reset_view()` and restore UI state.
-    pub fn restore_from_cache(&mut self, cache: &ConnectionCache, query: &mut QueryExecution) {
-        self.metadata.clone_from(&cache.metadata);
-        self.table_detail.clone_from(&cache.table_detail);
-        self.selected_table_key
-            .clone_from(&cache.selected_table_key);
-        self.connection_state = ConnectionState::Connected;
-        self.metadata_state = MetadataState::Loaded;
-        self.selection_generation = 0;
-        self.is_reloading = false;
-        match &cache.query_result {
-            Some(r) => query.set_current_result(r.clone()),
-            None => query.clear_current_result(),
-        }
-        query.restore_history(cache.result_history.clone());
-        query.exit_history();
-    }
-
-    // Caller must also call `result_interaction.reset_view()` and restore UI state.
     pub fn reset(&mut self, query: &mut QueryExecution) {
         self.metadata = None;
         self.table_detail = None;
@@ -525,88 +482,6 @@ mod tests {
         }
     }
 
-    // ── to_cache / restore_from_cache round-trip ─────────────────────
-
-    mod cache_round_trip {
-        use super::*;
-
-        #[test]
-        fn round_trip_preserves_state() {
-            let mut session = BrowseSession::default();
-            session.mark_connected(make_metadata("round_trip_db"));
-            let mut pagination = PaginationState::default();
-            let _ = session.select_table("public", "users", &mut pagination);
-            let _ = session.set_table_detail(make_table_detail(), session.selection_generation());
-
-            let result = make_query_result();
-            let mut history = ResultHistory::default();
-            history.push(result.clone());
-
-            let cache = session.to_cache(5, InspectorTab::Indexes, Some(result), history);
-
-            // Create a fresh session and restore
-            let mut new_session = BrowseSession::default();
-            let mut query = QueryExecution::default();
-            new_session.restore_from_cache(&cache, &mut query);
-
-            assert_eq!(new_session.database_name(), Some("round_trip_db"));
-            assert!(new_session.table_detail().is_some());
-            assert_eq!(new_session.selected_table_key(), Some("public.users"));
-            assert!(new_session.connection_state().is_connected());
-            assert_eq!(new_session.metadata_state(), &MetadataState::Loaded);
-            assert!(query.current_result().is_some());
-            assert_eq!(query.result_history().len(), 1);
-            assert!(query.history_index().is_none());
-        }
-
-        #[test]
-        fn restore_resets_generation_and_reloading() {
-            let mut session = BrowseSession::default();
-            session.mark_connected(make_metadata("db"));
-            let mut pagination = PaginationState::default();
-            let _ = session.select_table("public", "users", &mut pagination);
-            session.is_reloading = true;
-            assert!(session.selection_generation() > 0);
-
-            let cache = session.to_cache(0, InspectorTab::Info, None, ResultHistory::default());
-
-            let mut new_session = BrowseSession::default();
-            new_session.set_selection_generation(42);
-            new_session.is_reloading = true;
-            let mut query = QueryExecution::default();
-            new_session.restore_from_cache(&cache, &mut query);
-
-            assert_eq!(new_session.selection_generation(), 0);
-            assert!(!new_session.is_reloading);
-        }
-
-        #[test]
-        fn restore_then_begin_reload_preserves_selection() {
-            let mut session = BrowseSession::default();
-            session.mark_connected(make_metadata("db"));
-            let mut pagination = PaginationState::default();
-            let generation = session.select_table("public", "users", &mut pagination);
-            let _ = session.set_table_detail(make_table_detail(), generation);
-
-            let cache = session.to_cache(
-                3,
-                InspectorTab::Columns,
-                Some(make_query_result()),
-                ResultHistory::default(),
-            );
-
-            let mut restored = BrowseSession::default();
-            let mut query = QueryExecution::default();
-            restored.restore_from_cache(&cache, &mut query);
-            restored.begin_reload();
-
-            assert_eq!(restored.selected_table_key(), Some("public.users"));
-            assert!(restored.table_detail().is_some());
-            assert!(restored.is_reloading);
-            assert!(restored.connection_state().is_connected());
-        }
-    }
-
     // ── reset ────────────────────────────────────────────────────────
 
     mod reset_tests {
@@ -679,29 +554,6 @@ mod tests {
             assert!(session.database_name().is_none());
         }
 
-        #[test]
-        fn synced_after_restore_from_cache() {
-            let mut session = BrowseSession::default();
-            session.mark_connected(make_metadata("cached_db"));
-
-            let cache = session.to_cache(0, InspectorTab::Info, None, ResultHistory::default());
-
-            let mut new_session = BrowseSession::default();
-            let mut query = QueryExecution::default();
-            new_session.restore_from_cache(&cache, &mut query);
-
-            assert_eq!(new_session.database_name(), Some("cached_db"));
-        }
-
-        #[test]
-        fn none_when_cache_has_no_metadata() {
-            let cache = ConnectionCache::default();
-            let mut session = BrowseSession::default();
-            let mut query = QueryExecution::default();
-            session.restore_from_cache(&cache, &mut query);
-
-            assert!(session.database_name().is_none());
-        }
     }
 
     // ── Getters ──────────────────────────────────────────────────────

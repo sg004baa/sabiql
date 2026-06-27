@@ -10,6 +10,10 @@ readme = "../../README.md"
 keywords = ["postgresql", "tui", "database", "cli", "sql"]
 categories = ["command-line-utilities", "database"]
 
+[[bin]]
+name = "sabiql-rdb"
+path = "src/main.rs"
+
 [dependencies]
 crossterm.workspace = true
 tokio.workspace = true

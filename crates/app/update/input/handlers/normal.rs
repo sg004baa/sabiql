@@ -183,7 +183,7 @@ pub fn handle_normal_mode(combo: KeyCombo, state: &AppState) -> Action {
         Key::Char('e') => Action::OpenModal(ModalKind::ErTablePicker),
         Key::Char('/') => Action::OpenModal(ModalKind::TablePicker),
         Key::Char('c') if state.ui.focused_pane == FocusedPane::Explorer => {
-            Action::OpenModal(ModalKind::ConnectionSelector)
+            Action::RequestConnectionSwitch
         }
 
         Key::Char('z') => Action::BeginKeySequence(Prefix::Z),
@@ -598,15 +598,12 @@ mod tests {
             }
 
             #[test]
-            fn c_opens_connection_selector() {
+            fn c_requests_connection_switch() {
                 let state = browse_state();
 
                 let result = handle_normal_mode(combo(Key::Char('c')), &state);
 
-                assert!(matches!(
-                    result,
-                    Action::OpenModal(ModalKind::ConnectionSelector)
-                ));
+                assert!(matches!(result, Action::RequestConnectionSwitch));
             }
         }
 

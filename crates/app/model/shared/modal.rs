@@ -128,13 +128,13 @@ mod tests {
     #[test]
     fn replace_mode_keeps_stack() {
         let mut modal = ModalState::default();
-        modal.set_mode(InputMode::ConnectionSelector);
+        modal.set_mode(InputMode::Settings);
         modal.push_mode(InputMode::ConnectionSetup);
 
         modal.replace_mode(InputMode::ConnectionError);
 
         assert_eq!(modal.active_mode(), InputMode::ConnectionError);
-        assert_eq!(modal.return_destination(), InputMode::ConnectionSelector);
+        assert_eq!(modal.return_destination(), InputMode::Settings);
     }
 
     #[test]

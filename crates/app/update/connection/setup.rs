@@ -4,7 +4,7 @@ use crate::cmd::effect::Effect;
 use crate::domain::connection::{DatabaseType, SslMode};
 use crate::model::app_state::AppState;
 use crate::model::connection::setup::{
-    CONNECTION_INPUT_VISIBLE_WIDTH, ConnectionField, ConnectionSetupState,
+    CONNECTION_INPUT_VISIBLE_WIDTH, ConnectionField,
 };
 use crate::model::shared::input_mode::InputMode;
 use crate::model::shared::text_input::TextInputState;
@@ -15,22 +15,10 @@ pub fn reduce(state: &mut AppState, action: &Action, now: Instant) -> Option<Vec
     match action {
         Action::OpenModal(ModalKind::ConnectionSetup) => {
             state.connection_setup.reset();
-            if !state.connections().is_empty() || state.session.dsn.is_some() {
+            if state.session.dsn.is_some() {
                 state.connection_setup.is_first_run = false;
             }
             state.modal.set_mode(InputMode::ConnectionSetup);
-            Some(vec![])
-        }
-        Action::StartEditConnection(id) => {
-            Some(vec![Effect::LoadConnectionForEdit { id: id.clone() }])
-        }
-        Action::ConnectionEditLoaded(profile) => {
-            state.connection_setup = ConnectionSetupState::from(&**profile);
-            state.modal.set_mode(InputMode::ConnectionSetup);
-            Some(vec![])
-        }
-        Action::ConnectionEditLoadFailed(e) => {
-            state.messages.set_error_at(e.to_string(), now);
             Some(vec![])
         }
         Action::CloseModal(ModalKind::ConnectionSetup) => {
@@ -133,7 +121,7 @@ pub fn reduce(state: &mut AppState, action: &Action, now: Instant) -> Option<Vec
                 ConnectionField::DatabaseType => {
                     setup.db_type_dropdown.is_open = !setup.db_type_dropdown.is_open;
                     if setup.db_type_dropdown.is_open {
-                        setup.db_type_dropdown.selected_index = DatabaseType::ALL
+                        setup.db_type_dropdown.selected_index = DatabaseType::RDB
                             .iter()
                             .position(|t| *t == setup.database_type)
                             .unwrap_or(0);
@@ -155,7 +143,7 @@ pub fn reduce(state: &mut AppState, action: &Action, now: Instant) -> Option<Vec
         Action::ConnectionSetupDropdownNext => {
             let setup = &mut state.connection_setup;
             if setup.db_type_dropdown.is_open {
-                let max = DatabaseType::ALL.len() - 1;
+                let max = DatabaseType::RDB.len() - 1;
                 if setup.db_type_dropdown.selected_index < max {
                     setup.db_type_dropdown.selected_index += 1;
                 }
@@ -182,7 +170,7 @@ pub fn reduce(state: &mut AppState, action: &Action, now: Instant) -> Option<Vec
             let setup = &mut state.connection_setup;
             if setup.db_type_dropdown.is_open {
                 if let Some(&new_type) =
-                    DatabaseType::ALL.get(setup.db_type_dropdown.selected_index)
+                    DatabaseType::RDB.get(setup.db_type_dropdown.selected_index)
                 {
                     let old_type = setup.database_type;
                     setup.database_type = new_type;
@@ -271,21 +259,6 @@ pub fn reduce(state: &mut AppState, action: &Action, now: Instant) -> Option<Vec
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::connection::{ConnectionProfile, DatabaseType};
-
-    fn create_profile(name: &str) -> ConnectionProfile {
-        ConnectionProfile::new(
-            name.to_string(),
-            "localhost".to_string(),
-            5432,
-            "db".to_string(),
-            "user".to_string(),
-            "pass".to_string(),
-            SslMode::default(),
-            DatabaseType::PostgreSQL,
-        )
-        .unwrap()
-    }
 
     mod paste {
         use super::*;
@@ -465,21 +438,6 @@ mod tests {
             );
 
             assert!(state.connection_setup.is_first_run);
-        }
-
-        #[test]
-        fn is_first_run_false_when_connections_exist() {
-            let mut state = AppState::new("test".to_string());
-            let profile = create_profile("test");
-            state.set_connections(vec![profile]);
-
-            reduce(
-                &mut state,
-                &Action::OpenModal(ModalKind::ConnectionSetup),
-                Instant::now(),
-            );
-
-            assert!(!state.connection_setup.is_first_run);
         }
 
         #[test]

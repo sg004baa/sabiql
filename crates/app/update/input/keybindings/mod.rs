@@ -82,9 +82,6 @@ pub const COMMAND_PALETTE: ModeBindings = ModeBindings {
 pub const SETTINGS: ModeBindings = ModeBindings {
     rows: SETTINGS_ROWS,
 };
-pub const CONNECTION_SELECTOR: ModeBindings = ModeBindings {
-    rows: CONNECTION_SELECTOR_ROWS,
-};
 pub const JSONB_DETAIL: ModeBindings = ModeBindings {
     rows: JSONB_DETAIL_ROWS,
 };
@@ -101,7 +98,6 @@ pub const ALL_MODE_BINDINGS: &[(&str, &ModeBindings)] = &[
     ("FILE_PICKER", &FILE_PICKER),
     ("COMMAND_PALETTE", &COMMAND_PALETTE),
     ("SETTINGS", &SETTINGS),
-    ("CONNECTION_SELECTOR", &CONNECTION_SELECTOR),
     ("JSONB_DETAIL", &JSONB_DETAIL),
     ("JSONB_EDIT", &JSONB_EDIT),
 ];
@@ -296,15 +292,6 @@ pub mod idx {
         pub const ESC_CANCEL: usize = 5;
     }
 
-    pub mod connection_selector {
-        pub const CONFIRM: usize = 0;
-        pub const SELECT: usize = 1;
-        pub const NEW: usize = 2;
-        pub const EDIT: usize = 3;
-        pub const DELETE: usize = 4;
-        pub const CLOSE: usize = 5;
-    }
-
     pub mod inspector_ddl {
         pub const YANK: usize = 0;
     }
@@ -353,7 +340,7 @@ pub const fn help_content_line_count() -> usize {
     //   GLOBAL_KEYS: Focus/Exit Focus, ReadOnly/Exit ReadOnly (2 pairs)
     //   HISTORY_KEYS: Open/Exit (1 pair)
     const DEDUP_PAIRS: usize = 3;
-    const SECTION_COUNT: usize = 26;
+    const SECTION_COUNT: usize = 25;
     const SECTION_HEADERS: usize = SECTION_COUNT;
     const BLANK_SEPARATORS: usize = SECTION_COUNT - 1;
     SECTION_HEADERS
@@ -374,7 +361,6 @@ pub const fn help_content_line_count() -> usize {
         + COMMAND_LINE_KEYS.len()
         + CONNECTION_SETUP_KEYS.len()
         + CONNECTION_ERROR_ROWS.len()
-        + CONNECTION_SELECTOR_ROWS.len()
         + ER_PICKER_ROWS.len()
         + QUERY_HISTORY_PICKER_ROWS.len()
         + TABLE_PICKER_ROWS.len()
@@ -491,11 +477,6 @@ fn help_row_entries() -> impl Iterator<Item = (&'static str, &'static str)> {
                 )
                 .chain(
                     CONNECTION_ERROR_ROWS
-                        .iter()
-                        .map(|row| (row.key, row.description)),
-                )
-                .chain(
-                    CONNECTION_SELECTOR_ROWS
                         .iter()
                         .map(|row| (row.key, row.description)),
                 )
@@ -750,14 +731,6 @@ mod tests {
             assert!(idx::cell_edit::COMMAND < CELL_EDIT_KEYS.len());
             assert!(idx::cell_edit::ESC_CANCEL < CELL_EDIT_KEYS.len());
 
-            // CONNECTION_SELECTOR_ROWS
-            assert!(idx::connection_selector::CONFIRM < CONNECTION_SELECTOR_ROWS.len());
-            assert!(idx::connection_selector::SELECT < CONNECTION_SELECTOR_ROWS.len());
-            assert!(idx::connection_selector::NEW < CONNECTION_SELECTOR_ROWS.len());
-            assert!(idx::connection_selector::EDIT < CONNECTION_SELECTOR_ROWS.len());
-            assert!(idx::connection_selector::DELETE < CONNECTION_SELECTOR_ROWS.len());
-            assert!(idx::connection_selector::CLOSE < CONNECTION_SELECTOR_ROWS.len());
-
             // JSONB_DETAIL_ROWS
             assert!(idx::jsonb_detail::YANK < JSONB_DETAIL_ROWS.len());
             assert!(idx::jsonb_detail::INSERT < JSONB_DETAIL_ROWS.len());
@@ -797,7 +770,6 @@ mod tests {
                 COMMAND_LINE_KEYS.len(),
                 CONNECTION_SETUP_KEYS.len(),
                 CONNECTION_ERROR_ROWS.len(),
-                CONNECTION_SELECTOR_ROWS.len(),
                 ER_PICKER_ROWS.len(),
                 QUERY_HISTORY_PICKER_ROWS.len(),
                 TABLE_PICKER_ROWS.len(),
@@ -837,7 +809,7 @@ mod tests {
             #[case(idx::global::ER_DIAGRAM, Action::OpenModal(ModalKind::ErTablePicker))]
             #[case(
                 idx::global::CONNECTIONS,
-                Action::OpenModal(ModalKind::ConnectionSelector)
+                Action::RequestConnectionSwitch
             )]
             #[case(idx::global::CSV_EXPORT, Action::RequestCsvExport)]
             #[case(idx::global::READ_ONLY, Action::ToggleReadOnly)]

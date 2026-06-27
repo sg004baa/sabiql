@@ -1,9 +1,6 @@
-use crate::domain::ConnectionId;
-
 #[derive(Debug, Clone)]
 pub enum ConfirmIntent {
     QuitNoConnection,
-    DeleteConnection(ConnectionId),
     ExecuteWrite {
         sql: String,
         blocked: bool,

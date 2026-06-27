@@ -66,6 +66,8 @@ pub struct RedisDsn {
     pub host: String,
     pub port: u16,
     pub db: u8,
+    pub username: Option<String>,
+    pub password: Option<String>,
 }
 
 impl RedisDsn {
@@ -79,7 +81,14 @@ impl RedisDsn {
             return Err(RedisCliError::Parse("Redis host is required".to_string()));
         }
 
-        let (host, port) = match authority.rsplit_once(':') {
+        let (credentials, host_and_port) = authority
+            .rsplit_once('@')
+            .map_or((None, authority), |(credentials, host)| {
+                (Some(credentials), host)
+            });
+        let (username, password) = parse_redis_credentials(credentials)?;
+
+        let (host, port) = match host_and_port.rsplit_once(':') {
             Some((host, port)) => {
                 if host.is_empty() {
                     return Err(RedisCliError::Parse("Redis host is required".to_string()));
@@ -104,8 +113,55 @@ impl RedisDsn {
                 .map_err(|_| RedisCliError::Parse(format!("invalid Redis database: {db_part}")))?
         };
 
-        Ok(Self { host, port, db })
+        Ok(Self {
+            host,
+            port,
+            db,
+            username,
+            password,
+        })
     }
+
+    pub fn with_db_url(&self, db: u8) -> String {
+        let authentication = match (&self.username, &self.password) {
+            (None, None) => String::new(),
+            (None, Some(password)) => format!(":{}@", urlencoding::encode(password)),
+            (Some(username), None) => format!("{}@", urlencoding::encode(username)),
+            (Some(username), Some(password)) => format!(
+                "{}:{}@",
+                urlencoding::encode(username),
+                urlencoding::encode(password)
+            ),
+        };
+        format!("redis://{authentication}{}:{}/{db}", self.host, self.port)
+    }
+}
+
+fn parse_redis_credentials(
+    credentials: Option<&str>,
+) -> Result<(Option<String>, Option<String>), RedisCliError> {
+    let Some(credentials) = credentials else {
+        return Ok((None, None));
+    };
+    let (username, password) = credentials
+        .split_once(':')
+        .map_or((credentials, None), |(username, password)| {
+            (username, Some(password))
+        });
+    let decode = |value: &str| {
+        urlencoding::decode(value)
+            .map(|decoded| decoded.into_owned())
+            .map_err(|error| {
+                RedisCliError::Parse(format!("invalid Redis credential encoding: {error}"))
+            })
+    };
+    let username = if username.is_empty() {
+        None
+    } else {
+        Some(decode(username)?)
+    };
+    let password = password.map(decode).transpose()?;
+    Ok((username, password))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -917,6 +973,12 @@ impl RedisCliSubprocess {
             .arg("-n")
             .arg(db.to_string())
             .arg("--raw");
+        if let Some(username) = &self.dsn.username {
+            cmd.arg("--user").arg(username);
+        }
+        if let Some(password) = &self.dsn.password {
+            cmd.env("REDISCLI_AUTH", password);
+        }
         for arg in args {
             cmd.arg(arg);
         }
@@ -1104,6 +1166,8 @@ mod tests {
                 host: "localhost".to_string(),
                 port: 6379,
                 db: 0,
+                username: None,
+                password: None,
             }
         );
     }
@@ -1118,8 +1182,18 @@ mod tests {
                 host: "redis.example.com".to_string(),
                 port: 6380,
                 db: 2,
+                username: None,
+                password: None,
             }
         );
+    }
+
+    #[test]
+    fn parses_password_authentication() {
+        let dsn = RedisDsn::parse("redis://:secret%20value@redis.example.com:6380/2").unwrap();
+
+        assert_eq!(dsn.username, None);
+        assert_eq!(dsn.password.as_deref(), Some("secret value"));
     }
 
     #[test]

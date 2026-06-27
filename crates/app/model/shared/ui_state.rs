@@ -172,10 +172,6 @@ pub struct UiState {
     // scroll_max_offset may temporarily return the full content width.
     pub explorer_content_width: usize,
 
-    pub connection_list_selected: usize,
-    pub connection_list_scroll_offset: usize,
-    pub connection_list_pane_height: u16,
-
     pub table_picker: PickerState,
 
     pub er_picker: PickerState,
@@ -236,10 +232,6 @@ impl UiState {
 
     pub fn explorer_visible_items(&self) -> usize {
         self.explorer_pane_height.saturating_sub(3) as usize
-    }
-
-    pub fn connection_list_visible_items(&self) -> usize {
-        self.connection_list_pane_height as usize
     }
 
     pub fn inspector_ddl_visible_rows(&self) -> usize {
@@ -308,19 +300,6 @@ impl UiState {
         }
     }
 
-    pub fn set_connection_list_selection(&mut self, index: Option<usize>) {
-        if let Some(i) = index {
-            self.connection_list_scroll_offset = clamp_scroll_offset(
-                i,
-                self.connection_list_scroll_offset,
-                self.connection_list_visible_items(),
-            );
-            self.connection_list_selected = i;
-        } else {
-            self.connection_list_selected = 0;
-            self.connection_list_scroll_offset = 0;
-        }
-    }
 }
 
 pub fn help_viewport_layout_for(
@@ -605,24 +584,6 @@ mod tests {
             assert_eq!(state.explorer_selected, 0);
         }
 
-        #[test]
-        fn set_connection_list_selection_with_some_sets_index() {
-            let mut state = UiState::default();
-
-            state.set_connection_list_selection(Some(3));
-
-            assert_eq!(state.connection_list_selected, 3);
-        }
-
-        #[test]
-        fn set_connection_list_selection_with_none_resets_to_zero() {
-            let mut state = UiState::default();
-            state.set_connection_list_selection(Some(5));
-
-            state.set_connection_list_selection(None);
-
-            assert_eq!(state.connection_list_selected, 0);
-        }
     }
 
     mod invariants {

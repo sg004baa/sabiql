@@ -1,4 +1,3 @@
-mod connection_list;
 mod explorer;
 mod focus;
 mod input;
@@ -67,5 +66,4 @@ pub fn reduce_navigation(
         .or_else(|| input::reduce(state, action))
         .or_else(|| explorer::reduce(state, action))
         .or_else(|| inspector::reduce(state, action, services))
-        .or_else(|| connection_list::reduce(state, action, now))
 }

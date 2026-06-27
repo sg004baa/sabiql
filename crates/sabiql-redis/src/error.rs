@@ -16,7 +16,9 @@ use ratatui::crossterm::{
 pub fn install_hooks() -> Result<()> {
     let hook_builder = color_eyre::config::HookBuilder::default().display_env_section(false);
     let (panic_hook, eyre_hook) = hook_builder.into_hooks();
-    eyre_hook.install()?;
+    // The report hook is process-global and may already be installed by the
+    // RDB TUI. The active terminal panic hook is still replaced below.
+    let _ = eyre_hook.install();
 
     panic::set_hook(Box::new(move |panic_info| {
         let _ = restore_terminal();

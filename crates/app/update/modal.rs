@@ -333,9 +333,6 @@ pub fn reduce_modal(state: &mut AppState, action: &Action, now: Instant) -> Opti
                     state.should_quit = true;
                     Some(vec![])
                 }
-                Some(ConfirmIntent::DeleteConnection(id)) => {
-                    Some(vec![Effect::DeleteConnection { id }])
-                }
                 Some(ConfirmIntent::ExecuteWrite { blocked: true, .. }) => {
                     state.result_interaction.clear_write_preview();
                     state.query.clear_delete_refresh_target();
@@ -392,7 +389,7 @@ pub fn reduce_modal(state: &mut AppState, action: &Action, now: Instant) -> Opti
 
             if matches!(intent, Some(ConfirmIntent::QuitNoConnection)) {
                 state.connection_setup.reset();
-                if !state.connections().is_empty() || state.session.dsn.is_some() {
+                if state.session.dsn.is_some() {
                     state.connection_setup.is_first_run = false;
                 }
                 state.modal.pop_mode_override(InputMode::ConnectionSetup);
@@ -551,24 +548,6 @@ mod tests {
                 assert!(state.should_quit);
                 assert!(state.confirm_dialog.intent().is_none());
                 assert!(effects.is_empty());
-            }
-
-            #[test]
-            fn delete_connection_returns_delete_effect() {
-                let mut state = create_test_state();
-                enter_confirm_dialog(&mut state, InputMode::ConnectionSelector);
-                let id = crate::domain::ConnectionId::new();
-                state
-                    .confirm_dialog
-                    .open("", "", ConfirmIntent::DeleteConnection(id));
-
-                let effects =
-                    reduce_modal(&mut state, &Action::ConfirmDialogConfirm, Instant::now())
-                        .unwrap();
-
-                assert_eq!(state.input_mode(), InputMode::ConnectionSelector);
-                assert_eq!(effects.len(), 1);
-                assert!(matches!(&effects[0], Effect::DeleteConnection { .. }));
             }
 
             #[test]

@@ -98,6 +98,9 @@ impl ConnectionField {
             DatabaseType::SQLite => {
                 matches!(self, Self::DatabaseType | Self::Name | Self::Database)
             }
+            DatabaseType::Redis => {
+                unreachable!("Redis profiles are not edited in the RDB connection form")
+            }
         }
     }
 
@@ -254,7 +257,7 @@ impl From<&ConnectionProfile> for ConnectionSetupState {
         let db_len = profile.database.chars().count();
         let user_len = profile.username.chars().count();
         let pw_len = profile.password.chars().count();
-        let db_type_index = DatabaseType::ALL
+        let db_type_index = DatabaseType::RDB
             .iter()
             .position(|t| *t == profile.database_type)
             .unwrap_or(0);

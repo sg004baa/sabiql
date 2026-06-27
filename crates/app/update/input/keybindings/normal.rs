@@ -112,8 +112,8 @@ pub const GLOBAL_KEYS: &[KeyBinding] = &[
         key_short: "c",
         key: "c",
         desc_short: "Connections",
-        description: "Open Connection Selector",
-        action: Action::OpenModal(ModalKind::ConnectionSelector),
+        description: "Return to Connection Picker",
+        action: Action::RequestConnectionSwitch,
         combos: &[KeyCombo::plain(Key::Char('c'))],
     },
     KeyBinding {

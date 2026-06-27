@@ -27,7 +27,6 @@ use sabiql_domain::{CommandTag, QuerySource};
 
 mod confirm_dialogs;
 mod connection_flow;
-mod connection_management;
 mod er_diagram;
 mod initial_state;
 mod inspector;

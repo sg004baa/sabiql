@@ -62,7 +62,6 @@ fn handle_key_event(combo: KeyCombo, state: &AppState, services: &AppServices) -
         InputMode::ConnectionSetup => connections::handle_connection_setup_keys(combo, state),
         InputMode::ConnectionError => connections::handle_connection_error_keys(combo),
         InputMode::ConfirmDialog => overlays::handle_confirm_dialog_keys(combo),
-        InputMode::ConnectionSelector => connections::handle_connection_selector_keys(combo),
         InputMode::ErTablePicker => pickers::handle_er_table_picker_keys(combo),
         InputMode::QueryHistoryPicker => pickers::handle_query_history_picker_keys(combo),
         InputMode::FilePicker => pickers::handle_file_picker_keys(combo),

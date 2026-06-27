@@ -13,12 +13,12 @@ use crate::app::model::shared::ui_state::{
 };
 use crate::app::update::input::keybindings::{
     CELL_EDIT_KEYS, COMMAND_LINE_KEYS, COMMAND_PALETTE_ROWS, CONFIRM_DIALOG_KEYS,
-    CONNECTION_ERROR_ROWS, CONNECTION_SELECTOR_ROWS, CONNECTION_SETUP_KEYS, ER_PICKER_ROWS,
-    GLOBAL_KEYS, HELP_ROWS, HISTORY_KEYS, INSPECTOR_DDL_KEYS, JSONB_DETAIL_ROWS, JSONB_EDIT_ROWS,
-    JSONB_SEARCH_KEYS, KeyBinding, ModeRow, NAVIGATION_KEYS, OVERLAY_KEYS,
-    QUERY_HISTORY_PICKER_ROWS, RESULT_ACTIVE_KEYS, SETTINGS_ROWS, SQL_MODAL_COMPARE_KEYS,
-    SQL_MODAL_CONFIRMING_KEYS, SQL_MODAL_KEYS, SQL_MODAL_NORMAL_KEYS, SQL_MODAL_PLAN_KEYS,
-    TABLE_PICKER_ROWS, help_content_width,
+    CONNECTION_ERROR_ROWS, CONNECTION_SETUP_KEYS, ER_PICKER_ROWS, GLOBAL_KEYS, HELP_ROWS,
+    HISTORY_KEYS, INSPECTOR_DDL_KEYS, JSONB_DETAIL_ROWS, JSONB_EDIT_ROWS, JSONB_SEARCH_KEYS,
+    KeyBinding, ModeRow, NAVIGATION_KEYS, OVERLAY_KEYS, QUERY_HISTORY_PICKER_ROWS,
+    RESULT_ACTIVE_KEYS, SETTINGS_ROWS, SQL_MODAL_COMPARE_KEYS, SQL_MODAL_CONFIRMING_KEYS,
+    SQL_MODAL_KEYS, SQL_MODAL_NORMAL_KEYS, SQL_MODAL_PLAN_KEYS, TABLE_PICKER_ROWS,
+    help_content_width,
 };
 
 use crate::primitives::atoms::scroll_indicator::{
@@ -129,12 +129,6 @@ impl HelpOverlay {
         help_lines.push(Line::from(""));
         help_lines.push(Self::section("Connection Error", theme));
         for row in CONNECTION_ERROR_ROWS {
-            help_lines.push(Self::key_line(row.key, row.description, key_width, theme));
-        }
-
-        help_lines.push(Line::from(""));
-        help_lines.push(Self::section("Connection Selector", theme));
-        for row in CONNECTION_SELECTOR_ROWS {
             help_lines.push(Self::key_line(row.key, row.description, key_width, theme));
         }
 
@@ -349,7 +343,6 @@ impl HelpOverlay {
         ];
         const ROW_ARRAYS: &[&[ModeRow]] = &[
             CONNECTION_ERROR_ROWS,
-            CONNECTION_SELECTOR_ROWS,
             ER_PICKER_ROWS,
             QUERY_HISTORY_PICKER_ROWS,
             TABLE_PICKER_ROWS,

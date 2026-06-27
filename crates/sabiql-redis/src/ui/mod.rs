@@ -10,8 +10,8 @@ use sabiql_tui_kit::primitives::molecules::{
 use sabiql_tui_kit::theme::{DEFAULT_THEME, StatusTone};
 
 use crate::app::{
-    AppState, CommandStatus, ConfirmState, ConnectionFormState, ConnectionStatus, DbOverlayState,
-    StatusMessage, ValueState,
+    AppState, CommandStatus, ConfirmState, ConnectionStatus, DbOverlayState, StatusMessage,
+    ValueState,
 };
 use crate::domain::{RedisValue, redis_string_display_value, redis_value_table};
 
@@ -43,9 +43,6 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
     }
     if let Some(overlay) = &state.db_overlay {
         render_db_overlay(frame, overlay);
-    }
-    if let Some(form) = &state.connection_form {
-        render_connection_form(frame, form);
     }
     if let Some(confirm_state) = &state.confirm_state {
         render_confirm_dialog(frame, confirm_state);
@@ -336,7 +333,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         ("j/k", "navigate"),
         ("/", "search"),
         (":", "command"),
-        ("c", "connect"),
+        ("c", "connections"),
         ("r", "reload"),
         ("e", "export"),
         ("q", "quit"),
@@ -404,77 +401,6 @@ fn render_db_overlay(frame: &mut Frame<'_>, overlay: &DbOverlayState) {
                 Cell::from(count_label).style(style),
             ]
         },
-    );
-}
-
-fn render_connection_form(frame: &mut Frame<'_>, form: &ConnectionFormState) {
-    let theme = DEFAULT_THEME;
-    let (_, inner) = render_modal(
-        frame,
-        Constraint::Percentage(70),
-        Constraint::Length(7),
-        "Redis Connection",
-        " Enter:connect  Esc:cancel  Tab:read-only ",
-        &theme,
-    );
-    let chunks = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Min(0),
-    ])
-    .split(inner);
-
-    render_connection_dsn_input(frame, chunks[0], form);
-    render_connection_read_only(frame, chunks[1], form);
-    frame.render_widget(
-        Paragraph::new(hint_line(
-            &[
-                ("Tab", "toggle read-only"),
-                ("Enter", "reconnect"),
-                ("Esc", "cancel"),
-            ],
-            &theme,
-        ))
-        .style(Style::default().fg(theme.semantic.text.muted)),
-        chunks[2],
-    );
-}
-
-fn render_connection_dsn_input(frame: &mut Frame<'_>, area: Rect, form: &ConnectionFormState) {
-    let theme = DEFAULT_THEME;
-    let prompt = "dsn: ";
-    let cursor = form.cursor.min(form.dsn.chars().count());
-    let visible_width = area
-        .width
-        .saturating_sub(prompt.len() as u16)
-        .saturating_sub(1) as usize;
-    let viewport = cursor.saturating_sub(visible_width.saturating_sub(1));
-    let cursor_spans = text_cursor_spans(&form.dsn, cursor, viewport, visible_width, &theme);
-    let mut spans = vec![Span::styled(
-        prompt,
-        Style::default().fg(theme.semantic.text.accent),
-    )];
-    spans.extend(cursor_spans);
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
-}
-
-fn render_connection_read_only(frame: &mut Frame<'_>, area: Rect, form: &ConnectionFormState) {
-    let theme = DEFAULT_THEME;
-    let (label, style) = if form.read_only {
-        ("on", theme.status_style(StatusTone::Success))
-    } else {
-        ("off", Style::default().fg(theme.semantic.text.secondary))
-    };
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                "read-only: ",
-                Style::default().fg(theme.semantic.text.secondary),
-            ),
-            Span::styled(label, style),
-        ])),
-        area,
     );
 }
 
@@ -853,24 +779,6 @@ mod tests {
         assert!(rendered.contains("Confirm Write"));
         assert!(rendered.contains("Run this command? DEL a"));
         assert!(rendered.contains("[y]es / [n]o"));
-    }
-
-    #[test]
-    fn connection_form_shows_dsn_read_only_and_hints() {
-        let mut state = AppState::new("redis://localhost");
-        state.connection_form = Some(ConnectionFormState {
-            dsn: "redis://cache.example.com:6380/2".to_string(),
-            read_only: true,
-            cursor: "redis://cache.example.com:6380/2".chars().count(),
-        });
-
-        let rendered = render_to_string(&state);
-
-        assert!(rendered.contains("Redis Connection"));
-        assert!(rendered.contains("redis://cache.example.com:6380/2"));
-        assert!(rendered.contains("read-only:"));
-        assert!(rendered.contains("on"));
-        assert!(rendered.contains("Tab:read-only"));
     }
 
     #[test]

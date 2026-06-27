@@ -1,8 +1,6 @@
 mod error;
 mod file_picker;
-mod helpers;
 mod lifecycle;
-mod selector;
 mod setup;
 
 use std::time::Instant;
@@ -22,7 +20,6 @@ pub fn reduce_connection(
         .or_else(|| setup::reduce(state, action, now))
         .or_else(|| file_picker::reduce(state, action))
         .or_else(|| error::reduce(state, action, now))
-        .or_else(|| selector::reduce(state, action, now))
 }
 
 #[cfg(test)]

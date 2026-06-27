@@ -8,6 +8,7 @@ pub enum DatabaseType {
     PostgreSQL,
     MySQL,
     SQLite,
+    Redis,
 }
 
 impl fmt::Display for DatabaseType {
@@ -16,12 +17,14 @@ impl fmt::Display for DatabaseType {
             Self::PostgreSQL => write!(f, "PostgreSQL"),
             Self::MySQL => write!(f, "MySQL"),
             Self::SQLite => write!(f, "SQLite"),
+            Self::Redis => write!(f, "Redis"),
         }
     }
 }
 
 impl DatabaseType {
-    pub const ALL: &'static [Self] = &[Self::PostgreSQL, Self::MySQL, Self::SQLite];
+    pub const ALL: &'static [Self] = &[Self::PostgreSQL, Self::MySQL, Self::SQLite, Self::Redis];
+    pub const RDB: &'static [Self] = &[Self::PostgreSQL, Self::MySQL, Self::SQLite];
 
     pub fn default_port(self) -> u16 {
         match self {
@@ -29,6 +32,7 @@ impl DatabaseType {
             Self::MySQL => 3306,
             // SQLite is file-based; no network port. 0 = "not applicable".
             Self::SQLite => 0,
+            Self::Redis => 6379,
         }
     }
 }
@@ -47,6 +51,7 @@ mod tests {
         assert_eq!(DatabaseType::PostgreSQL.to_string(), "PostgreSQL");
         assert_eq!(DatabaseType::MySQL.to_string(), "MySQL");
         assert_eq!(DatabaseType::SQLite.to_string(), "SQLite");
+        assert_eq!(DatabaseType::Redis.to_string(), "Redis");
     }
 
     #[test]
@@ -54,11 +59,15 @@ mod tests {
         assert_eq!(DatabaseType::PostgreSQL.default_port(), 5432);
         assert_eq!(DatabaseType::MySQL.default_port(), 3306);
         assert_eq!(DatabaseType::SQLite.default_port(), 0);
+        assert_eq!(DatabaseType::Redis.default_port(), 6379);
     }
 
     #[test]
     fn all_contains_every_variant() {
-        assert_eq!(DatabaseType::ALL.len(), 3);
+        assert_eq!(DatabaseType::ALL.len(), 4);
+        assert!(DatabaseType::ALL.contains(&DatabaseType::Redis));
+        assert_eq!(DatabaseType::RDB.len(), 3);
+        assert!(!DatabaseType::RDB.contains(&DatabaseType::Redis));
     }
 
     #[test]

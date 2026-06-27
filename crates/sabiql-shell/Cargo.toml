@@ -1,35 +1,36 @@
 [package]
-name = "sabiql-redis"
+name = "sabiql-shell"
 version.workspace = true
 edition.workspace = true
-description = "A driver-less TUI for browsing Redis keys"
+description = "Unified connection picker for sabiql"
 license.workspace = true
 repository.workspace = true
 
+[[bin]]
+name = "sabiql"
+path = "src/main.rs"
+
 [dependencies]
-async-trait.workspace = true
 clap.workspace = true
 color-eyre.workspace = true
-csv.workspace = true
-nucleo-matcher.workspace = true
 ratatui.workspace = true
-sabiql-tui-kit = { path = "../tui-kit", version = "1.12.0" }
-serde_json.workspace = true
-thiserror.workspace = true
+sabiql = { path = "../sabiql", version = "1.12.0" }
+sabiql-app.workspace = true
+sabiql-domain.workspace = true
+sabiql-infra.workspace = true
+sabiql-redis = { path = "../sabiql-redis", version = "1.12.0" }
+sabiql-tui-kit.workspace = true
 tokio.workspace = true
 urlencoding.workspace = true
 
 [dev-dependencies]
-mockall.workspace = true
 tempfile.workspace = true
 
 [lints.clippy]
-# Groups
 all = { level = "deny", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
 
-# Pedantic suppressions
 must_use_candidate = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
@@ -43,26 +44,23 @@ cast_sign_loss = "allow"
 cast_precision_loss = "allow"
 cast_lossless = "allow"
 items_after_statements = "allow"
-needless_pass_by_value = "allow"  # Action/Command/PathBuf by-value in core APIs; refactor is out of scope
+needless_pass_by_value = "allow"
 unused_self = "allow"
 implicit_hasher = "allow"
 match_wildcard_for_single_variants = "allow"
 struct_field_names = "allow"
 
-# Nursery suppressions
 missing_const_for_fn = "allow"
 significant_drop_tightening = "allow"
 option_if_let_else = "allow"
 future_not_send = "allow"
 branches_sharing_code = "allow"
-iter_with_drain = "allow"  # drain(..) inside loops where Vec is reused between iterations
-collection_is_never_read = "allow"  # false positive: Vec used for sorting + hashing, not element-wise reads
-used_underscore_binding = "allow"  # rstest #[case] doc params use _prefix convention; macro uses bindings internally
+iter_with_drain = "allow"
+collection_is_never_read = "allow"
+used_underscore_binding = "allow"
 
-# Pedantic suppressions (continued)
-naive_bytecount = "allow"  # bytecount crate would be an unnecessary dependency
+naive_bytecount = "allow"
 
-# Restriction lints (opt-in)
 dbg_macro = "deny"
 todo = "deny"
 print_stdout = "deny"

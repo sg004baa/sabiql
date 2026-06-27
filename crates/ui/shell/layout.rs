@@ -14,7 +14,6 @@ use crate::features::browse::inspector::Inspector;
 use crate::features::browse::jsonb_detail::{JsonbDetail, JsonbDetailRenderMetrics};
 use crate::features::browse::result::ResultPane;
 use crate::features::connections::error::ConnectionError;
-use crate::features::connections::selector::ConnectionSelector;
 use crate::features::connections::setup::ConnectionSetup;
 use crate::features::overlays::confirm_dialog::{ConfirmDialog, ConfirmPreviewMetrics};
 use crate::features::overlays::help::HelpOverlay;
@@ -89,10 +88,6 @@ impl MainLayout {
 
         Footer::render(frame, footer_area, state, services, time_ms, theme);
         let command_line_visible_width = CommandLine::render(frame, cmdline_area, state, theme);
-        let connection_list_pane_height = match state.input_mode() {
-            InputMode::ConnectionSelector => Some(ConnectionSelector::render(frame, state, theme)),
-            _ => None,
-        };
 
         let (table_picker_pane_height, table_picker_filter_visible_width) = match state.input_mode()
         {
@@ -184,7 +179,6 @@ impl MainLayout {
 
         RenderOutput {
             command_line_visible_width: Some(command_line_visible_width),
-            connection_list_pane_height,
             table_picker_pane_height,
             table_picker_filter_visible_width,
             er_picker_pane_height,

@@ -25,8 +25,8 @@ use crate::model::app_state::AppState;
 use crate::model::shared::ui_state::scroll_max_offset;
 use crate::ports::outbound::{
     ClipboardWriter, ConfigWriter, ConnectionStore, DsnBuilder, ErDiagramExporter, ErLogWriter,
-    FileSystemWalker, FolderOpener, MetadataProvider, PgServiceEntryReader, QueryExecutor,
-    QueryHistoryStore, Renderer, SettingsStore,
+    FileSystemWalker, FolderOpener, MetadataProvider, QueryExecutor, QueryHistoryStore, Renderer,
+    SettingsStore,
 };
 use crate::services::AppServices;
 use crate::update::action::Action;
@@ -34,7 +34,6 @@ use crate::update::action::Action;
 struct ConnectionDeps {
     dsn_builder: Arc<dyn DsnBuilder>,
     connection_store: Arc<dyn ConnectionStore>,
-    pg_service_entry_reader: Option<Arc<dyn PgServiceEntryReader>>,
 }
 
 struct QueryDeps {
@@ -78,7 +77,6 @@ pub struct EffectRunnerBuilder {
     config_writer: Option<Arc<dyn ConfigWriter>>,
     er_log_writer: Option<Arc<dyn ErLogWriter>>,
     connection_store: Option<Arc<dyn ConnectionStore>>,
-    pg_service_entry_reader: Option<Arc<dyn PgServiceEntryReader>>,
     clipboard: Option<Arc<dyn ClipboardWriter>>,
     folder_opener: Option<Arc<dyn FolderOpener>>,
     file_system_walker: Option<Arc<dyn FileSystemWalker>>,
@@ -123,11 +121,6 @@ impl EffectRunnerBuilder {
     #[must_use]
     pub fn connection_store(mut self, v: Arc<dyn ConnectionStore>) -> Self {
         self.connection_store = Some(v);
-        self
-    }
-    #[must_use]
-    pub fn pg_service_entry_reader(mut self, v: Arc<dyn PgServiceEntryReader>) -> Self {
-        self.pg_service_entry_reader = Some(v);
         self
     }
     #[must_use]
@@ -179,7 +172,6 @@ impl EffectRunnerBuilder {
             connection: ConnectionDeps {
                 dsn_builder: self.dsn_builder.expect("dsn_builder is required"),
                 connection_store: self.connection_store.expect("connection_store is required"),
-                pg_service_entry_reader: self.pg_service_entry_reader,
             },
             query: QueryDeps {
                 query_executor: self.query_executor.expect("query_executor is required"),
@@ -223,7 +215,6 @@ impl EffectRunner {
             config_writer: None,
             er_log_writer: None,
             connection_store: None,
-            pg_service_entry_reader: None,
             clipboard: None,
             folder_opener: None,
             file_system_walker: None,
@@ -298,9 +289,6 @@ impl EffectRunner {
                 if let Some(width) = output.command_line_visible_width {
                     state.command_line_visible_width = width;
                 }
-                if let Some(height) = output.connection_list_pane_height {
-                    state.ui.connection_list_pane_height = height;
-                }
                 if let Some(height) = output.table_picker_pane_height {
                     state.ui.table_picker.pane_height = height;
                 }
@@ -356,22 +344,10 @@ impl EffectRunner {
                 Ok(vec![])
             }
 
-            e @ (Effect::SaveAndConnect { .. }
-            | Effect::LoadConnectionForEdit { .. }
-            | Effect::LoadConnections
-            | Effect::DeleteConnection { .. }
-            | Effect::SwitchConnection { .. }
-            | Effect::SwitchToService { .. }) => {
+            e @ Effect::SaveAndConnect { .. } => {
                 if let Some(ref setter) = self.on_database_type_change {
-                    match &e {
-                        Effect::SaveAndConnect { database_type, .. } => setter(*database_type),
-                        Effect::SwitchConnection { connection_index } => {
-                            if let Some(profile) = state.connections().get(*connection_index) {
-                                setter(profile.database_type);
-                            }
-                        }
-                        Effect::SwitchToService { .. } => setter(DatabaseType::PostgreSQL),
-                        _ => {}
+                    if let Effect::SaveAndConnect { database_type, .. } = &e {
+                        setter(*database_type);
                     }
                 }
                 cmd_connection::run(
@@ -381,8 +357,6 @@ impl EffectRunner {
                     &self.metadata_provider,
                     &self.metadata_cache,
                     &self.connection.connection_store,
-                    self.connection.pg_service_entry_reader.as_ref(),
-                    state,
                 )
                 .await?;
                 Ok(vec![])

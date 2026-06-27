@@ -73,6 +73,11 @@ fn reduce_inner(
             state.should_quit = true;
             vec![]
         }
+        Action::RequestConnectionSwitch => {
+            state.should_switch_connection = true;
+            state.should_quit = true;
+            vec![]
+        }
         Action::Resize(w, h) => {
             state.ui.terminal_width = w;
             state.ui.terminal_height = h;
@@ -202,6 +207,22 @@ mod tests {
 
             let effects = reduce(&mut state, Action::Quit, now, &AppServices::stub());
 
+            assert!(state.should_quit);
+            assert!(effects.is_empty());
+        }
+
+        #[test]
+        fn connection_switch_requests_shell_handoff_and_quit() {
+            let mut state = create_test_state();
+
+            let effects = reduce(
+                &mut state,
+                Action::RequestConnectionSwitch,
+                Instant::now(),
+                &AppServices::stub(),
+            );
+
+            assert!(state.should_switch_connection);
             assert!(state.should_quit);
             assert!(effects.is_empty());
         }
@@ -2165,93 +2186,6 @@ mod tests {
             assert!(matches!(effects[0], Effect::FetchMetadata { .. }));
         }
 
-        #[test]
-        fn switch_connection_saves_current_and_fetches_new() {
-            let mut state = create_test_state();
-            let conn_a = ConnectionId::new();
-            let conn_b = ConnectionId::new();
-
-            state.session.active_connection_id = Some(conn_a.clone());
-            state
-                .session
-                .set_connection_state(ConnectionState::Connected);
-            state.ui.explorer_selected = 5;
-            let now = Instant::now();
-
-            let effects = reduce(
-                &mut state,
-                Action::SwitchConnection(ConnectionTarget {
-                    id: conn_b.clone(),
-                    dsn: "postgres://localhost/other".to_string(),
-                    name: "Other".to_string(),
-                }),
-                now,
-                &AppServices::stub(),
-            );
-
-            assert_eq!(state.session.active_connection_id, Some(conn_b));
-            assert!(state.session.connection_state().is_connecting());
-            assert!(state.connection_caches.get(&conn_a).is_some());
-            assert_eq!(
-                state
-                    .connection_caches
-                    .get(&conn_a)
-                    .unwrap()
-                    .explorer_selected,
-                5
-            );
-            assert_eq!(effects.len(), 2);
-        }
-
-        #[test]
-        fn switch_connection_restores_from_cache() {
-            use crate::model::shared::inspector_tab::InspectorTab;
-
-            let mut state = create_test_state();
-            let conn_a = ConnectionId::new();
-            let conn_b = ConnectionId::new();
-
-            state.session.active_connection_id = Some(conn_a);
-            state
-                .session
-                .set_connection_state(ConnectionState::Connected);
-            state.ui.explorer_selected = 3;
-
-            let cached = crate::model::connection::cache::ConnectionCache {
-                explorer_selected: 10,
-                inspector_tab: InspectorTab::Indexes,
-                metadata: Some(Arc::new(DatabaseMetadata {
-                    database_name: "cached_db".to_string(),
-                    schemas: vec![],
-                    table_summaries: vec![],
-                    fetched_at: Instant::now(),
-                })),
-                ..Default::default()
-            };
-            state.connection_caches.save(&conn_b, cached);
-            let now = Instant::now();
-
-            let effects = reduce(
-                &mut state,
-                Action::SwitchConnection(ConnectionTarget {
-                    id: conn_b.clone(),
-                    dsn: "postgres://localhost/cached".to_string(),
-                    name: "Cached".to_string(),
-                }),
-                now,
-                &AppServices::stub(),
-            );
-
-            assert_eq!(state.session.active_connection_id, Some(conn_b));
-            assert!(state.session.connection_state().is_connected());
-            assert_eq!(state.ui.explorer_selected, 10);
-            assert_eq!(state.ui.inspector_tab, InspectorTab::Indexes);
-            assert_eq!(
-                state.session.metadata().as_ref().unwrap().database_name,
-                "cached_db"
-            );
-            assert_eq!(effects.len(), 1);
-        }
     }
 
     mod er_table_picker {
@@ -2739,9 +2673,9 @@ mod tests {
         }
 
         #[test]
-        fn confirm_selection_open_connection_selector_closes_palette() {
+        fn confirm_selection_request_connection_switch_closes_palette() {
             let entry_index =
-                palette_index_of(|a| matches!(a, Action::OpenModal(ModalKind::ConnectionSelector)));
+                palette_index_of(|a| matches!(a, Action::RequestConnectionSwitch));
 
             let mut state = state_in_palette_mode();
             state.ui.table_picker.set_selection(entry_index);
@@ -2754,11 +2688,8 @@ mod tests {
                 &AppServices::stub(),
             );
 
-            assert_ne!(
-                state.input_mode(),
-                InputMode::CommandPalette,
-                "palette must be closed after confirm"
-            );
+            assert!(state.should_switch_connection);
+            assert!(state.should_quit);
         }
     }
 

@@ -43,6 +43,9 @@ impl DispatchAdapter {
             DatabaseType::PostgreSQL => DB_TYPE_POSTGRESQL,
             DatabaseType::MySQL => DB_TYPE_MYSQL,
             DatabaseType::SQLite => DB_TYPE_SQLITE,
+            DatabaseType::Redis => {
+                unreachable!("Redis is dispatched to sabiql-redis, not handled in RDB path")
+            }
         };
         self.active_type.store(val, Ordering::Relaxed);
     }
@@ -88,6 +91,9 @@ impl DispatchAdapter {
             DatabaseType::MySQL => &self.mysql,
             DatabaseType::SQLite => &self.sqlite,
             DatabaseType::PostgreSQL => &self.postgres,
+            DatabaseType::Redis => {
+                unreachable!("Redis is dispatched to sabiql-redis, not handled in RDB path")
+            }
         }
     }
 }
@@ -104,6 +110,9 @@ impl DatabaseCapabilityProvider for DispatchAdapter {
             DatabaseType::MySQL => self.mysql.capabilities(),
             DatabaseType::SQLite => self.sqlite.capabilities(),
             DatabaseType::PostgreSQL => self.postgres.capabilities(),
+            DatabaseType::Redis => {
+                unreachable!("Redis is dispatched to sabiql-redis, not handled in RDB path")
+            }
         }
     }
 }
@@ -222,6 +231,9 @@ impl DsnBuilder for DispatchAdapter {
             DatabaseType::MySQL => self.mysql.build_dsn(profile),
             DatabaseType::SQLite => self.sqlite.build_dsn(profile),
             DatabaseType::PostgreSQL => self.postgres.build_dsn(profile),
+            DatabaseType::Redis => {
+                unreachable!("Redis is dispatched to sabiql-redis, not handled in RDB path")
+            }
         }
     }
 }
@@ -265,6 +277,9 @@ impl DdlGenerator for DispatchAdapter {
             DatabaseType::MySQL => self.mysql.generate_ddl(table),
             DatabaseType::SQLite => self.sqlite.generate_ddl(table),
             DatabaseType::PostgreSQL => self.postgres.generate_ddl(table),
+            DatabaseType::Redis => {
+                unreachable!("Redis is dispatched to sabiql-redis, not handled in RDB path")
+            }
         }
     }
 }

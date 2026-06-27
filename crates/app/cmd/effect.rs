@@ -30,14 +30,6 @@ pub enum Effect {
         ssl_mode: SslMode,
         database_type: DatabaseType,
     },
-    LoadConnectionForEdit {
-        id: ConnectionId,
-    },
-    LoadConnections,
-    DeleteConnection {
-        id: ConnectionId,
-    },
-
     CacheInvalidate {
         dsn: String,
     },
@@ -154,10 +146,4 @@ pub enum Effect {
     // but spawned async tasks (e.g. FetchMetadata) may complete out of order.
     Sequence(Vec<Self>),
     DispatchActions(Vec<Action>),
-    SwitchConnection {
-        connection_index: usize,
-    },
-    SwitchToService {
-        service_index: usize,
-    },
 }

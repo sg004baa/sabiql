@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::domain::connection::{ConnectionNameError, ConnectionProfile, ServiceEntry};
+use crate::domain::connection::ConnectionNameError;
 use crate::model::connection::error::ConnectionErrorInfo;
 use crate::model::shared::focused_pane::FocusedPane;
 use crate::model::shared::key_sequence::Prefix;
@@ -172,7 +172,6 @@ pub enum SelectMotion {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ListTarget {
-    ConnectionList,
     QueryHistory,
     TablePicker,
     ErTablePicker,
@@ -202,7 +201,6 @@ pub enum ModalKind {
     QueryHistoryPicker,
     JsonbDetail,
     ConnectionSetup,
-    ConnectionSelector,
     FilePicker,
 }
 
@@ -229,15 +227,6 @@ pub struct ErDiagramInfo {
     pub path: String,
     pub table_count: usize,
     pub total_tables: usize,
-}
-
-#[derive(Debug, Clone)]
-pub struct ConnectionsLoadedPayload {
-    pub profiles: Vec<ConnectionProfile>,
-    pub services: Vec<ServiceEntry>,
-    pub service_file_path: Option<std::path::PathBuf>,
-    pub profile_load_warning: Option<String>,
-    pub service_load_warning: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -303,10 +292,9 @@ pub enum Action {
 
     // Connection lifecycle
     TryConnect,
-    SwitchConnection(ConnectionTarget),
+    RequestConnectionSwitch,
 
     // Connection Setup
-    StartEditConnection(ConnectionId),
     ConnectionSetupNextField,
     ConnectionSetupPrevField,
     ConnectionSetupToggleDropdown,
@@ -318,8 +306,6 @@ pub enum Action {
     ConnectionSetupCancel,
     ConnectionSaveCompleted(ConnectionTarget),
     ConnectionSaveFailed(ConnectionSaveError),
-    ConnectionEditLoaded(Box<ConnectionProfile>),
-    ConnectionEditLoadFailed(ConnectionStoreError),
 
     // File Picker (SQLite "File:" field)
     OpenFilePicker,
@@ -346,15 +332,6 @@ pub enum Action {
     ConfirmDialogConfirm,
     ConfirmDialogCancel,
 
-    // Connection deletion
-    RequestDeleteSelectedConnection,
-    DeleteConnection(ConnectionId),
-    ConnectionDeleted(ConnectionId),
-    ConnectionDeleteFailed(ConnectionStoreError),
-
-    // Connection edit (from list)
-    RequestEditSelectedConnection,
-
     // Command line actions
     EnterCommandLine,
     ExitCommandLine,
@@ -367,10 +344,6 @@ pub enum Action {
     SettingsCancel,
     SettingsSaved,
     SettingsSaveFailed(SettingsStoreError),
-
-    // Connection list navigation
-    ConnectionsLoaded(ConnectionsLoadedPayload),
-    ConfirmConnectionSelection,
 
     // Selection
     ConfirmSelection,

@@ -7,6 +7,7 @@ members = [
     "crates/tui-kit",
     "crates/ui",
     "crates/sabiql-redis",
+    "crates/sabiql-shell",
 ]
 resolver = "2"
 

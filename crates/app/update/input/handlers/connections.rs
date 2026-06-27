@@ -85,19 +85,11 @@ pub fn handle_connection_error_keys(combo: KeyCombo) -> Action {
         .unwrap_or(Action::None)
 }
 
-pub fn handle_connection_selector_keys(combo: KeyCombo) -> Action {
-    keybindings::CONNECTION_SELECTOR
-        .resolve(&combo)
-        .unwrap_or(Action::None)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::shared::input_mode::InputMode;
-    use crate::update::action::{
-        ListMotion, ListTarget, ModalKind, ScrollAmount, ScrollDirection, ScrollTarget,
-    };
+    use crate::update::action::{ScrollAmount, ScrollDirection, ScrollTarget};
     use crate::update::input::keybindings::{Key, KeyCombo, Modifiers};
     use rstest::rstest;
 
@@ -301,7 +293,7 @@ mod tests {
         enum Expected {
             Close,
             Reenter,
-            OpenSelector,
+            Switch,
             ToggleDetails,
             Copy,
             ScrollUp,
@@ -311,7 +303,7 @@ mod tests {
         #[rstest]
         #[case(Key::Esc, Expected::Close)]
         #[case(Key::Char('e'), Expected::Reenter)]
-        #[case(Key::Char('s'), Expected::OpenSelector)]
+        #[case(Key::Char('s'), Expected::Switch)]
         #[case(Key::Char('d'), Expected::ToggleDetails)]
         #[case(Key::Char('y'), Expected::Copy)]
         fn action_keys(#[case] code: Key, #[case] expected: Expected) {
@@ -320,12 +312,7 @@ mod tests {
             match expected {
                 Expected::Close => assert!(matches!(result, Action::CloseConnectionError)),
                 Expected::Reenter => assert!(matches!(result, Action::ReenterConnectionSetup)),
-                Expected::OpenSelector => {
-                    assert!(matches!(
-                        result,
-                        Action::OpenModal(ModalKind::ConnectionSelector)
-                    ));
-                }
+                Expected::Switch => assert!(matches!(result, Action::RequestConnectionSwitch)),
                 Expected::ToggleDetails => {
                     assert!(matches!(result, Action::ToggleConnectionErrorDetails));
                 }
@@ -385,48 +372,4 @@ mod tests {
         }
     }
 
-    mod connection_selector_keys {
-        use super::*;
-
-        #[rstest]
-        #[case(Key::Char('j'), Action::ListSelect { target: ListTarget::ConnectionList, motion: ListMotion::Next })]
-        #[case(Key::Down, Action::ListSelect { target: ListTarget::ConnectionList, motion: ListMotion::Next })]
-        #[case(Key::Char('n'), Action::ListSelect { target: ListTarget::ConnectionList, motion: ListMotion::Next })]
-        #[case(Key::Char('k'), Action::ListSelect { target: ListTarget::ConnectionList, motion: ListMotion::Previous })]
-        #[case(Key::Up, Action::ListSelect { target: ListTarget::ConnectionList, motion: ListMotion::Previous })]
-        #[case(Key::Char('p'), Action::ListSelect { target: ListTarget::ConnectionList, motion: ListMotion::Previous })]
-        fn selector_navigation_keys(#[case] code: Key, #[case] expected: Action) {
-            let result = match code {
-                Key::Char('p' | 'n') => handle_connection_selector_keys(combo_ctrl(code)),
-                _ => handle_connection_selector_keys(combo(code)),
-            };
-
-            assert_eq!(format!("{result:?}"), format!("{expected:?}"));
-        }
-
-        #[rstest]
-        #[case(Key::Enter, Action::ConfirmConnectionSelection)]
-        #[case(Key::Char('n'), Action::OpenModal(ModalKind::ConnectionSetup))]
-        #[case(Key::Char('e'), Action::RequestEditSelectedConnection)]
-        #[case(Key::Char('d'), Action::RequestDeleteSelectedConnection)]
-        fn selector_action_keys(#[case] code: Key, #[case] expected: Action) {
-            let result = handle_connection_selector_keys(combo(code));
-
-            assert_eq!(format!("{result:?}"), format!("{expected:?}"));
-        }
-
-        #[test]
-        fn selector_esc_closes() {
-            let result = handle_connection_selector_keys(combo(Key::Esc));
-
-            assert!(matches!(result, Action::Escape));
-        }
-
-        #[test]
-        fn unknown_key_returns_none() {
-            let result = handle_connection_selector_keys(combo(Key::Char('x')));
-
-            assert!(matches!(result, Action::None));
-        }
-    }
 }

@@ -11,11 +11,11 @@ use crate::app::model::shared::ui_state::ResultNavMode;
 use crate::app::model::sql_editor::modal::SqlModalStatus;
 use crate::app::services::AppServices;
 use crate::app::update::input::keybindings::{
-    CELL_EDIT_KEYS, COMMAND_PALETTE_ROWS, CONNECTION_ERROR_ROWS, CONNECTION_SELECTOR_ROWS,
-    CONNECTION_SETUP_KEYS, ER_PICKER_ROWS, FILE_PICKER_ROWS, FOOTER_NAV_KEYS, GLOBAL_KEYS,
-    HELP_ROWS, HISTORY_KEYS, INSPECTOR_DDL_KEYS, JSONB_DETAIL_ROWS, JSONB_EDIT_ROWS,
-    JSONB_SEARCH_KEYS, OVERLAY_KEYS, QUERY_HISTORY_PICKER_ROWS, RESULT_ACTIVE_KEYS, SETTINGS_ROWS,
-    SQL_MODAL_CONFIRMING_KEYS, SQL_MODAL_KEYS, SQL_MODAL_PLAN_KEYS, TABLE_PICKER_ROWS, idx,
+    CELL_EDIT_KEYS, COMMAND_PALETTE_ROWS, CONNECTION_ERROR_ROWS, CONNECTION_SETUP_KEYS,
+    ER_PICKER_ROWS, FILE_PICKER_ROWS, FOOTER_NAV_KEYS, GLOBAL_KEYS, HELP_ROWS, HISTORY_KEYS,
+    INSPECTOR_DDL_KEYS, JSONB_DETAIL_ROWS, JSONB_EDIT_ROWS, JSONB_SEARCH_KEYS, OVERLAY_KEYS,
+    QUERY_HISTORY_PICKER_ROWS, RESULT_ACTIVE_KEYS, SETTINGS_ROWS, SQL_MODAL_CONFIRMING_KEYS,
+    SQL_MODAL_KEYS, SQL_MODAL_PLAN_KEYS, TABLE_PICKER_ROWS, idx,
 };
 use crate::primitives::atoms::key_text;
 use crate::primitives::atoms::spinner_char;
@@ -344,21 +344,6 @@ impl Footer {
                 JSONB_EDIT_ROWS[idx::jsonb_edit::MOVE].as_hint(),
                 JSONB_EDIT_ROWS[idx::jsonb_edit::HOME_END].as_hint(),
             ],
-            InputMode::ConnectionSelector => {
-                let r = CONNECTION_SELECTOR_ROWS;
-                use idx::connection_selector as cs;
-                let is_service_selected = crate::app::model::connection::list::is_service_selected(
-                    state.connection_list_items(),
-                    state.ui.connection_list_selected,
-                );
-                let mut list = vec![r[cs::CONFIRM].as_hint(), r[cs::NEW].as_hint()];
-                if !is_service_selected {
-                    list.push(r[cs::EDIT].as_hint());
-                    list.push(r[cs::DELETE].as_hint());
-                }
-                list.push(r[cs::CLOSE].as_hint());
-                list
-            }
         }
     }
 

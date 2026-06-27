@@ -12,7 +12,6 @@ pub enum InputMode {
     ConnectionSetup,
     ConnectionError,
     ConfirmDialog,
-    ConnectionSelector,
     ErTablePicker,
     QueryHistoryPicker,
     JsonbDetail,

@@ -29,7 +29,6 @@ pub struct RenderOutput {
     pub inspector_pane_height: u16,
     pub result_pane_height: u16,
     pub command_line_visible_width: Option<usize>,
-    pub connection_list_pane_height: Option<u16>,
     pub table_picker_pane_height: Option<u16>,
     pub table_picker_filter_visible_width: Option<usize>,
     pub er_picker_pane_height: Option<u16>,
