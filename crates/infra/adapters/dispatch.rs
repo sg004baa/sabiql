@@ -415,6 +415,7 @@ mod tests {
                     attributes: ColumnAttributes::from_parts(false, true, false),
                     default: None,
                     comment: None,
+                    extra: None,
                     ordinal_position: 1,
                 }],
                 primary_key: Some(vec!["id".to_string()]),

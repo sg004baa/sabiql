@@ -415,6 +415,7 @@ mod tests {
                     default: None,
                     attributes: ColumnAttributes::PRIMARY_KEY | ColumnAttributes::UNIQUE,
                     comment: None,
+                    extra: None,
                     ordinal_position: 1,
                 },
                 Column {
@@ -423,6 +424,7 @@ mod tests {
                     default: None,
                     attributes: ColumnAttributes::NULLABLE,
                     comment: None,
+                    extra: None,
                     ordinal_position: 2,
                 },
             ],

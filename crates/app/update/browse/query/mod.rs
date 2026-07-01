@@ -92,6 +92,7 @@ pub(super) mod tests {
                     default: None,
                     attributes: ColumnAttributes::PRIMARY_KEY | ColumnAttributes::UNIQUE,
                     comment: None,
+                    extra: None,
                     ordinal_position: 1,
                 },
                 Column {
@@ -100,6 +101,7 @@ pub(super) mod tests {
                     default: None,
                     attributes: ColumnAttributes::NULLABLE,
                     comment: None,
+                    extra: None,
                     ordinal_position: 2,
                 },
             ],
@@ -133,6 +135,7 @@ pub(super) mod tests {
             default: None,
             attributes: ColumnAttributes::NULLABLE,
             comment: None,
+            extra: None,
             ordinal_position: 3,
         });
         detail

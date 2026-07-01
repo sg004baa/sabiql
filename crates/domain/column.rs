@@ -7,6 +7,7 @@ pub struct Column {
     pub default: Option<String>,
     pub attributes: ColumnAttributes,
     pub comment: Option<String>,
+    pub extra: Option<String>,
     pub ordinal_position: i32,
 }
 
@@ -87,6 +88,7 @@ mod tests {
             default: default.map(ToString::to_string),
             attributes: ColumnAttributes::from_parts(nullable, false, false),
             comment: None,
+            extra: None,
             ordinal_position: 1,
         }
     }

@@ -19,6 +19,7 @@ fn jsonb_detail_state() -> (AppState, std::time::Instant) {
         attributes: ColumnAttributes::NULLABLE,
         default: None,
         comment: None,
+        extra: None,
         ordinal_position: 4,
     });
     let _ = state.session.set_table_detail(table, 0);

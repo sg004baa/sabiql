@@ -945,6 +945,7 @@ mod tests {
                     default: None,
                     attributes: ColumnAttributes::NULLABLE,
                     comment: None,
+                    extra: None,
                     ordinal_position: (i + 1) as i32,
                 })
                 .collect(),
@@ -1239,6 +1240,7 @@ mod tests {
                         default: None,
                         attributes: ColumnAttributes::NULLABLE,
                         comment: None,
+                        extra: None,
                         ordinal_position: 1,
                     },
                     Column {
@@ -1247,6 +1249,7 @@ mod tests {
                         default: None,
                         attributes: ColumnAttributes::PRIMARY_KEY | ColumnAttributes::UNIQUE,
                         comment: None,
+                        extra: None,
                         ordinal_position: 2,
                     },
                 ],
@@ -1382,6 +1385,7 @@ mod tests {
                     default: None,
                     attributes: ColumnAttributes::NULLABLE,
                     comment: None,
+                    extra: None,
                     ordinal_position: 1,
                 },
                 Column {
@@ -1390,6 +1394,7 @@ mod tests {
                     default: None,
                     attributes: ColumnAttributes::PRIMARY_KEY | ColumnAttributes::UNIQUE,
                     comment: None,
+                    extra: None,
                     ordinal_position: 2,
                 },
             );
@@ -1410,6 +1415,7 @@ mod tests {
                     default: None,
                     attributes: ColumnAttributes::NULLABLE,
                     comment: None,
+                    extra: None,
                     ordinal_position: 1,
                 },
                 Column {
@@ -1418,6 +1424,7 @@ mod tests {
                     default: None,
                     attributes: ColumnAttributes::empty(),
                     comment: None,
+                    extra: None,
                     ordinal_position: 2,
                 },
             );
@@ -1624,6 +1631,7 @@ mod tests {
                         default: None,
                         attributes: ColumnAttributes::PRIMARY_KEY | ColumnAttributes::UNIQUE,
                         comment: None,
+                        extra: None,
                         ordinal_position: 1,
                     },
                     Column {
@@ -1632,6 +1640,7 @@ mod tests {
                         default: None,
                         attributes: ColumnAttributes::NULLABLE,
                         comment: None,
+                        extra: None,
                         ordinal_position: 2,
                     },
                 ],
@@ -1707,6 +1716,7 @@ mod tests {
                         default: None,
                         attributes: ColumnAttributes::PRIMARY_KEY | ColumnAttributes::UNIQUE,
                         comment: None,
+                        extra: None,
                         ordinal_position: 1,
                     },
                     Column {
@@ -1715,6 +1725,7 @@ mod tests {
                         default: None,
                         attributes: ColumnAttributes::NULLABLE,
                         comment: None,
+                        extra: None,
                         ordinal_position: 2,
                     },
                     Column {
@@ -1723,6 +1734,7 @@ mod tests {
                         default: None,
                         attributes: ColumnAttributes::NULLABLE,
                         comment: None,
+                        extra: None,
                         ordinal_position: 3,
                     },
                 ],
@@ -1780,6 +1792,7 @@ mod tests {
                         default: None,
                         attributes: ColumnAttributes::PRIMARY_KEY | ColumnAttributes::UNIQUE,
                         comment: None,
+                        extra: None,
                         ordinal_position: 1,
                     },
                     Column {
@@ -1788,6 +1801,7 @@ mod tests {
                         default: None,
                         attributes: ColumnAttributes::empty(),
                         comment: None,
+                        extra: None,
                         ordinal_position: 2,
                     },
                     Column {
@@ -1796,6 +1810,7 @@ mod tests {
                         default: None,
                         attributes: ColumnAttributes::NULLABLE,
                         comment: None,
+                        extra: None,
                         ordinal_position: 3,
                     },
                 ],
@@ -1877,6 +1892,7 @@ mod tests {
                         default: None,
                         attributes: ColumnAttributes::NULLABLE,
                         comment: None,
+                        extra: None,
                         ordinal_position: 1,
                     },
                     Column {
@@ -1885,6 +1901,7 @@ mod tests {
                         default: None,
                         attributes: ColumnAttributes::NULLABLE,
                         comment: None,
+                        extra: None,
                         ordinal_position: 2,
                     },
                 ],
@@ -1918,6 +1935,7 @@ mod tests {
                         default: None,
                         attributes: ColumnAttributes::NULLABLE,
                         comment: None,
+                        extra: None,
                         ordinal_position: 1,
                     },
                     Column {
@@ -1926,6 +1944,7 @@ mod tests {
                         default: None,
                         attributes: ColumnAttributes::NULLABLE,
                         comment: None,
+                        extra: None,
                         ordinal_position: 2,
                     },
                 ],
@@ -1966,6 +1985,7 @@ mod tests {
                         default: None,
                         attributes: ColumnAttributes::NULLABLE,
                         comment: None,
+                        extra: None,
                         ordinal_position: 1,
                     },
                     Column {
@@ -1974,6 +1994,7 @@ mod tests {
                         default: None,
                         attributes: ColumnAttributes::NULLABLE,
                         comment: None,
+                        extra: None,
                         ordinal_position: 2,
                     },
                 ],
@@ -2109,6 +2130,7 @@ mod tests {
                     default: None,
                     attributes: ColumnAttributes::PRIMARY_KEY | ColumnAttributes::UNIQUE,
                     comment: None,
+                    extra: None,
                     ordinal_position: 1,
                 }],
                 primary_key: None,
@@ -2275,6 +2297,7 @@ mod tests {
                         default: None,
                         attributes: ColumnAttributes::PRIMARY_KEY | ColumnAttributes::UNIQUE,
                         comment: None,
+                        extra: None,
                         ordinal_position: 1,
                     },
                     Column {
@@ -2283,6 +2306,7 @@ mod tests {
                         default: None,
                         attributes: ColumnAttributes::NULLABLE,
                         comment: None,
+                        extra: None,
                         ordinal_position: 2,
                     },
                     Column {
@@ -2291,6 +2315,7 @@ mod tests {
                         default: None,
                         attributes: ColumnAttributes::UNIQUE,
                         comment: None,
+                        extra: None,
                         ordinal_position: 3,
                     },
                 ],
@@ -2502,6 +2527,7 @@ mod tests {
                     default: None,
                     attributes: ColumnAttributes::NULLABLE,
                     comment: None,
+                    extra: None,
                     ordinal_position: 1,
                 }],
                 primary_key: None,
