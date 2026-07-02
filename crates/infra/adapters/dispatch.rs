@@ -257,6 +257,44 @@ impl SqlDialect for DispatchAdapter {
         self.sql_dialect_for_active_type()
             .build_bulk_delete_sql(schema, table, pk_pairs_per_row)
     }
+
+    fn build_select_sql(
+        &self,
+        schema: &str,
+        table: &str,
+        columns: &[String],
+        pk_pairs_per_row: &[Vec<(String, String)>],
+    ) -> String {
+        self.sql_dialect_for_active_type().build_select_sql(
+            schema,
+            table,
+            columns,
+            pk_pairs_per_row,
+        )
+    }
+
+    fn build_insert_sql(
+        &self,
+        schema: &str,
+        table: &str,
+        columns: &[String],
+        rows: &[Vec<String>],
+    ) -> String {
+        self.sql_dialect_for_active_type()
+            .build_insert_sql(schema, table, columns, rows)
+    }
+
+    fn build_row_update_sql(
+        &self,
+        schema: &str,
+        table: &str,
+        columns: &[String],
+        rows: &[Vec<String>],
+        pk_columns: &[String],
+    ) -> String {
+        self.sql_dialect_for_active_type()
+            .build_row_update_sql(schema, table, columns, rows, pk_columns)
+    }
 }
 
 impl DdlGenerator for DispatchAdapter {

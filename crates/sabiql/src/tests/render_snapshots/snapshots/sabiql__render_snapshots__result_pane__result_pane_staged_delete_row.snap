@@ -51,4 +51,4 @@ test_project | test_db | - | no dsn | localhost:5432/test
 │                                       ││                                                                                                                          │
 │                                       ││                                                                                                                          │
 └───────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-dd:Stage Del  u:Unstage  :w:Write  ?:Help  Esc:Back  q:Quit
+dd:Stage Del  u:Unstage  Space:Mark Row  S:Gen SQL  :w:Write  ?:Help  Esc:Back  q:Quit

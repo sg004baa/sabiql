@@ -1,4 +1,5 @@
 mod edit;
+mod generate_sql;
 mod history;
 mod jsonb;
 mod scroll;
@@ -20,6 +21,7 @@ pub fn reduce_result(
 ) -> Option<Vec<Effect>> {
     scroll::reduce(state, action)
         .or_else(|| selection::reduce(state, action, now))
+        .or_else(|| generate_sql::reduce(state, action, services, now))
         .or_else(|| edit::reduce(state, action, now))
         .or_else(|| yank::reduce(state, action, services, now))
         .or_else(|| history::reduce(state, action))

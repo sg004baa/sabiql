@@ -12,10 +12,11 @@ use crate::app::model::sql_editor::modal::SqlModalStatus;
 use crate::app::services::AppServices;
 use crate::app::update::input::keybindings::{
     CELL_EDIT_KEYS, COMMAND_PALETTE_ROWS, CONNECTION_ERROR_ROWS, CONNECTION_SELECTOR_ROWS,
-    CONNECTION_SETUP_KEYS, ER_PICKER_ROWS, FILE_PICKER_ROWS, FOOTER_NAV_KEYS, GLOBAL_KEYS,
-    HELP_ROWS, HISTORY_KEYS, INSPECTOR_DDL_KEYS, JSONB_DETAIL_ROWS, JSONB_EDIT_ROWS,
-    JSONB_SEARCH_KEYS, OVERLAY_KEYS, QUERY_HISTORY_PICKER_ROWS, RESULT_ACTIVE_KEYS, SETTINGS_ROWS,
-    SQL_MODAL_CONFIRMING_KEYS, SQL_MODAL_KEYS, SQL_MODAL_PLAN_KEYS, TABLE_PICKER_ROWS, idx,
+    CONNECTION_SETUP_KEYS, ER_PICKER_ROWS, FILE_PICKER_ROWS, FOOTER_NAV_KEYS,
+    GENERATE_SQL_MENU_ROWS, GLOBAL_KEYS, HELP_ROWS, HISTORY_KEYS, INSPECTOR_DDL_KEYS,
+    JSONB_DETAIL_ROWS, JSONB_EDIT_ROWS, JSONB_SEARCH_KEYS, OVERLAY_KEYS, QUERY_HISTORY_PICKER_ROWS,
+    RESULT_ACTIVE_KEYS, SETTINGS_ROWS, SQL_MODAL_CONFIRMING_KEYS, SQL_MODAL_KEYS,
+    SQL_MODAL_PLAN_KEYS, TABLE_PICKER_ROWS, idx,
 };
 use crate::primitives::atoms::key_text;
 use crate::primitives::atoms::spinner_char;
@@ -113,6 +114,8 @@ impl Footer {
                             RESULT_ACTIVE_KEYS[idx::result_active::EDIT].as_hint(),
                             RESULT_ACTIVE_KEYS[idx::result_active::YANK].as_hint(),
                             RESULT_ACTIVE_KEYS[idx::result_active::ROW_YANK].as_hint(),
+                            RESULT_ACTIVE_KEYS[idx::result_active::MARK_ROW].as_hint(),
+                            RESULT_ACTIVE_KEYS[idx::result_active::GENERATE_SQL].as_hint(),
                             RESULT_ACTIVE_KEYS[idx::result_active::STAGE_DELETE].as_hint(),
                             GLOBAL_KEYS[idx::global::HELP].as_hint(),
                             RESULT_ACTIVE_KEYS[idx::result_active::ESC_BACK].as_hint(),
@@ -122,6 +125,8 @@ impl Footer {
                         vec![
                             RESULT_ACTIVE_KEYS[idx::result_active::STAGE_DELETE].as_hint(),
                             RESULT_ACTIVE_KEYS[idx::result_active::UNSTAGE_DELETE].as_hint(),
+                            RESULT_ACTIVE_KEYS[idx::result_active::MARK_ROW].as_hint(),
+                            RESULT_ACTIVE_KEYS[idx::result_active::GENERATE_SQL].as_hint(),
                             CELL_EDIT_KEYS[idx::cell_edit::WRITE].as_hint(),
                             GLOBAL_KEYS[idx::global::HELP].as_hint(),
                             RESULT_ACTIVE_KEYS[idx::result_active::ESC_BACK].as_hint(),
@@ -135,6 +140,9 @@ impl Footer {
                     if !state.result_interaction.staged_delete_rows().is_empty() {
                         list.push(RESULT_ACTIVE_KEYS[idx::result_active::UNSTAGE_DELETE].as_hint());
                         list.push(CELL_EDIT_KEYS[idx::cell_edit::WRITE].as_hint());
+                    }
+                    if !state.result_interaction.marked_rows().is_empty() {
+                        list.push(RESULT_ACTIVE_KEYS[idx::result_active::GENERATE_SQL].as_hint());
                     }
                     if state.can_request_csv_export() {
                         list.push(GLOBAL_KEYS[idx::global::CSV_EXPORT].as_hint());
@@ -190,6 +198,11 @@ impl Footer {
                             );
                             list.push(CELL_EDIT_KEYS[idx::cell_edit::WRITE].as_hint());
                         }
+                        if !state.result_interaction.marked_rows().is_empty() {
+                            list.push(
+                                RESULT_ACTIVE_KEYS[idx::result_active::GENERATE_SQL].as_hint(),
+                            );
+                        }
                         if state.query.can_paginate_visible_result() {
                             list.push(FOOTER_NAV_KEYS[idx::footer_nav::PAGE_NAV].as_hint());
                         }
@@ -228,6 +241,10 @@ impl Footer {
                     COMMAND_PALETTE_ROWS[idx::cmd_palette::ESC_CLOSE].as_hint(),
                 ]
             }
+            InputMode::GenerateSqlMenu => vec![
+                GENERATE_SQL_MENU_ROWS[idx::generate_sql_menu::ENTER_SELECT].as_hint(),
+                GENERATE_SQL_MENU_ROWS[idx::generate_sql_menu::ESC_CLOSE].as_hint(),
+            ],
             InputMode::Help => vec![
                 HELP_ROWS[idx::help::H_SCROLL].as_hint(),
                 HELP_ROWS[idx::help::CLOSE].as_hint(),

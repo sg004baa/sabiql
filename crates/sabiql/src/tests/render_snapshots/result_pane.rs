@@ -200,6 +200,22 @@ fn result_pane_staged_delete_row() {
 }
 
 #[test]
+fn result_pane_marked_rows() {
+    let (mut state, now) = table_detail_loaded_state();
+    let mut terminal = create_test_terminal();
+
+    with_current_result(&mut state, now);
+    state.ui.focused_pane = FocusedPane::Result;
+    state.result_interaction.activate_cell(0, 0);
+    state.result_interaction.toggle_marked_row(0);
+    state.result_interaction.toggle_marked_row(1);
+
+    let output = render_to_string(&mut terminal, &mut state);
+
+    insta::assert_snapshot!(output);
+}
+
+#[test]
 fn result_pane_jsonb_detail_mode() {
     let (mut state, now) = jsonb_detail_state();
     let mut terminal = create_test_terminal();

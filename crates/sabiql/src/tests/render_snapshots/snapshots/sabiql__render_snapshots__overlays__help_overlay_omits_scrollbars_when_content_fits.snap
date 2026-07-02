@@ -82,6 +82,8 @@ test_project | test_db | - | no dsn | localhost:5432/test
 │                          │  i                                    Edit active cell                                                                     │                          │
 │                          │  Esc                                  Discard the pending draft and stay in cell selection                                 │                          │
 │                          │  y, y                                 Copy the active row values to clipboard (TSV)                                        │                          │
+│                          │  Space                                Toggle the active row in the marked-row selection                                    │                          │
+│                          │  S                                    Generate SQL from marked rows or the active row                                      │                          │
 │                          │                                                                                                                            │                          │
 │                          │▸ Inspector Pane (DDL tab)                                                                                                  │                          │
 │                          │  y                                    Copy DDL to clipboard                                                                │                          │
@@ -149,10 +151,10 @@ test_project | test_db | - | no dsn | localhost:5432/test
 │                          │                                                                                                                            │                          │
 │                          │▸ Command Line                                                                                                              │                          │
 │                          │  :quit                                Quit application                                                                     │                          │
-│                          │  :help                                Show help                                                                            │                          │
-│                          │  :sql                                 Open SQL Editor                                                                      │                          │
-│                          │  :erd                                 Open ER Diagram                                                                      │──────────────────────────┘
-│                          │  :settings                            Open Settings                                                                        │──────────────────────────┐
+│                          │  :help                                Show help                                                                            │──────────────────────────┘
+│                          │  :sql                                 Open SQL Editor                                                                      │──────────────────────────┐
+│                          │  :erd                                 Open ER Diagram                                                                      │                          │
+│                          │  :settings                            Open Settings                                                                        │                          │
 │                          │  :theme                               Open Theme Settings                                                                  │                          │
 │                          │  :palette                             Open Command Palette                                                                 │                          │
 │                          │  ←→                                   Move cursor                                                                          │                          │
@@ -250,8 +252,6 @@ test_project | test_db | - | no dsn | localhost:5432/test
 │                          │  type                                 Type to search                                                                       │                          │
 │                          │  Enter                                Confirm search                                                                       │                          │
 │                          │  Esc                                  Cancel search                                                                        │                          │
-│                          │                                                                                                                            │                          │
-│                          │                                                                                                                            │                          │
 │                          │                                                                                                                            │                          │
 │                          │                                                                                                                            │                          │
 │                          │                                                                                                                            │                          │

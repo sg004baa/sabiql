@@ -178,6 +178,31 @@ fn staged_delete_row_uses_dark_red_bg() {
 }
 
 #[test]
+fn marked_rows_use_teal_bg_with_staged_and_active_precedence() {
+    let (mut state, now) = table_detail_loaded_state();
+    let mut terminal = create_test_terminal();
+
+    with_current_result(&mut state, now);
+    state.ui.focused_pane = FocusedPane::Result;
+    state.result_interaction.activate_cell(0, 0);
+    state.result_interaction.toggle_marked_row(0);
+    state.result_interaction.toggle_marked_row(1);
+    state.result_interaction.stage_row(1);
+
+    let buffer = render_and_get_buffer(&mut terminal, &mut state);
+
+    assert!(has_cell(&buffer, |cell| {
+        cell.bg == DEFAULT_THEME.component.table.marked_row_bg
+    }));
+    assert!(has_cell(&buffer, |cell| {
+        cell.bg == DEFAULT_THEME.component.table.staged_delete_bg
+    }));
+    assert!(has_cell(&buffer, |cell| {
+        cell.bg == DEFAULT_THEME.component.table.result_cell_active_bg
+    }));
+}
+
+#[test]
 fn scrim_applies_dim_modifier() {
     let (mut state, _now) = connected_state();
     let mut terminal = create_test_terminal();
@@ -913,6 +938,17 @@ fn injected_palette_changes_shell_modal_and_picker_styles() {
     assert!(
         has_custom_picker_selection,
         "Expected picker selection to use injected selected background"
+    );
+
+    state.modal.set_mode(InputMode::GenerateSqlMenu);
+    let generate_sql_buffer =
+        render_and_get_buffer_at_with_theme(&mut terminal, &mut state, now, &theme);
+    let has_custom_generate_sql_selection = has_cell(&generate_sql_buffer, |cell| {
+        cell.bg == theme.component.editor.completion_selected_bg
+    });
+    assert!(
+        has_custom_generate_sql_selection,
+        "Expected Generate SQL selection to use injected selected background"
     );
 
     state.modal.set_mode(InputMode::SqlModal);

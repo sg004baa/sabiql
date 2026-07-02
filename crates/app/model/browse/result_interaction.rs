@@ -7,8 +7,8 @@ use crate::model::shared::ui_state::{ResultSelection, YankFlash};
 use crate::policy::write::write_guardrails::WritePreview;
 
 // Invariants:
-// - `reset_view` / `reset_interaction` clear staged deletes too.
-// - `exit_cell_to_scroll()` preserves staged deletes so Esc does not drop a staged batch.
+// - `reset_view` / `reset_interaction` clear staged deletes and marked rows too.
+// - `exit_cell_to_scroll()` preserves staged deletes and marked rows.
 // - Callers must restore `input_mode` themselves when leaving `CellEdit`.
 #[derive(Debug, Clone, Default)]
 pub struct ResultInteraction {
@@ -21,6 +21,7 @@ pub struct ResultInteraction {
     selection: ResultSelection,
     cell_edit: CellEditState,
     staged_delete_rows: BTreeSet<usize>,
+    marked_rows: BTreeSet<usize>,
     pending_write_preview: Option<WritePreview>,
 }
 
@@ -41,6 +42,10 @@ impl ResultInteraction {
 
     pub fn staged_delete_rows(&self) -> &BTreeSet<usize> {
         &self.staged_delete_rows
+    }
+
+    pub fn marked_rows(&self) -> &BTreeSet<usize> {
+        &self.marked_rows
     }
 
     pub fn pending_write_preview(&self) -> Option<&WritePreview> {
@@ -89,6 +94,16 @@ impl ResultInteraction {
         self.staged_delete_rows.clear();
     }
 
+    pub fn toggle_marked_row(&mut self, row: usize) {
+        if !self.marked_rows.remove(&row) {
+            self.marked_rows.insert(row);
+        }
+    }
+
+    pub fn clear_marked_rows(&mut self) {
+        self.marked_rows.clear();
+    }
+
     pub fn set_write_preview(&mut self, preview: WritePreview) {
         self.pending_write_preview = Some(preview);
     }
@@ -111,6 +126,7 @@ impl ResultInteraction {
     pub fn reset_interaction(&mut self) {
         self.clear_active_cell_state();
         self.staged_delete_rows.clear();
+        self.marked_rows.clear();
     }
 
     // Caller must set `input_mode` to `Normal` if it was `CellEdit` (SAB-136).
@@ -341,6 +357,58 @@ mod tests {
 
         assert_eq!(ri.staged_delete_rows().len(), 1);
         assert!(ri.staged_delete_rows().contains(&0));
+    }
+
+    mod marked_rows {
+        use super::*;
+
+        #[test]
+        fn toggle_adds_and_removes_row() {
+            let mut interaction = ResultInteraction::default();
+
+            interaction.toggle_marked_row(2);
+            assert!(interaction.marked_rows().contains(&2));
+
+            interaction.toggle_marked_row(2);
+            assert!(!interaction.marked_rows().contains(&2));
+        }
+
+        #[test]
+        fn clear_removes_all_rows() {
+            let mut interaction = ResultInteraction::default();
+            interaction.toggle_marked_row(1);
+            interaction.toggle_marked_row(3);
+
+            interaction.clear_marked_rows();
+
+            assert!(interaction.marked_rows().is_empty());
+        }
+
+        #[test]
+        fn resets_clear_rows() {
+            let mut interaction = ResultInteraction::default();
+            interaction.toggle_marked_row(1);
+
+            interaction.reset_interaction();
+
+            assert!(interaction.marked_rows().is_empty());
+
+            interaction.toggle_marked_row(2);
+            interaction.reset_view();
+
+            assert!(interaction.marked_rows().is_empty());
+        }
+
+        #[test]
+        fn exit_cell_to_scroll_preserves_rows() {
+            let mut interaction = ResultInteraction::default();
+            interaction.activate_cell(1, 0);
+            interaction.toggle_marked_row(1);
+
+            interaction.exit_cell_to_scroll();
+
+            assert!(interaction.marked_rows().contains(&1));
+        }
     }
 
     #[test]

@@ -99,6 +99,7 @@ pub struct TableTokens {
     pub cell_edit_fg: Color,
     pub staged_delete_bg: Color,
     pub staged_delete_fg: Color,
+    pub marked_row_bg: Color,
     pub striped_row_bg: Color,
 }
 
@@ -238,6 +239,7 @@ pub const DEFAULT_THEME: ThemePalette = ThemePalette {
             cell_edit_fg: Color::Rgb(0xa8, 0xb8, 0xb5),
             staged_delete_bg: Color::Rgb(0x3d, 0x22, 0x22),
             staged_delete_fg: Color::Rgb(0xee, 0x77, 0x77),
+            marked_row_bg: Color::Rgb(0x1f, 0x3a, 0x42),
             striped_row_bg: Color::Rgb(0x1e, 0x1e, 0x23),
         },
         feedback: FeedbackTokens {
@@ -311,6 +313,7 @@ pub const LIGHT_THEME: ThemePalette = ThemePalette {
             cell_edit_fg: Color::Rgb(0x4a, 0x78, 0x72),
             staged_delete_bg: Color::Rgb(0xf3, 0xdd, 0xdb),
             staged_delete_fg: Color::Rgb(0xb3, 0x26, 0x1e),
+            marked_row_bg: Color::Rgb(0xd7, 0xec, 0xee),
             striped_row_bg: Color::Rgb(0xf1, 0xf5, 0xf4),
         },
         feedback: FeedbackTokens {
@@ -386,6 +389,7 @@ pub const TEST_CONTRAST_THEME: ThemePalette = ThemePalette {
             cell_edit_fg: Color::Rgb(0xff, 0xe0, 0x66),
             staged_delete_bg: Color::Rgb(0x4a, 0x1f, 0x1f),
             staged_delete_fg: Color::Rgb(0xff, 0x7a, 0x59),
+            marked_row_bg: Color::Rgb(0x18, 0x47, 0x50),
             striped_row_bg: Color::Rgb(0x1d, 0x21, 0x2b),
         },
         feedback: FeedbackTokens {

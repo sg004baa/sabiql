@@ -11,6 +11,44 @@ fn sql_literal_or_null(value: &str) -> String {
     }
 }
 
+fn build_pk_where_clause(pk_pairs_per_row: &[Vec<(String, String)>]) -> String {
+    assert!(
+        !pk_pairs_per_row.is_empty(),
+        "pk_pairs_per_row must not be empty"
+    );
+
+    let pk_count = pk_pairs_per_row[0].len();
+
+    if pk_count == 1 {
+        let col = quote_ident_mysql(&pk_pairs_per_row[0][0].0);
+        let values = pk_pairs_per_row
+            .iter()
+            .map(|pairs| sql_literal_or_null(&pairs[0].1))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("{col} IN ({values})")
+    } else {
+        let cols = pk_pairs_per_row[0]
+            .iter()
+            .map(|(col, _)| quote_ident_mysql(col))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let rows = pk_pairs_per_row
+            .iter()
+            .map(|pairs| {
+                let vals = pairs
+                    .iter()
+                    .map(|(_, val)| sql_literal_or_null(val))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("({vals})")
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("({cols}) IN ({rows})")
+    }
+}
+
 impl SqlDialect for MySqlAdapter {
     fn build_explain_sql(&self, query: &str) -> Option<String> {
         Some(format!("EXPLAIN {query}"))
@@ -50,41 +88,7 @@ impl SqlDialect for MySqlAdapter {
         table: &str,
         pk_pairs_per_row: &[Vec<(String, String)>],
     ) -> String {
-        assert!(
-            !pk_pairs_per_row.is_empty(),
-            "pk_pairs_per_row must not be empty"
-        );
-
-        let pk_count = pk_pairs_per_row[0].len();
-
-        let where_clause = if pk_count == 1 {
-            let col = quote_ident_mysql(&pk_pairs_per_row[0][0].0);
-            let values = pk_pairs_per_row
-                .iter()
-                .map(|pairs| sql_literal_or_null(&pairs[0].1))
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("{col} IN ({values})")
-        } else {
-            let cols = pk_pairs_per_row[0]
-                .iter()
-                .map(|(col, _)| quote_ident_mysql(col))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let rows = pk_pairs_per_row
-                .iter()
-                .map(|pairs| {
-                    let vals = pairs
-                        .iter()
-                        .map(|(_, val)| sql_literal_or_null(val))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    format!("({vals})")
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("({cols}) IN ({rows})")
-        };
+        let where_clause = build_pk_where_clause(pk_pairs_per_row);
 
         format!(
             "DELETE FROM {}.{}\nWHERE {};",
@@ -92,6 +96,119 @@ impl SqlDialect for MySqlAdapter {
             quote_ident_mysql(table),
             where_clause
         )
+    }
+
+    fn build_select_sql(
+        &self,
+        schema: &str,
+        table: &str,
+        columns: &[String],
+        pk_pairs_per_row: &[Vec<(String, String)>],
+    ) -> String {
+        let columns = columns
+            .iter()
+            .map(|column| quote_ident_mysql(column))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let where_clause = if pk_pairs_per_row.is_empty() {
+            String::new()
+        } else {
+            format!("\nWHERE {}", build_pk_where_clause(pk_pairs_per_row))
+        };
+
+        format!(
+            "SELECT {columns}\nFROM {}.{}{where_clause};",
+            quote_ident_mysql(schema),
+            quote_ident_mysql(table)
+        )
+    }
+
+    fn build_insert_sql(
+        &self,
+        schema: &str,
+        table: &str,
+        columns: &[String],
+        rows: &[Vec<String>],
+    ) -> String {
+        let columns = columns
+            .iter()
+            .map(|column| quote_ident_mysql(column))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let values = rows
+            .iter()
+            .map(|row| {
+                let values = row
+                    .iter()
+                    .map(|value| sql_literal_or_null(value))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("  ({values})")
+            })
+            .collect::<Vec<_>>()
+            .join(",\n");
+
+        format!(
+            "INSERT INTO {}.{} ({columns}) VALUES\n{values};",
+            quote_ident_mysql(schema),
+            quote_ident_mysql(table)
+        )
+    }
+
+    fn build_row_update_sql(
+        &self,
+        schema: &str,
+        table: &str,
+        columns: &[String],
+        rows: &[Vec<String>],
+        pk_columns: &[String],
+    ) -> String {
+        rows.iter()
+            .map(|row| {
+                let set_clause = columns
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, column)| {
+                        if pk_columns.contains(column) {
+                            None
+                        } else {
+                            row.get(index).map(|value| {
+                                format!(
+                                    "{} = {}",
+                                    quote_ident_mysql(column),
+                                    sql_literal_or_null(value)
+                                )
+                            })
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let where_clause = pk_columns
+                    .iter()
+                    .filter_map(|pk_column| {
+                        columns
+                            .iter()
+                            .position(|column| column == pk_column)
+                            .and_then(|index| row.get(index))
+                            .map(|value| {
+                                format!(
+                                    "{} = {}",
+                                    quote_ident_mysql(pk_column),
+                                    sql_literal_or_null(value)
+                                )
+                            })
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" AND ");
+
+                format!(
+                    "UPDATE {}.{}\nSET {set_clause}\nWHERE {where_clause};",
+                    quote_ident_mysql(schema),
+                    quote_ident_mysql(table)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }
 
@@ -277,6 +394,123 @@ mod tests {
             let sql = adapter.build_bulk_delete_sql("mydb", "t", &rows);
 
             assert_eq!(sql, "DELETE FROM `mydb`.`t`\nWHERE `id` IN ('O''Reilly');");
+        }
+    }
+
+    mod sql_dialect_select {
+        use super::*;
+
+        #[test]
+        fn single_pk_returns_in_clause() {
+            let adapter = MySqlAdapter::new();
+            let rows = vec![
+                vec![("id".to_string(), "1".to_string())],
+                vec![("id".to_string(), "2".to_string())],
+            ];
+
+            let sql = adapter.build_select_sql(
+                "mydb",
+                "users",
+                &["id".to_string(), "name".to_string()],
+                &rows,
+            );
+
+            assert_eq!(
+                sql,
+                "SELECT `id`, `name`\nFROM `mydb`.`users`\nWHERE `id` IN ('1', '2');"
+            );
+        }
+
+        #[test]
+        fn composite_pk_returns_tuple_in_clause() {
+            let adapter = MySqlAdapter::new();
+            let rows = vec![
+                vec![
+                    ("id".to_string(), "1".to_string()),
+                    ("tenant_id".to_string(), "a".to_string()),
+                ],
+                vec![
+                    ("id".to_string(), "2".to_string()),
+                    ("tenant_id".to_string(), "b".to_string()),
+                ],
+            ];
+
+            let sql = adapter.build_select_sql(
+                "s",
+                "t",
+                &["id".to_string(), "tenant_id".to_string()],
+                &rows,
+            );
+
+            assert_eq!(
+                sql,
+                "SELECT `id`, `tenant_id`\nFROM `s`.`t`\nWHERE (`id`, `tenant_id`) IN (('1', 'a'), ('2', 'b'));"
+            );
+        }
+
+        #[test]
+        fn empty_pk_rows_omits_where_clause() {
+            let adapter = MySqlAdapter::new();
+
+            let sql = adapter.build_select_sql(
+                "mydb",
+                "users",
+                &["id".to_string(), "name".to_string()],
+                &[],
+            );
+
+            assert_eq!(sql, "SELECT `id`, `name`\nFROM `mydb`.`users`;");
+        }
+    }
+
+    mod sql_dialect_insert {
+        use super::*;
+
+        #[test]
+        fn multiple_rows_and_null_return_values_clause() {
+            let adapter = MySqlAdapter::new();
+            let rows = vec![
+                vec!["1".to_string(), "alice".to_string()],
+                vec!["2".to_string(), "NULL".to_string()],
+            ];
+
+            let sql = adapter.build_insert_sql(
+                "mydb",
+                "users",
+                &["id".to_string(), "name".to_string()],
+                &rows,
+            );
+
+            assert_eq!(
+                sql,
+                "INSERT INTO `mydb`.`users` (`id`, `name`) VALUES\n  ('1', 'alice'),\n  ('2', NULL);"
+            );
+        }
+    }
+
+    mod sql_dialect_row_update {
+        use super::*;
+
+        #[test]
+        fn multiple_rows_exclude_pk_from_set_and_join_statements() {
+            let adapter = MySqlAdapter::new();
+            let rows = vec![
+                vec!["1".to_string(), "alice".to_string()],
+                vec!["2".to_string(), "NULL".to_string()],
+            ];
+
+            let sql = adapter.build_row_update_sql(
+                "mydb",
+                "users",
+                &["id".to_string(), "name".to_string()],
+                &rows,
+                &["id".to_string()],
+            );
+
+            assert_eq!(
+                sql,
+                "UPDATE `mydb`.`users`\nSET `name` = 'alice'\nWHERE `id` = '1';\nUPDATE `mydb`.`users`\nSET `name` = NULL\nWHERE `id` = '2';"
+            );
         }
     }
 

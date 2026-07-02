@@ -22,6 +22,7 @@ use crate::features::overlays::settings::SettingsOverlay;
 use crate::features::pickers::command_palette::CommandPalette;
 use crate::features::pickers::er_table_picker::{ErTablePicker, ErTablePickerRenderMetrics};
 use crate::features::pickers::file_picker::{FilePicker, FilePickerRenderMetrics};
+use crate::features::pickers::generate_sql_menu::GenerateSqlMenu;
 use crate::features::pickers::query_history_picker::{
     QueryHistoryPicker, QueryHistoryPickerRenderMetrics,
 };
@@ -175,6 +176,7 @@ impl MainLayout {
 
         match state.input_mode() {
             InputMode::CommandPalette => CommandPalette::render(frame, state, theme),
+            InputMode::GenerateSqlMenu => GenerateSqlMenu::render(frame, state, theme),
             InputMode::Settings => SettingsOverlay::render(frame, state, theme),
             InputMode::Help => HelpOverlay::render(frame, state, theme),
             InputMode::ConnectionSetup => ConnectionSetup::render(frame, state, theme),

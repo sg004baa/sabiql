@@ -21,6 +21,12 @@ pub fn handle_command_palette_keys(combo: KeyCombo) -> Action {
         .unwrap_or(Action::None)
 }
 
+pub fn handle_generate_sql_menu_keys(combo: KeyCombo) -> Action {
+    keybindings::GENERATE_SQL_MENU
+        .resolve(&combo)
+        .unwrap_or(Action::None)
+}
+
 pub fn handle_settings_keys(combo: KeyCombo) -> Action {
     keybindings::SETTINGS
         .resolve(&combo)
@@ -206,6 +212,51 @@ mod tests {
                     ));
                 }
                 Expected::None => assert!(matches!(result, Action::None)),
+            }
+        }
+    }
+
+    mod generate_sql_menu {
+        use super::*;
+
+        enum Expected {
+            Close,
+            Confirm,
+            SelectPrev,
+            SelectNext,
+        }
+
+        #[rstest]
+        #[case(Key::Esc, Expected::Close)]
+        #[case(Key::Char('q'), Expected::Close)]
+        #[case(Key::Enter, Expected::Confirm)]
+        #[case(Key::Up, Expected::SelectPrev)]
+        #[case(Key::Char('k'), Expected::SelectPrev)]
+        #[case(Key::Down, Expected::SelectNext)]
+        #[case(Key::Char('j'), Expected::SelectNext)]
+        fn maps_keys_to_menu_actions(#[case] code: Key, #[case] expected: Expected) {
+            let result = handle_generate_sql_menu_keys(combo(code));
+
+            match expected {
+                Expected::Close => assert!(matches!(
+                    result,
+                    Action::CloseModal(ModalKind::GenerateSqlMenu)
+                )),
+                Expected::Confirm => assert!(matches!(result, Action::ConfirmSelection)),
+                Expected::SelectPrev => assert!(matches!(
+                    result,
+                    Action::ListSelect {
+                        target: ListTarget::GenerateSqlMenu,
+                        motion: ListMotion::Previous,
+                    }
+                )),
+                Expected::SelectNext => assert!(matches!(
+                    result,
+                    Action::ListSelect {
+                        target: ListTarget::GenerateSqlMenu,
+                        motion: ListMotion::Next,
+                    }
+                )),
             }
         }
     }

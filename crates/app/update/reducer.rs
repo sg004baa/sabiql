@@ -13,6 +13,7 @@ use super::{
 use crate::cmd::effect::Effect;
 use crate::domain::TableSummary;
 use crate::model::app_state::AppState;
+use crate::model::browse::generate_sql::GenerateSqlKind;
 use crate::model::shared::focused_pane::FocusedPane;
 use crate::model::shared::input_mode::InputMode;
 use crate::model::shared::key_sequence::KeySequenceState;
@@ -116,6 +117,12 @@ fn reduce_inner(
                 let cmd_action = palette_action_for_index(state.ui.table_picker.selected());
                 state.modal.set_mode(InputMode::Normal);
                 return reduce(state, cmd_action, now, services);
+            } else if state.modal.active_mode() == InputMode::GenerateSqlMenu {
+                let kind = GenerateSqlKind::from_index(state.ui.generate_sql_menu.selected());
+                state.modal.set_mode(InputMode::Normal);
+                if let Some(kind) = kind {
+                    return vec![Effect::DispatchActions(vec![Action::GenerateSql(kind)])];
+                }
             }
 
             vec![]
@@ -2759,6 +2766,39 @@ mod tests {
                 InputMode::CommandPalette,
                 "palette must be closed after confirm"
             );
+        }
+    }
+
+    mod generate_sql_menu {
+        use super::*;
+        use rstest::rstest;
+
+        #[rstest]
+        #[case(0, GenerateSqlKind::Select)]
+        #[case(1, GenerateSqlKind::Insert)]
+        #[case(2, GenerateSqlKind::Update)]
+        #[case(3, GenerateSqlKind::Delete)]
+        fn confirm_selection_dispatches_selected_kind(
+            #[case] index: usize,
+            #[case] expected: GenerateSqlKind,
+        ) {
+            let mut state = create_test_state();
+            state.modal.set_mode(InputMode::GenerateSqlMenu);
+            state.ui.generate_sql_menu.set_selection(index);
+
+            let effects = reduce(
+                &mut state,
+                Action::ConfirmSelection,
+                Instant::now(),
+                &AppServices::stub(),
+            );
+
+            assert_eq!(state.input_mode(), InputMode::Normal);
+            assert!(matches!(
+                effects.as_slice(),
+                [Effect::DispatchActions(actions)]
+                    if matches!(actions.as_slice(), [Action::GenerateSql(kind)] if *kind == expected)
+            ));
         }
     }
 

@@ -43,6 +43,7 @@ pub fn reduce_modal(state: &mut AppState, action: &Action, now: Instant) -> Opti
         }
         Action::CloseModal(ModalKind::TablePicker)
         | Action::CloseModal(ModalKind::CommandPalette)
+        | Action::CloseModal(ModalKind::GenerateSqlMenu)
         | Action::Escape => {
             state.modal.set_mode(InputMode::Normal);
             Some(vec![])
@@ -51,6 +52,11 @@ pub fn reduce_modal(state: &mut AppState, action: &Action, now: Instant) -> Opti
             state.modal.set_mode(InputMode::CommandPalette);
             // Command palette currently reuses the generic picker selection state.
             state.ui.table_picker.reset();
+            Some(vec![])
+        }
+        Action::OpenModal(ModalKind::GenerateSqlMenu) => {
+            state.modal.set_mode(InputMode::GenerateSqlMenu);
+            state.ui.generate_sql_menu.reset();
             Some(vec![])
         }
         Action::OpenModal(ModalKind::Settings) => {
