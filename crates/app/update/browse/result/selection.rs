@@ -133,6 +133,7 @@ mod tests {
                     default: None,
                     attributes: ColumnAttributes::PRIMARY_KEY | ColumnAttributes::UNIQUE,
                     comment: None,
+                    extra: None,
                     ordinal_position: 1,
                 }],
                 primary_key: pk.map(|cols| cols.into_iter().map(ToString::to_string).collect()),

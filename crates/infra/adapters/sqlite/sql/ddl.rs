@@ -62,6 +62,7 @@ mod tests {
             attributes: ColumnAttributes::from_parts(nullable, false, false),
             default: None,
             comment: None,
+            extra: None,
             ordinal_position: 0,
         }
     }

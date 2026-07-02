@@ -141,6 +141,7 @@ impl MySqlAdapter {
                     'is_primary_key', IF(c.COLUMN_KEY = 'PRI', CAST('true' AS JSON), CAST('false' AS JSON)),
                     'is_unique', IF(c.COLUMN_KEY = 'UNI', CAST('true' AS JSON), CAST('false' AS JSON)),
                     'comment', NULLIF(c.COLUMN_COMMENT, ''),
+                    'extra', NULLIF(c.EXTRA, ''),
                     'ordinal_position', c.ORDINAL_POSITION
                 ) AS col
                 FROM information_schema.COLUMNS c
@@ -430,6 +431,17 @@ mod tests {
             assert!(!sql.contains("'indexes'"));
             assert!(!sql.contains("'triggers'"));
             assert!(!sql.contains("'table_info'"));
+        }
+    }
+
+    mod columns_query {
+        use super::*;
+
+        #[test]
+        fn selects_extra_column_metadata() {
+            let sql = MySqlAdapter::columns_query("mydb", "users");
+
+            assert!(sql.contains("'extra', NULLIF(c.EXTRA, '')"));
         }
     }
 

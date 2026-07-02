@@ -88,6 +88,7 @@ mod tests {
             default: None,
             attributes: ColumnAttributes::from_parts(nullable, false, false),
             comment: None,
+            extra: None,
             ordinal_position: 0,
         }
     }

@@ -35,6 +35,7 @@ pub fn sample_table_detail() -> Table {
                 attributes: ColumnAttributes::PRIMARY_KEY | ColumnAttributes::UNIQUE,
                 default: None,
                 comment: Some("Primary key".to_string()),
+                extra: None,
                 ordinal_position: 1,
             },
             Column {
@@ -43,6 +44,7 @@ pub fn sample_table_detail() -> Table {
                 attributes: ColumnAttributes::empty(),
                 default: None,
                 comment: None,
+                extra: None,
                 ordinal_position: 2,
             },
             Column {
@@ -51,6 +53,7 @@ pub fn sample_table_detail() -> Table {
                 attributes: ColumnAttributes::NULLABLE | ColumnAttributes::UNIQUE,
                 default: None,
                 comment: None,
+                extra: None,
                 ordinal_position: 3,
             },
         ],

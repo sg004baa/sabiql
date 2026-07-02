@@ -153,13 +153,14 @@ impl MySqlAdapter {
             is_primary_key: bool,
             is_unique: bool,
             comment: Option<String>,
+            extra: Option<String>,
             ordinal_position: i32,
         }
 
         let raw: Vec<RawColumn> = serde_json::from_str(trimmed)
             .map_err(|e| DbOperationError::InvalidJson(std::sync::Arc::new(e)))?;
 
-        Ok(raw
+        let mut columns: Vec<Column> = raw
             .into_iter()
             .map(|c| Column {
                 name: c.name,
@@ -167,9 +168,13 @@ impl MySqlAdapter {
                 default: c.default,
                 attributes: ColumnAttributes::from_parts(c.nullable, c.is_primary_key, c.is_unique),
                 comment: c.comment,
+                extra: c.extra.filter(|extra| !extra.is_empty()),
                 ordinal_position: c.ordinal_position,
             })
-            .collect())
+            .collect();
+        columns.sort_by_key(|column| column.ordinal_position);
+
+        Ok(columns)
     }
 
     pub(in crate::adapters::mysql) fn parse_indexes(
@@ -404,6 +409,7 @@ mod tests {
                 "is_primary_key": true,
                 "is_unique": false,
                 "comment": null,
+                "extra": null,
                 "ordinal_position": 1
             }]"#;
 
@@ -414,6 +420,58 @@ mod tests {
             assert_eq!(result[0].data_type, "int");
             assert!(!result[0].is_nullable());
             assert!(result[0].is_primary_key());
+        }
+
+        #[test]
+        fn sorts_by_ordinal_position_and_parses_extra() {
+            let json = r#"[
+                {
+                    "name": "updated_at",
+                    "data_type": "datetime",
+                    "nullable": false,
+                    "default": "CURRENT_TIMESTAMP",
+                    "is_primary_key": false,
+                    "is_unique": false,
+                    "comment": null,
+                    "extra": "",
+                    "ordinal_position": 3
+                },
+                {
+                    "name": "id",
+                    "data_type": "bigint unsigned",
+                    "nullable": false,
+                    "default": null,
+                    "is_primary_key": true,
+                    "is_unique": false,
+                    "comment": null,
+                    "extra": "auto_increment",
+                    "ordinal_position": 1
+                },
+                {
+                    "name": "api_key",
+                    "data_type": "varchar(255)",
+                    "nullable": false,
+                    "default": null,
+                    "is_primary_key": false,
+                    "is_unique": true,
+                    "comment": null,
+                    "extra": null,
+                    "ordinal_position": 2
+                }
+            ]"#;
+
+            let result = MySqlAdapter::parse_columns(json).unwrap();
+
+            assert_eq!(
+                result
+                    .iter()
+                    .map(|column| column.name.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["id", "api_key", "updated_at"]
+            );
+            assert_eq!(result[0].extra.as_deref(), Some("auto_increment"));
+            assert_eq!(result[1].extra, None);
+            assert_eq!(result[2].extra, None);
         }
 
         #[test]

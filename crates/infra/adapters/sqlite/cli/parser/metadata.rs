@@ -145,6 +145,7 @@ impl SqliteAdapter {
                 default: c.default,
                 attributes: ColumnAttributes::from_parts(c.nullable, c.is_primary_key, c.is_unique),
                 comment: c.comment,
+                extra: None,
                 ordinal_position: c.ordinal_position,
             })
             .collect())

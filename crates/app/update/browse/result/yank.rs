@@ -453,6 +453,7 @@ mod tests {
                     default: None,
                     attributes: ColumnAttributes::PRIMARY_KEY | ColumnAttributes::UNIQUE,
                     comment: None,
+                    extra: None,
                     ordinal_position: 1,
                 }],
                 primary_key: Some(vec!["id".to_string()]),

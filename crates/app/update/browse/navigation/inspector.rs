@@ -117,6 +117,7 @@ mod tests {
                     default: None,
                     attributes: ColumnAttributes::empty(),
                     comment: None,
+                    extra: None,
                     ordinal_position: i as i32,
                 })
                 .collect();
