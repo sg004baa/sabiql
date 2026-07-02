@@ -79,6 +79,9 @@ pub const FILE_PICKER: ModeBindings = ModeBindings {
 pub const COMMAND_PALETTE: ModeBindings = ModeBindings {
     rows: COMMAND_PALETTE_ROWS,
 };
+pub const GENERATE_SQL_MENU: ModeBindings = ModeBindings {
+    rows: GENERATE_SQL_MENU_ROWS,
+};
 pub const SETTINGS: ModeBindings = ModeBindings {
     rows: SETTINGS_ROWS,
 };
@@ -100,6 +103,7 @@ pub const ALL_MODE_BINDINGS: &[(&str, &ModeBindings)] = &[
     ("QUERY_HISTORY_PICKER", &QUERY_HISTORY_PICKER),
     ("FILE_PICKER", &FILE_PICKER),
     ("COMMAND_PALETTE", &COMMAND_PALETTE),
+    ("GENERATE_SQL_MENU", &GENERATE_SQL_MENU),
     ("SETTINGS", &SETTINGS),
     ("CONNECTION_SELECTOR", &CONNECTION_SELECTOR),
     ("JSONB_DETAIL", &JSONB_DETAIL),
@@ -258,6 +262,12 @@ pub mod idx {
         pub const ESC_CLOSE: usize = 2;
     }
 
+    pub mod generate_sql_menu {
+        pub const ENTER_SELECT: usize = 0;
+        pub const NAVIGATE: usize = 1;
+        pub const ESC_CLOSE: usize = 2;
+    }
+
     pub mod settings {
         pub const APPLY: usize = 0;
         pub const SELECT: usize = 1;
@@ -285,6 +295,8 @@ pub mod idx {
         pub const EDIT: usize = 8;
         pub const DRAFT_DISCARD: usize = 9;
         pub const ROW_YANK: usize = 10;
+        pub const MARK_ROW: usize = 11;
+        pub const GENERATE_SQL: usize = 12;
     }
 
     pub mod cell_edit {
@@ -708,6 +720,11 @@ mod tests {
             assert!(idx::cmd_palette::NAVIGATE_JK < COMMAND_PALETTE_ROWS.len());
             assert!(idx::cmd_palette::ESC_CLOSE < COMMAND_PALETTE_ROWS.len());
 
+            // GENERATE_SQL_MENU_ROWS
+            assert!(idx::generate_sql_menu::ENTER_SELECT < GENERATE_SQL_MENU_ROWS.len());
+            assert!(idx::generate_sql_menu::NAVIGATE < GENERATE_SQL_MENU_ROWS.len());
+            assert!(idx::generate_sql_menu::ESC_CLOSE < GENERATE_SQL_MENU_ROWS.len());
+
             // SETTINGS_ROWS
             assert!(idx::settings::APPLY < SETTINGS_ROWS.len());
             assert!(idx::settings::SELECT < SETTINGS_ROWS.len());
@@ -733,6 +750,8 @@ mod tests {
             assert!(idx::result_active::EDIT < RESULT_ACTIVE_KEYS.len());
             assert!(idx::result_active::DRAFT_DISCARD < RESULT_ACTIVE_KEYS.len());
             assert!(idx::result_active::ROW_YANK < RESULT_ACTIVE_KEYS.len());
+            assert!(idx::result_active::MARK_ROW < RESULT_ACTIVE_KEYS.len());
+            assert!(idx::result_active::GENERATE_SQL < RESULT_ACTIVE_KEYS.len());
 
             // HISTORY_KEYS
             assert!(idx::history::OPEN < HISTORY_KEYS.len());
@@ -1233,7 +1252,7 @@ mod tests {
 
             #[test]
             fn all_mode_bindings_count() {
-                assert_eq!(ALL_MODE_BINDINGS.len(), 11);
+                assert_eq!(ALL_MODE_BINDINGS.len(), 12);
             }
         }
     }

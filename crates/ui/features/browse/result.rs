@@ -81,6 +81,7 @@ impl ResultPane {
                         None
                     },
                     state.result_interaction.staged_delete_rows(),
+                    state.result_interaction.marked_rows(),
                     history_bar,
                     state.result_interaction.yank_flash,
                     now,
@@ -158,7 +159,7 @@ impl ResultPane {
 
     #[allow(
         clippy::too_many_arguments,
-        reason = "render function requires full viewport context (16 params)"
+        reason = "render function requires full viewport context (17 params)"
     )]
     fn render_table(
         frame: &mut Frame,
@@ -174,6 +175,7 @@ impl ResultPane {
         selection: &ResultSelection,
         editing_cell: Option<(usize, usize, &str, bool, usize)>,
         staged_delete_rows: &BTreeSet<usize>,
+        marked_rows: &BTreeSet<usize>,
         history_bar: Option<(usize, usize)>,
         yank_flash: Option<YankFlash>,
         now: Instant,
@@ -278,6 +280,7 @@ impl ResultPane {
             .take(data_rows_visible)
             .map(|(abs_row_idx, row)| {
                 let is_staged_for_delete = staged_delete_rows.contains(&abs_row_idx);
+                let is_marked = marked_rows.contains(&abs_row_idx);
                 let is_active_row = active_row == Some(abs_row_idx);
                 // None = no flash; Some(None) = full row; Some(Some(c)) = cell c
                 let flash_scope = yank_flash
@@ -288,6 +291,8 @@ impl ResultPane {
                     Some(theme.component.feedback.yank_flash_bg)
                 } else if is_staged_for_delete {
                     Some(theme.component.table.staged_delete_bg)
+                } else if is_marked {
+                    Some(theme.component.table.marked_row_bg)
                 } else if is_active_row {
                     Some(theme.component.table.result_row_active_bg)
                 } else if (abs_row_idx - scroll_offset) % 2 == 1 {

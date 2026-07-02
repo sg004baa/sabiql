@@ -1,4 +1,5 @@
 pub mod cell_edit;
+pub mod generate_sql;
 pub mod json_tree;
 pub mod jsonb_detail;
 pub mod query_execution;

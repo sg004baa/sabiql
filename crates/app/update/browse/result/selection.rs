@@ -81,6 +81,16 @@ pub fn reduce(state: &mut AppState, action: &Action, now: Instant) -> Option<Vec
             state.result_interaction.clear_staged_deletes();
             Some(vec![])
         }
+        Action::ToggleMarkedRow => {
+            if let Some(row_idx) = state.result_interaction.selection().row() {
+                state.result_interaction.toggle_marked_row(row_idx);
+            }
+            Some(vec![])
+        }
+        Action::ClearMarkedRows => {
+            state.result_interaction.clear_marked_rows();
+            Some(vec![])
+        }
         Action::ResultNextPage | Action::ResultPrevPage => {
             None // Handled entirely by the query reducer (reset only after transition confirmed)
         }
@@ -235,6 +245,39 @@ mod tests {
             assert!(effects.is_empty());
             assert!(state.result_interaction.staged_delete_rows().is_empty());
             assert!(state.messages.last_error.is_some());
+        }
+    }
+
+    mod marked_rows {
+        use super::*;
+
+        #[test]
+        fn toggle_marks_current_row() {
+            let mut state = row_delete::base_state(
+                Some(vec!["id"]),
+                vec![vec!["1", "alice"], vec!["2", "bob"]],
+                0,
+            );
+            state.result_interaction.activate_cell(1, 0);
+
+            reduce(&mut state, &Action::ToggleMarkedRow, Instant::now());
+
+            assert!(state.result_interaction.marked_rows().contains(&1));
+        }
+
+        #[test]
+        fn clear_removes_all_marked_rows() {
+            let mut state = row_delete::base_state(
+                Some(vec!["id"]),
+                vec![vec!["1", "alice"], vec!["2", "bob"]],
+                0,
+            );
+            state.result_interaction.toggle_marked_row(0);
+            state.result_interaction.toggle_marked_row(1);
+
+            reduce(&mut state, &Action::ClearMarkedRows, Instant::now());
+
+            assert!(state.result_interaction.marked_rows().is_empty());
         }
     }
 

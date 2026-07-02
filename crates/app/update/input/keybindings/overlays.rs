@@ -658,6 +658,55 @@ pub const COMMAND_PALETTE_ROWS: &[ModeRow] = &[
 ];
 
 // =============================================================================
+// Generate SQL Menu
+// =============================================================================
+
+pub const GENERATE_SQL_MENU_ROWS: &[ModeRow] = &[
+    ModeRow {
+        key_short: "Enter",
+        key: "Enter",
+        desc_short: "Select",
+        description: "Select statement kind",
+        bindings: &[ExecBinding {
+            action: Action::ConfirmSelection,
+            combos: &[KeyCombo::plain(Key::Enter)],
+        }],
+    },
+    ModeRow {
+        key_short: "j/k/↑↓",
+        key: "j / k / ↑ / ↓",
+        desc_short: "Navigate",
+        description: "Navigate",
+        bindings: &[
+            ExecBinding {
+                action: Action::ListSelect {
+                    target: ListTarget::GenerateSqlMenu,
+                    motion: ListMotion::Next,
+                },
+                combos: &[KeyCombo::plain(Key::Char('j')), KeyCombo::plain(Key::Down)],
+            },
+            ExecBinding {
+                action: Action::ListSelect {
+                    target: ListTarget::GenerateSqlMenu,
+                    motion: ListMotion::Previous,
+                },
+                combos: &[KeyCombo::plain(Key::Char('k')), KeyCombo::plain(Key::Up)],
+            },
+        ],
+    },
+    ModeRow {
+        key_short: "Esc/q",
+        key: "Esc / q",
+        desc_short: "Close",
+        description: "Close",
+        bindings: &[ExecBinding {
+            action: Action::CloseModal(ModalKind::GenerateSqlMenu),
+            combos: &[KeyCombo::plain(Key::Esc), KeyCombo::plain(Key::Char('q'))],
+        }],
+    },
+];
+
+// =============================================================================
 // Settings
 // =============================================================================
 

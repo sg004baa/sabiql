@@ -391,6 +391,22 @@ pub const RESULT_ACTIVE_KEYS: &[KeyBinding] = &[
         action: Action::ResultRowYank,
         combos: &[],
     },
+    KeyBinding {
+        key_short: "Space",
+        key: "Space",
+        desc_short: "Mark Row",
+        description: "Toggle the active row in the marked-row selection",
+        action: Action::ToggleMarkedRow,
+        combos: &[KeyCombo::plain(Key::Char(' '))],
+    },
+    KeyBinding {
+        key_short: "S",
+        key: "S",
+        desc_short: "Gen SQL",
+        description: "Generate SQL from marked rows or the active row",
+        action: Action::OpenModal(ModalKind::GenerateSqlMenu),
+        combos: &[KeyCombo::plain(Key::Char('S'))],
+    },
 ];
 
 pub const HISTORY_KEYS: &[KeyBinding] = &[

@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::domain::connection::{ConnectionNameError, ConnectionProfile, ServiceEntry};
+use crate::model::browse::generate_sql::GenerateSqlKind;
 use crate::model::connection::error::ConnectionErrorInfo;
 use crate::model::shared::focused_pane::FocusedPane;
 use crate::model::shared::key_sequence::Prefix;
@@ -177,6 +178,7 @@ pub enum ListTarget {
     TablePicker,
     ErTablePicker,
     CommandPalette,
+    GenerateSqlMenu,
     FilePicker,
 }
 
@@ -195,6 +197,7 @@ pub enum ListMotion {
 pub enum ModalKind {
     TablePicker,
     CommandPalette,
+    GenerateSqlMenu,
     Settings,
     Help,
     SqlModal,
@@ -505,6 +508,9 @@ pub enum Action {
     StageRowForDelete,
     UnstageLastStagedRow,
     ClearStagedDeletes,
+    ToggleMarkedRow,
+    ClearMarkedRows,
+    GenerateSql(GenerateSqlKind),
     RequestDeleteActiveRow,
     ResultEnterCellEdit,
     ResultCancelCellEdit,

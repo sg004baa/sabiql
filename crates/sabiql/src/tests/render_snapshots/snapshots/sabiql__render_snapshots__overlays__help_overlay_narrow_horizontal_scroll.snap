@@ -5,23 +5,23 @@ expression: output
 test_project | test_db | - | no dsn | localhost:54
 ┌ [1] Explor┐[Info] [Cols] [Idx] [FK] [RLS] [Trig]
 │> publi╭ Help ───────────────────────────╮──────┐
-│  publi│      Open command line         ▲│      │
-│  publi│      Exit to Cell Active (draft││      │
+│  publi│      Move cursor               ▲│      │
+│  publi│      Jump to start/end         ││      │
+│       │      Open command line         ││      │
+│       │      Exit to Cell Active (draft││      │
 │       │                                ││      │
-│       │al)                             ││      │
+│       │al)                             ┃│      │
 │       │      Execute query             ││      │
-│       │      Copy query to clipboard   ┃│      │
-│       │      Enter Insert mode         ││      │
-│       │      Append at line end        ││      │
-│       │↑↓←→  Move cursor               ││──────┘
-│       │Home / End  Move by word or line││──────┐
+│       │      Copy query to clipboard   ││      │
+│       │      Enter Insert mode         ││──────┘
+│       │      Append at line end        ││──────┐
+│       │↑↓←→  Move cursor               ││      │
+│       │Home / End  Move by word or line││      │
 │       │ L    Jump by buffer or viewport││      │
 │       │      Close editor              ││      │
 │       │      Clear editor              ││      │
 │       │      Open Query History        ││      │
-│       │                                ││      │
-│       │rt)                             ││      │
-│       │      Execute query             ▼│      │
+│       │                                ▼│      │
 │       │ col  26% ◀︎────═════───────────▶︎ │      │
 └───────╰ ?/Esc/q Close ──────────────────╯──────┘
 h/l / ←→:H-Scroll  ?/Esc/q:Close

@@ -1,5 +1,6 @@
 use crate::cmd::effect::Effect;
 use crate::model::app_state::AppState;
+use crate::model::browse::generate_sql::GenerateSqlKind;
 use crate::model::shared::input_mode::InputMode;
 use crate::update::action::{Action, InputTarget, ListMotion, ListTarget};
 use crate::update::input::palette::palette_command_count;
@@ -158,6 +159,29 @@ pub fn reduce(state: &mut AppState, action: &Action) -> Option<Vec<Effect>> {
                     .table_picker
                     .set_selection(state.ui.table_picker.selected() + 1);
             }
+            Some(vec![])
+        }
+        Action::ListSelect {
+            target: ListTarget::GenerateSqlMenu,
+            motion: ListMotion::Next,
+        } => {
+            let max = GenerateSqlKind::ALL.len().saturating_sub(1);
+            if state.ui.generate_sql_menu.selected() < max {
+                state
+                    .ui
+                    .generate_sql_menu
+                    .set_selection(state.ui.generate_sql_menu.selected() + 1);
+            }
+            Some(vec![])
+        }
+        Action::ListSelect {
+            target: ListTarget::GenerateSqlMenu,
+            motion: ListMotion::Previous,
+        } => {
+            state
+                .ui
+                .generate_sql_menu
+                .set_selection(state.ui.generate_sql_menu.selected().saturating_sub(1));
             Some(vec![])
         }
 

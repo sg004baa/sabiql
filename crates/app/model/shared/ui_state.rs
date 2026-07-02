@@ -177,6 +177,7 @@ pub struct UiState {
     pub connection_list_pane_height: u16,
 
     pub table_picker: PickerState,
+    pub generate_sql_menu: PickerState,
 
     pub er_picker: PickerState,
     pub er_selected_tables: BTreeSet<String>,

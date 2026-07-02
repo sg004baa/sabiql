@@ -174,6 +174,18 @@ pub fn handle_normal_mode(combo: KeyCombo, state: &AppState) -> Action {
         {
             Action::UnstageLastStagedRow
         }
+        Key::Char(' ')
+            if result_navigation && state.result_interaction.selection().row().is_some() =>
+        {
+            Action::ToggleMarkedRow
+        }
+        Key::Char('S')
+            if result_navigation
+                && (state.result_interaction.selection().row().is_some()
+                    || !state.result_interaction.marked_rows().is_empty()) =>
+        {
+            Action::OpenModal(ModalKind::GenerateSqlMenu)
+        }
         Key::Char('Y')
             if result_navigation && state.result_interaction.selection().cell().is_some() =>
         {
@@ -780,6 +792,19 @@ mod tests {
 
                 assert!(matches!(result, Action::None));
             }
+
+            #[test]
+            fn capital_s_with_marked_rows_opens_generate_sql_menu() {
+                let mut state = result_focused_state();
+                state.result_interaction.toggle_marked_row(0);
+
+                let result = handle_normal_mode(combo(Key::Char('S')), &state);
+
+                assert!(matches!(
+                    result,
+                    Action::OpenModal(ModalKind::GenerateSqlMenu)
+                ));
+            }
         }
 
         mod page_scroll {
@@ -1108,6 +1133,27 @@ mod tests {
                 let result = handle_normal_mode(combo(Key::Char('Y')), &state);
 
                 assert!(matches!(result, Action::ResultCellYank));
+            }
+
+            #[test]
+            fn space_toggles_current_row_mark() {
+                let state = active_cell_state();
+
+                let result = handle_normal_mode(combo(Key::Char(' ')), &state);
+
+                assert!(matches!(result, Action::ToggleMarkedRow));
+            }
+
+            #[test]
+            fn capital_s_opens_generate_sql_menu() {
+                let state = active_cell_state();
+
+                let result = handle_normal_mode(combo(Key::Char('S')), &state);
+
+                assert!(matches!(
+                    result,
+                    Action::OpenModal(ModalKind::GenerateSqlMenu)
+                ));
             }
 
             #[test]
