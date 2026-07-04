@@ -1,0 +1,14 @@
+# cargo-audit configuration
+#
+# quick-xml RUSTSEC-2026-0194 / RUSTSEC-2026-0195 (both fixed in >=0.41.0):
+# pulled in transitively by `self_update`, which pins `quick-xml ^0.38`
+# (latest self_update 0.44.0 and 1.0.0-rc.1 both cap at ^0.38, so no upgrade
+# path resolves the advisory). quick-xml is only exercised by self_update's S3
+# backend; sabiql uses the GitHub backend (JSON only), so the vulnerable
+# XML-parsing code path is never reached. Revisit once self_update bumps
+# quick-xml to >=0.41.
+[advisories]
+ignore = [
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+]

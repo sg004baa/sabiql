@@ -181,6 +181,7 @@ mod tests {
                     default: None,
                     attributes: ColumnAttributes::PRIMARY_KEY,
                     comment: None,
+                    extra: None,
                     ordinal_position: 1,
                 },
                 Column {
@@ -189,6 +190,7 @@ mod tests {
                     default: None,
                     attributes: ColumnAttributes::empty(),
                     comment: None,
+                    extra: None,
                     ordinal_position: 2,
                 },
             ],
