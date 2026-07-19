@@ -466,6 +466,7 @@ mod tests {
             entries: vec![(0, Some(1)), (1, Some(2))],
             selected: 0,
             loading: false,
+            database_count_known: true,
         });
 
         assert_eq!(
@@ -493,6 +494,7 @@ mod tests {
             entries: vec![(0, Some(1))],
             selected: 0,
             loading: false,
+            database_count_known: true,
         });
 
         assert_eq!(

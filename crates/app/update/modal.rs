@@ -385,6 +385,9 @@ pub fn reduce_modal(state: &mut AppState, action: &Action, now: Instant) -> Opti
                             read_only: state.session.read_only,
                         }])
                     } else {
+                        state
+                            .messages
+                            .set_error_at("No active connection".to_string(), now);
                         Some(vec![])
                     }
                 }
@@ -696,7 +699,7 @@ mod tests {
                     ConfirmIntent::CsvExport {
                         export_query: "SELECT 1".to_string(),
                         file_name: "test.csv".to_string(),
-                        row_count: Some(200_000),
+                        row_count: 200_000,
                     },
                 );
 
@@ -706,6 +709,32 @@ mod tests {
 
                 assert_eq!(effects.len(), 1);
                 assert!(matches!(&effects[0], Effect::ExportCsv { .. }));
+            }
+
+            #[test]
+            fn csv_export_confirm_without_dsn_sets_error() {
+                let mut state = create_test_state();
+                enter_confirm_dialog(&mut state, InputMode::Normal);
+                state.session.dsn = None;
+                state.confirm_dialog.open(
+                    "",
+                    "",
+                    ConfirmIntent::CsvExport {
+                        export_query: "SELECT 1".to_string(),
+                        file_name: "test.csv".to_string(),
+                        row_count: 200_000,
+                    },
+                );
+
+                let effects =
+                    reduce_modal(&mut state, &Action::ConfirmDialogConfirm, Instant::now())
+                        .unwrap();
+
+                assert!(effects.is_empty());
+                assert_eq!(
+                    state.messages.last_error.as_deref(),
+                    Some("No active connection")
+                );
             }
 
             #[test]

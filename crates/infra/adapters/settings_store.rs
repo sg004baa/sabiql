@@ -29,28 +29,7 @@ impl TomlSettingsStore {
         config_file_path(&self.config_dir)
     }
 
-    fn load_config_file_lenient(&self) -> Result<Option<ConnectionConfigFile>, SettingsStoreError> {
-        let path = self.config_file_path();
-        if !path.exists() {
-            return Ok(None);
-        }
-
-        let content = fs::read_to_string(&path)?;
-        let Ok(version_check) = toml::from_str::<ConfigVersionCheck>(&content) else {
-            return Ok(None);
-        };
-
-        if version_check.version != CURRENT_VERSION {
-            return Ok(None);
-        }
-
-        let Ok(config) = toml::from_str::<ConnectionConfigFile>(&content) else {
-            return Ok(None);
-        };
-        Ok(Some(config))
-    }
-
-    fn load_config_file_strict(&self) -> Result<Option<ConnectionConfigFile>, SettingsStoreError> {
+    fn load_config_file(&self) -> Result<Option<ConnectionConfigFile>, SettingsStoreError> {
         let path = self.config_file_path();
         if !path.exists() {
             return Ok(None);
@@ -72,16 +51,15 @@ impl TomlSettingsStore {
 
 impl SettingsStore for TomlSettingsStore {
     fn load(&self) -> Result<AppSettings, SettingsStoreError> {
-        Ok(self
-            .load_config_file_lenient()?
-            .map_or_else(AppSettings::default, app_settings))
+        self.load_config_file()?
+            .map_or_else(|| Ok(AppSettings::default()), app_settings)
     }
 
     fn save(&self, settings: AppSettings) -> Result<(), SettingsStoreError> {
         let _guard = app_config_file::lock();
 
         let mut config = self
-            .load_config_file_strict()?
+            .load_config_file()?
             .unwrap_or_else(|| ConnectionConfigFile {
                 version: CURRENT_VERSION,
                 theme: None,
@@ -100,14 +78,13 @@ fn get_config_dir() -> Result<PathBuf, SettingsStoreError> {
     Ok(app_config_dir()?)
 }
 
-fn app_settings(config: ConnectionConfigFile) -> AppSettings {
-    AppSettings {
-        theme_id: config
-            .theme
-            .as_deref()
-            .and_then(ThemeId::from_config_value)
-            .unwrap_or_default(),
-    }
+fn app_settings(config: ConnectionConfigFile) -> Result<AppSettings, SettingsStoreError> {
+    let theme_id = match config.theme.as_deref() {
+        None => ThemeId::default(),
+        Some(value) => ThemeId::from_config_value(value)
+            .ok_or_else(|| SettingsStoreError::UnknownTheme(value.to_string()))?,
+    };
+    Ok(AppSettings { theme_id })
 }
 
 fn set_app_settings(config: &mut ConnectionConfigFile, settings: AppSettings) {
@@ -179,18 +156,42 @@ ssl_mode = "prefer"
     }
 
     #[test]
-    fn invalid_toml_falls_back_to_default() {
+    fn load_invalid_toml_returns_error() {
         let temp_dir = TempDir::new().unwrap();
         fs::write(temp_dir.path().join(CONFIG_FILE_NAME), "not = [").unwrap();
         let store = TomlSettingsStore::with_config_dir(temp_dir.path().to_path_buf());
 
-        let settings = store.load().unwrap();
+        let result = store.load();
 
-        assert_eq!(settings.theme_id, ThemeId::Default);
+        assert!(matches!(
+            result,
+            Err(SettingsStoreError::TomlDeserialize(_))
+        ));
     }
 
     #[test]
-    fn unknown_theme_falls_back_to_default() {
+    fn load_version_mismatch_returns_error() {
+        let temp_dir = TempDir::new().unwrap();
+        fs::write(
+            temp_dir.path().join(CONFIG_FILE_NAME),
+            "version = 1\nconnections = []\n",
+        )
+        .unwrap();
+        let store = TomlSettingsStore::with_config_dir(temp_dir.path().to_path_buf());
+
+        let result = store.load();
+
+        assert!(matches!(
+            result,
+            Err(SettingsStoreError::VersionMismatch {
+                found: 1,
+                expected: CURRENT_VERSION,
+            })
+        ));
+    }
+
+    #[test]
+    fn load_unknown_theme_returns_error() {
         let temp_dir = TempDir::new().unwrap();
         fs::write(
             temp_dir.path().join(CONFIG_FILE_NAME),
@@ -199,9 +200,12 @@ ssl_mode = "prefer"
         .unwrap();
         let store = TomlSettingsStore::with_config_dir(temp_dir.path().to_path_buf());
 
-        let settings = store.load().unwrap();
+        let result = store.load();
 
-        assert_eq!(settings.theme_id, ThemeId::Default);
+        assert!(matches!(
+            result,
+            Err(SettingsStoreError::UnknownTheme(theme)) if theme == "terminal"
+        ));
     }
 
     #[test]

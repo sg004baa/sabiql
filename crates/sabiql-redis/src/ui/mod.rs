@@ -350,11 +350,18 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
 
 fn render_db_overlay(frame: &mut Frame<'_>, overlay: &DbOverlayState) {
     let theme = DEFAULT_THEME;
+    // Never present a guessed database count as truth: when the server denied
+    // CONFIG GET databases, say so instead of listing a default range.
+    let title = if overlay.database_count_known {
+        "Redis Databases"
+    } else {
+        "Redis Databases (count unknown)"
+    };
     let (_, inner) = render_modal(
         frame,
         Constraint::Percentage(50),
         Constraint::Percentage(60),
-        "Redis Databases",
+        title,
         " Enter:switch  Esc:cancel  j/k:move ",
         &theme,
     );
@@ -828,6 +835,7 @@ mod tests {
             entries: vec![(0, Some(2)), (1, Some(0))],
             selected: 1,
             loading: false,
+            database_count_known: true,
         });
 
         let rendered = render_to_string(&state);
@@ -836,6 +844,21 @@ mod tests {
         assert!(rendered.contains("db 1"));
         assert!(rendered.contains("0 keys"));
         assert!(rendered.contains("Enter:switch"));
+    }
+
+    #[test]
+    fn db_overlay_marks_unknown_database_count_in_title() {
+        let mut state = AppState::new("redis://localhost");
+        state.db_overlay = Some(DbOverlayState {
+            entries: vec![(0, Some(2))],
+            selected: 0,
+            loading: false,
+            database_count_known: false,
+        });
+
+        let rendered = render_to_string(&state);
+
+        assert!(rendered.contains("Redis Databases (count unknown)"));
     }
 
     #[test]

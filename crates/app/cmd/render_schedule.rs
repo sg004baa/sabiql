@@ -33,9 +33,8 @@ pub fn next_animation_deadline(state: &AppState, now: Instant) -> Option<Instant
 
     earliest = min_instant(earliest, state.flash_timers.earliest_deadline());
 
-    // Cursor blink is the slowest; skip if faster timers are active
-    if has_blinking_cursor(state) && earliest.is_none() {
-        earliest = Some(now + CURSOR_BLINK_INTERVAL);
+    if has_blinking_cursor(state) {
+        earliest = min_instant(earliest, Some(now + CURSOR_BLINK_INTERVAL));
     }
 
     earliest
@@ -185,6 +184,33 @@ mod tests {
             // Spinner interval (150ms) is shorter than cursor blink (500ms)
             let expected = now + SPINNER_INTERVAL;
             assert_eq!(deadline.unwrap(), expected);
+        }
+
+        #[test]
+        fn cursor_blink_takes_priority_over_later_message_timeout() {
+            let mut state = create_test_state();
+            state.modal.set_mode(InputMode::SqlModal);
+            let now = Instant::now();
+            // Toast expires long after the next blink; blink must not stall
+            state.messages.expires_at = Some(now + Duration::from_secs(2));
+
+            let deadline = next_animation_deadline(&state, now);
+
+            let expected = now + CURSOR_BLINK_INTERVAL;
+            assert_eq!(deadline, Some(expected));
+        }
+
+        #[test]
+        fn earlier_message_timeout_takes_priority_over_cursor_blink() {
+            let mut state = create_test_state();
+            state.modal.set_mode(InputMode::SqlModal);
+            let now = Instant::now();
+            let expires_at = now + Duration::from_millis(50);
+            state.messages.expires_at = Some(expires_at);
+
+            let deadline = next_animation_deadline(&state, now);
+
+            assert_eq!(deadline, Some(expires_at));
         }
 
         #[test]

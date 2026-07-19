@@ -56,6 +56,7 @@ pub enum Effect {
         dsn: String,
         schema: String,
         table: String,
+        generation: u64,
     },
     ProcessPrefetchQueue,
     DelayedProcessPrefetchQueue {
@@ -99,7 +100,7 @@ pub enum Effect {
         dsn: String,
         query: String,
         file_name: String,
-        row_count: Option<usize>,
+        row_count: usize,
         read_only: bool,
     },
 

@@ -47,19 +47,25 @@ fn find_userinfo_terminator(text: &str, authority_start: usize) -> Option<usize>
         .map_or(text.len(), |offset| authority_start + offset);
     let line = text.get(authority_start..line_end).unwrap_or_default();
 
-    line.match_indices('@').rev().find_map(|(offset, _)| {
-        let at = authority_start + offset;
-        let host = text.get((at + 1)..line_end).unwrap_or_default();
-        let host_end = host
-            .find(['/', '?', '#', ' ', '\t', '\'', '"', ','])
-            .unwrap_or(host.len());
+    line.match_indices('@')
+        .rev()
+        .find_map(|(offset, _)| {
+            let at = authority_start + offset;
+            let host = text.get((at + 1)..line_end).unwrap_or_default();
+            let host_end = host
+                .find(['/', '?', '#', ' ', '\t', '\'', '"', ','])
+                .unwrap_or(host.len());
 
-        if host_end > 0 || host.starts_with(['/', '?', '#']) || host.is_empty() {
-            Some(at)
-        } else {
-            None
-        }
-    })
+            if host_end > 0 || host.starts_with(['/', '?', '#']) || host.is_empty() {
+                Some(at)
+            } else {
+                None
+            }
+        })
+        // No '@' is followed by a plausible host (e.g. truncated/malformed URL where
+        // '@' is followed by whitespace, a quote, or a comma). The password before
+        // the rightmost '@' must still be masked.
+        .or_else(|| line.rfind('@').map(|offset| authority_start + offset))
 }
 
 fn mask_kv_passwords(text: &str) -> String {
@@ -133,7 +139,7 @@ fn mask_after_prefix(text: &str, find_prefix: impl Fn(usize) -> Option<usize>) -
 }
 
 fn is_assignment_terminator(byte: u8) -> bool {
-    byte.is_ascii_whitespace() || matches!(byte, b';' | b'\'' | b'"' | b',')
+    byte.is_ascii_whitespace() || matches!(byte, b';' | b'\'' | b'"' | b',' | b'&')
 }
 
 fn skip_masked_assignment_value(text: &str, value_start: usize, result: &mut String) -> usize {
@@ -201,6 +207,14 @@ mod tests {
         "postgresql://user:****@/db?host=/var/run/postgresql"
     )]
     #[case("mysql://user:secret@host", "mysql://user:****@host")]
+    #[case("postgres://user:secret@ host", "postgres://user:****@ host")]
+    #[case("postgres://user:secret@\thost", "postgres://user:****@\thost")]
+    #[case("'postgres://user:secret@'", "'postgres://user:****@'")]
+    #[case(
+        "url is \"postgres://user:secret@\", retrying",
+        "url is \"postgres://user:****@\", retrying"
+    )]
+    #[case("postgres://user:secret@,next", "postgres://user:****@,next")]
     fn masks_passwords_in_urls(#[case] input: &str, #[case] expected: &str) {
         assert_eq!(mask_password(input), expected);
     }
@@ -237,6 +251,11 @@ mod tests {
     #[case(
         "password=\"sec\\\"ret\" host=localhost",
         "password=\"****\" host=localhost"
+    )]
+    #[case("password=secret&sslmode=require", "password=****&sslmode=require")]
+    #[case(
+        "postgres://host/db?password=secret&user=app",
+        "postgres://host/db?password=****&user=app"
     )]
     fn stops_at_common_assignment_terminators(#[case] input: &str, #[case] expected: &str) {
         assert_eq!(mask_password(input), expected);

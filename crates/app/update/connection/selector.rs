@@ -44,10 +44,15 @@ pub fn reduce(state: &mut AppState, action: &Action, now: Instant) -> Option<Vec
         }
         Action::DeleteConnection(id) => Some(vec![Effect::DeleteConnection { id: id.clone() }]),
         Action::ConnectionDeleted(id) => {
-            if state.session.active_connection_id.as_ref() == Some(id) {
+            let deleted_active = state.session.active_connection_id.as_ref() == Some(id);
+            if deleted_active {
                 state.session.reset(&mut state.query);
                 state.result_interaction.reset_view();
                 state.ui.set_explorer_selection(None);
+                // Prefetch bookkeeping and the completion engine cache belong to
+                // the deleted connection: drop both so in-flight prefetch results
+                // are rejected and stale tables stop feeding completion.
+                state.sql_modal.reset_prefetch();
             }
 
             let id_clone = id.clone();
@@ -68,7 +73,11 @@ pub fn reduce(state: &mut AppState, action: &Action, now: Instant) -> Option<Vec
             state
                 .messages
                 .set_success_at("Connection deleted".to_string(), now);
-            Some(vec![])
+            if deleted_active {
+                Some(vec![Effect::ClearCompletionEngineCache])
+            } else {
+                Some(vec![])
+            }
         }
         Action::ConnectionDeleteFailed(e) => {
             state.messages.set_error_at(e.to_string(), now);
@@ -425,6 +434,61 @@ mod tests {
             assert!(state.connections().is_empty());
             assert_ne!(state.input_mode(), InputMode::ConnectionSetup);
             assert_eq!(state.connection_list_items(), build_connection_list(0, 1));
+        }
+
+        #[test]
+        fn resets_prefetch_and_clears_completion_cache_when_active_deleted() {
+            let mut state = AppState::new("test".to_string());
+            let profile = create_profile("Production");
+            let profile_id = profile.id.clone();
+            state.set_connections(vec![profile]);
+            state.session.active_connection_id = Some(profile_id.clone());
+            state.sql_modal.begin_prefetch();
+            state
+                .sql_modal
+                .prefetching_tables
+                .insert("public.users".to_string());
+            let generation_before = state.sql_modal.prefetch_generation();
+
+            let effects = reduce(
+                &mut state,
+                &Action::ConnectionDeleted(profile_id),
+                Instant::now(),
+            )
+            .unwrap();
+
+            assert!(!state.sql_modal.is_prefetch_started());
+            assert!(state.sql_modal.prefetching_tables.is_empty());
+            assert_eq!(state.sql_modal.prefetch_generation(), generation_before + 1);
+            assert!(
+                effects
+                    .iter()
+                    .any(|e| matches!(e, Effect::ClearCompletionEngineCache))
+            );
+        }
+
+        #[test]
+        fn keeps_prefetch_state_when_inactive_deleted() {
+            let mut state = AppState::new("test".to_string());
+            let profile1 = create_profile("Active");
+            let profile2 = create_profile("Other");
+            let active_id = profile1.id.clone();
+            let id_to_delete = profile2.id.clone();
+            state.set_connections(vec![profile1, profile2]);
+            state.session.active_connection_id = Some(active_id);
+            state.sql_modal.begin_prefetch();
+            let generation_before = state.sql_modal.prefetch_generation();
+
+            let effects = reduce(
+                &mut state,
+                &Action::ConnectionDeleted(id_to_delete),
+                Instant::now(),
+            )
+            .unwrap();
+
+            assert!(state.sql_modal.is_prefetch_started());
+            assert_eq!(state.sql_modal.prefetch_generation(), generation_before);
+            assert!(effects.is_empty());
         }
     }
 }

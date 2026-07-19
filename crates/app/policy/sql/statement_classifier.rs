@@ -189,6 +189,12 @@ fn classify_inner(lower: &str, chars: &[(usize, char)]) -> StatementKind {
     let mut is_explain = false;
     let mut has_analyze = false;
     let mut kind: Option<StatementKind> = None;
+    // CTE bodies can contain data-modifying statements: WITH x AS (DELETE ...) SELECT ...
+    // Track "last word was AS/MATERIALIZED" and "at statement head inside parentheses"
+    // so those writes are detected without matching keywords in sub-selects.
+    let mut prev_as = false;
+    let mut dml_probe = false;
+    let mut cte_write: Option<StatementKind> = None;
 
     while i < chars.len() {
         let (byte_pos, ch) = chars[i];
@@ -202,6 +208,8 @@ fn classify_inner(lower: &str, chars: &[(usize, char)]) -> StatementKind {
             continue;
         }
         if let Some(next_i) = advance_single_quote(chars, i, ch, &mut in_string) {
+            prev_as = false;
+            dml_probe = false;
             i = next_i;
             continue;
         }
@@ -210,10 +218,14 @@ fn classify_inner(lower: &str, chars: &[(usize, char)]) -> StatementKind {
             continue;
         }
         if let Some(next_i) = skip_double_quoted_identifier(chars, i, ch) {
+            prev_as = false;
+            dml_probe = false;
             i = next_i;
             continue;
         }
         if let Some(next_i) = skip_dollar_quoted_string(lower, chars, i, byte_pos, ch) {
+            prev_as = false;
+            dml_probe = false;
             i = next_i;
             continue;
         }
@@ -238,6 +250,26 @@ fn classify_inner(lower: &str, chars: &[(usize, char)]) -> StatementKind {
                 return StatementKind::Other;
             }
             break;
+        }
+
+        if ch.is_alphanumeric() || ch == '_' {
+            if is_word_start(chars, i) {
+                let rest = &lower[byte_pos..];
+                if depth > 0
+                    && dml_probe
+                    && let Some(write) = match_cte_dml_keyword(rest, lower, chars, i)
+                    && cte_write
+                        .as_ref()
+                        .is_none_or(|current| write_rank(&write) > write_rank(current))
+                {
+                    cte_write = Some(write);
+                }
+                dml_probe = false;
+                prev_as = is_keyword(rest, "as") || is_keyword(rest, "materialized");
+            }
+        } else if !ch.is_whitespace() {
+            dml_probe = ch == '(' && (prev_as || dml_probe);
+            prev_as = false;
         }
 
         if depth == 0 && (ch.is_alphabetic() || ch == '_') && is_word_start(chars, i) {
@@ -269,7 +301,8 @@ fn classify_inner(lower: &str, chars: &[(usize, char)]) -> StatementKind {
 
             // SELECT INTO creates a table; treat as Other to avoid silent execution.
             if matches!(kind, Some(StatementKind::Select)) && is_keyword(rest, "into") {
-                return StatementKind::Other;
+                kind = Some(StatementKind::Other);
+                break;
             }
 
             if kind.is_none() && is_keyword(rest, "with") {
@@ -303,7 +336,18 @@ fn classify_inner(lower: &str, chars: &[(usize, char)]) -> StatementKind {
         i += 1;
     }
 
-    kind.unwrap_or(StatementKind::Other)
+    let kind = kind.unwrap_or(StatementKind::Other);
+    match cte_write {
+        Some(write)
+            if matches!(
+                kind,
+                StatementKind::Select | StatementKind::Transaction | StatementKind::Other
+            ) || write_rank(&write) > write_rank(&kind) =>
+        {
+            write
+        }
+        _ => kind,
+    }
 }
 
 fn match_keyword(rest: &str) -> Option<StatementKind> {
@@ -345,6 +389,48 @@ fn match_keyword(rest: &str) -> Option<StatementKind> {
     }
 }
 
+// Data-modifying statements are only valid as the direct body of a CTE, i.e. as the
+// first keyword after `AS (`. Plain sub-selects never reach this match.
+fn match_cte_dml_keyword(
+    rest: &str,
+    lower: &str,
+    chars: &[(usize, char)],
+    i: usize,
+) -> Option<StatementKind> {
+    if is_keyword(rest, "insert") {
+        Some(StatementKind::Insert)
+    } else if is_keyword(rest, "update") {
+        Some(StatementKind::Update {
+            has_where: scan_for_where(lower, chars, i),
+        })
+    } else if is_keyword(rest, "delete") {
+        Some(StatementKind::Delete {
+            has_where: scan_for_where(lower, chars, i),
+        })
+    } else if is_keyword(rest, "merge") {
+        // MERGE has no dedicated kind; Unsupported still counts as a write for
+        // read-only gating.
+        Some(StatementKind::Unsupported)
+    } else {
+        None
+    }
+}
+
+// Mirrors evaluate_sql_risk ordering so the most dangerous statement wins when a
+// writing CTE is combined with a writing main statement.
+const fn write_rank(kind: &StatementKind) -> u8 {
+    match kind {
+        StatementKind::Update { has_where: false }
+        | StatementKind::Delete { has_where: false }
+        | StatementKind::Drop
+        | StatementKind::Truncate => 2,
+        StatementKind::Update { has_where: true }
+        | StatementKind::Delete { has_where: true }
+        | StatementKind::Alter => 1,
+        _ => 0,
+    }
+}
+
 fn scan_for_where(lower: &str, chars: &[(usize, char)], start: usize) -> bool {
     let mut i = start;
     let mut depth: i32 = 0;
@@ -379,6 +465,12 @@ fn scan_for_where(lower: &str, chars: &[(usize, char)], start: usize) -> bool {
         }
 
         update_parentheses_depth(ch, &mut depth);
+
+        // Left the enclosing scope (e.g. the CTE body); a WHERE beyond it belongs
+        // to a different statement.
+        if depth < 0 {
+            return false;
+        }
 
         if depth == 0 && is_word_start(chars, i) {
             let rest = &lower[byte_pos..];
@@ -860,7 +952,59 @@ mod tests {
         #[case::double_quoted_escaped("SELECT \"up\"\"date\" FROM t", StatementKind::Select)]
         #[case::cte_with_update_in_subquery(
             "WITH x AS (UPDATE users SET name='a' RETURNING *) SELECT * FROM x",
+            StatementKind::Update { has_where: false }
+        )]
+        #[case::cte_update_with_where(
+            "WITH x AS (UPDATE users SET name='a' WHERE id = 1 RETURNING *) SELECT * FROM x",
+            StatementKind::Update { has_where: true }
+        )]
+        #[case::cte_delete_returning(
+            "WITH d AS (DELETE FROM users RETURNING *) SELECT * FROM d",
+            StatementKind::Delete { has_where: false }
+        )]
+        #[case::cte_delete_with_where(
+            "WITH d AS (DELETE FROM users WHERE id = 1 RETURNING *) SELECT * FROM d",
+            StatementKind::Delete { has_where: true }
+        )]
+        #[case::cte_insert_returning(
+            "WITH i AS (INSERT INTO t VALUES (1) RETURNING id) SELECT * FROM i",
+            StatementKind::Insert
+        )]
+        #[case::cte_merge_returning(
+            "WITH m AS (MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN UPDATE SET x = 1 RETURNING *) SELECT * FROM m",
+            StatementKind::Unsupported
+        )]
+        #[case::cte_materialized_delete(
+            "WITH d AS MATERIALIZED (DELETE FROM users) SELECT * FROM d",
+            StatementKind::Delete { has_where: false }
+        )]
+        #[case::cte_delete_then_insert_main(
+            "WITH moved AS (DELETE FROM src RETURNING *) INSERT INTO dst SELECT * FROM moved",
+            StatementKind::Delete { has_where: false }
+        )]
+        #[case::cte_sibling_where_does_not_leak(
+            "WITH a AS (UPDATE t SET x = 1), b AS (SELECT 1 WHERE true) SELECT * FROM a",
+            StatementKind::Update { has_where: false }
+        )]
+        #[case::cte_select_only_stays_select(
+            "WITH x AS (SELECT * FROM t WHERE action = 'delete') SELECT * FROM x",
             StatementKind::Select
+        )]
+        #[case::cte_keyword_in_string_not_write(
+            "WITH x AS (SELECT 'as (delete from t)' AS s) SELECT * FROM x",
+            StatementKind::Select
+        )]
+        #[case::explain_cte_delete_read_only(
+            "EXPLAIN WITH x AS (DELETE FROM t) SELECT * FROM x",
+            StatementKind::Select
+        )]
+        #[case::explain_analyze_cte_delete_executes(
+            "EXPLAIN ANALYZE WITH x AS (DELETE FROM t) SELECT * FROM x",
+            StatementKind::Delete { has_where: false }
+        )]
+        #[case::cte_delete_select_into(
+            "WITH d AS (DELETE FROM t RETURNING *) SELECT * INTO backup FROM d",
+            StatementKind::Delete { has_where: false }
         )]
         #[case::select_with_parenthesized_expr(
             "WITH cte AS (SELECT 1) SELECT (1+2)",

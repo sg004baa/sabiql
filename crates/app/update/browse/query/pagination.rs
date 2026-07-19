@@ -25,7 +25,12 @@ pub fn reduce(
             };
             let dsn = match &state.session.dsn {
                 Some(d) => d.clone(),
-                None => return Some(vec![]),
+                None => {
+                    state
+                        .messages
+                        .set_error_at("No active connection".to_string(), now);
+                    return Some(vec![]);
+                }
             };
 
             let export_query = result.query.clone();
@@ -65,19 +70,10 @@ pub fn reduce(
         } => {
             const LARGE_EXPORT_THRESHOLD: usize = 100_000;
 
-            let needs_confirm = match row_count {
-                Some(n) => *n > LARGE_EXPORT_THRESHOLD,
-                None => true,
-            };
-
-            if needs_confirm {
-                let msg = match row_count {
-                    Some(n) => format!("Export {n} rows to CSV? This may take a while."),
-                    None => "Row count unknown. Export to CSV?".to_string(),
-                };
+            if *row_count > LARGE_EXPORT_THRESHOLD {
                 state.confirm_dialog.open(
                     "Confirm CSV Export",
-                    msg,
+                    format!("Export {row_count} rows to CSV? This may take a while."),
                     crate::model::shared::confirm_dialog::ConfirmIntent::CsvExport {
                         export_query: export_query.clone(),
                         file_name: file_name.clone(),
@@ -89,7 +85,12 @@ pub fn reduce(
             } else {
                 let dsn = match &state.session.dsn {
                     Some(d) => d.clone(),
-                    None => return Some(vec![]),
+                    None => {
+                        state
+                            .messages
+                            .set_error_at("No active connection".to_string(), now);
+                        return Some(vec![]);
+                    }
                 };
                 Some(vec![Effect::ExportCsv {
                     dsn,
@@ -101,29 +102,13 @@ pub fn reduce(
             }
         }
 
-        Action::ExecuteCsvExport {
-            export_query,
-            file_name,
-            row_count,
-        } => {
-            let dsn = match &state.session.dsn {
-                Some(d) => d.clone(),
-                None => return Some(vec![]),
-            };
-            Some(vec![Effect::ExportCsv {
-                dsn,
-                query: export_query.clone(),
-                file_name: file_name.clone(),
-                row_count: *row_count,
-                read_only: state.session.read_only,
-            }])
+        Action::CsvExportCountFailed(error) => {
+            state.messages.set_error_at(error.user_message(), now);
+            Some(vec![])
         }
 
         Action::CsvExportSucceeded { path, row_count } => {
-            let msg = match row_count {
-                Some(n) => format!("Exported {n} rows → {path}"),
-                None => format!("Exported → {path}"),
-            };
+            let msg = format!("Exported {row_count} rows → {path}");
             state.messages.set_success_at(msg, now);
             let folder = Path::new(path)
                 .parent()
@@ -548,7 +533,7 @@ mod tests {
             let effects = reduce_query(
                 &mut state,
                 &Action::CsvExportRowsCounted {
-                    row_count: Some(500),
+                    row_count: 500,
                     export_query: "SELECT 1".to_string(),
                     file_name: "test".to_string(),
                 },
@@ -568,7 +553,7 @@ mod tests {
             let effects = reduce_query(
                 &mut state,
                 &Action::CsvExportRowsCounted {
-                    row_count: Some(200_000),
+                    row_count: 200_000,
                     export_query: "SELECT 1".to_string(),
                     file_name: "test".to_string(),
                 },
@@ -583,13 +568,14 @@ mod tests {
         }
 
         #[test]
-        fn rows_counted_none_opens_confirm_dialog() {
+        fn rows_counted_without_dsn_sets_error() {
             let mut state = create_test_state();
+            state.session.dsn = None;
 
             let effects = reduce_query(
                 &mut state,
                 &Action::CsvExportRowsCounted {
-                    row_count: None,
+                    row_count: 500,
                     export_query: "SELECT 1".to_string(),
                     file_name: "test".to_string(),
                 },
@@ -599,8 +585,31 @@ mod tests {
             .unwrap();
 
             assert!(effects.is_empty());
-            assert_eq!(state.input_mode(), InputMode::ConfirmDialog);
-            assert!(state.confirm_dialog.message().contains("unknown"));
+            assert_eq!(
+                state.messages.last_error.as_deref(),
+                Some("No active connection")
+            );
+        }
+
+        #[test]
+        fn count_failed_sets_error_message() {
+            let mut state = create_test_state();
+
+            let effects = reduce_query(
+                &mut state,
+                &Action::CsvExportCountFailed(DbOperationError::QueryFailed(
+                    "psql error".to_string(),
+                )),
+                Instant::now(),
+                &AppServices::stub(),
+            )
+            .unwrap();
+
+            assert!(effects.is_empty());
+            assert_eq!(
+                state.messages.last_error.as_deref(),
+                Some("Query failed: psql error. Review the database error details and SQL.")
+            );
         }
 
         #[test]
@@ -611,7 +620,7 @@ mod tests {
                 &mut state,
                 &Action::CsvExportSucceeded {
                     path: "/tmp/export.csv".to_string(),
-                    row_count: Some(42),
+                    row_count: 42,
                 },
                 Instant::now(),
                 &AppServices::stub(),

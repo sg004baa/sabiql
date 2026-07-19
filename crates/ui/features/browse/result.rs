@@ -519,8 +519,10 @@ fn truncate_cell(s: &str, max_width: usize) -> String {
 
     if UnicodeWidthStr::width(escaped.as_ref()) <= max_width {
         escaped.into_owned()
+    } else if max_width < 3 {
+        slice_chars_fitting_width(&escaped, 0, max_width)
     } else {
-        let truncated = slice_chars_fitting_width(&escaped, 0, max_width.saturating_sub(3));
+        let truncated = slice_chars_fitting_width(&escaped, 0, max_width - 3);
         format!("{truncated}...")
     }
 }
@@ -700,7 +702,7 @@ mod tests {
         let result = truncate_cell(input, max);
 
         assert_eq!(result, expected);
-        assert!(UnicodeWidthStr::width(result.as_str()) <= max.max(3));
+        assert!(UnicodeWidthStr::width(result.as_str()) <= max);
     }
 
     #[test]
@@ -747,15 +749,15 @@ mod tests {
     }
 
     #[test]
-    fn zero_max_chars_returns_ellipsis_only() {
+    fn zero_max_chars_returns_empty() {
         let result = truncate_cell("hello", 0);
 
-        assert_eq!(result, "...");
+        assert_eq!(result, "");
     }
 
     #[rstest]
-    #[case(1, "...")]
-    #[case(2, "...")]
+    #[case(1, "h")]
+    #[case(2, "he")]
     #[case(3, "...")]
     #[case(4, "h...")]
     #[case(5, "he...")]
@@ -763,6 +765,17 @@ mod tests {
         let result = truncate_cell("hello world", max);
 
         assert_eq!(result, expected);
+        assert!(UnicodeWidthStr::width(result.as_str()) <= max);
+    }
+
+    #[rstest]
+    #[case(1, "")]
+    #[case(2, "こ")]
+    fn narrow_width_with_wide_chars_never_overflows(#[case] max: usize, #[case] expected: &str) {
+        let result = truncate_cell("こんにちは", max);
+
+        assert_eq!(result, expected);
+        assert!(UnicodeWidthStr::width(result.as_str()) <= max);
     }
 
     #[test]

@@ -14,10 +14,12 @@ pub enum TokenKind {
 #[derive(Debug, Clone)]
 pub struct Token {
     pub kind: TokenKind,
-    #[allow(dead_code, reason = "used in tests for token verification")]
     pub text: String,
     pub start: usize,
     pub end: usize,
+    // False only for the trailing token cut off by the scan end (unterminated
+    // string/comment the user is still typing).
+    pub terminated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -164,6 +166,7 @@ impl SqlLexer {
                             text: chars[start..pos].iter().collect(),
                             start,
                             end: pos,
+                            terminated: true,
                         });
                         continue;
                     }
@@ -214,6 +217,7 @@ impl SqlLexer {
                             text: "$".to_string(),
                             start: tag_start,
                             end: tag_start + 1,
+                            terminated: true,
                         });
                         // Reprocess characters after $
                         pos = tag_start + 1;
@@ -243,6 +247,7 @@ impl SqlLexer {
                             text: "::".to_string(),
                             start: pos,
                             end: pos + 2,
+                            terminated: true,
                         });
                         pos += 2;
                         continue;
@@ -261,6 +266,7 @@ impl SqlLexer {
                             text: op,
                             start,
                             end: pos,
+                            terminated: true,
                         });
                         continue;
                     }
@@ -272,6 +278,7 @@ impl SqlLexer {
                             text: c.to_string(),
                             start: pos,
                             end: pos + 1,
+                            terminated: true,
                         });
                         pos += 1;
                         continue;
@@ -288,6 +295,7 @@ impl SqlLexer {
                             text: chars[start..pos].iter().collect(),
                             start,
                             end: pos,
+                            terminated: true,
                         });
                         continue;
                     }
@@ -310,6 +318,7 @@ impl SqlLexer {
                             text,
                             start,
                             end: pos,
+                            terminated: true,
                         });
                         continue;
                     }
@@ -320,6 +329,7 @@ impl SqlLexer {
                         text: c.to_string(),
                         start: pos,
                         end: pos + 1,
+                        terminated: true,
                     });
                     pos += 1;
                 }
@@ -337,6 +347,7 @@ impl SqlLexer {
                             text: chars[token_start..=pos].iter().collect(),
                             start: token_start,
                             end: pos + 1,
+                            terminated: true,
                         });
                         state = LexerState::Normal;
                         pos += 1;
@@ -359,6 +370,7 @@ impl SqlLexer {
                             text,
                             start: token_start,
                             end: pos + 1,
+                            terminated: true,
                         });
                         state = LexerState::Normal;
                         pos += 1;
@@ -384,6 +396,7 @@ impl SqlLexer {
                                 text: chars[token_start..pos].iter().collect(),
                                 start: token_start,
                                 end: pos,
+                                terminated: true,
                             });
                             state = LexerState::Normal;
                             dollar_tag.clear();
@@ -403,6 +416,7 @@ impl SqlLexer {
                             text: chars[token_start..pos].iter().collect(),
                             start: token_start,
                             end: pos,
+                            terminated: true,
                         });
                         state = LexerState::Normal;
                         // Don't consume newline, let Normal state handle it
@@ -419,6 +433,7 @@ impl SqlLexer {
                             text: chars[token_start..pos].iter().collect(),
                             start: token_start,
                             end: pos,
+                            terminated: true,
                         });
                         state = LexerState::Normal;
                         continue;
@@ -438,6 +453,7 @@ impl SqlLexer {
                             text: chars[token_start..=pos].iter().collect(),
                             start: token_start,
                             end: pos + 1,
+                            terminated: true,
                         });
                         state = LexerState::Normal;
                         pos += 1;
@@ -464,6 +480,7 @@ impl SqlLexer {
                 text,
                 start: token_start,
                 end: end_pos,
+                terminated: false,
             });
         }
 
@@ -472,28 +489,26 @@ impl SqlLexer {
 
     pub fn is_in_string_or_comment(&self, text: &str, cursor_pos: usize) -> bool {
         let tokens = self.tokenize(text, cursor_pos);
-
-        if let Some(last) = tokens.last() {
-            // If cursor is at the end of the last token
-            if last.end == cursor_pos {
-                matches!(last.kind, TokenKind::StringLiteral | TokenKind::Comment)
-            } else if last.start <= cursor_pos && cursor_pos < last.end {
-                // Cursor is inside a token
-                matches!(last.kind, TokenKind::StringLiteral | TokenKind::Comment)
-            } else {
-                false
-            }
-        } else {
-            false
-        }
+        tokens
+            .last()
+            .is_some_and(|last| Self::cursor_within_string_or_comment(last, cursor_pos))
     }
 
     pub fn is_in_string_or_comment_from_tokens(tokens: &[Token], cursor_pos: usize) -> bool {
-        tokens.iter().any(|t| {
-            t.start < cursor_pos
-                && cursor_pos <= t.end
-                && matches!(t.kind, TokenKind::StringLiteral | TokenKind::Comment)
-        })
+        tokens
+            .iter()
+            .any(|t| Self::cursor_within_string_or_comment(t, cursor_pos))
+    }
+
+    // A closed token owns positions (start, end): the position right after the
+    // closing delimiter is outside, so completion works there. Exceptions that
+    // still own their end position: an unterminated token (no closing delimiter
+    // yet) and a line comment, whose end excludes the terminating newline.
+    fn cursor_within_string_or_comment(token: &Token, cursor_pos: usize) -> bool {
+        matches!(token.kind, TokenKind::StringLiteral | TokenKind::Comment)
+            && token.start < cursor_pos
+            && (cursor_pos < token.end
+                || (cursor_pos == token.end && (!token.terminated || token.text.starts_with("--"))))
     }
 
     fn is_operator_char(c: char) -> bool {
@@ -1270,6 +1285,73 @@ mod tests {
             let result = l.is_in_string_or_comment("SELECT 'hello' FROM ", 20);
 
             assert!(!result);
+        }
+
+        #[test]
+        fn cursor_immediately_after_closed_string_returns_false() {
+            let l = lexer();
+
+            let result = l.is_in_string_or_comment("SELECT 'hello'", 14);
+
+            assert!(!result);
+        }
+
+        #[test]
+        fn cursor_immediately_after_closed_block_comment_returns_false() {
+            let l = lexer();
+
+            let result = l.is_in_string_or_comment("SELECT /* com */", 16);
+
+            assert!(!result);
+        }
+
+        #[test]
+        fn from_tokens_after_closed_string_returns_false() {
+            let l = lexer();
+            let sql = "SELECT 'hello'";
+            let tokens = l.tokenize(sql, sql.len());
+
+            assert!(!SqlLexer::is_in_string_or_comment_from_tokens(&tokens, 14));
+        }
+
+        #[test]
+        fn from_tokens_after_closed_block_comment_returns_false() {
+            let l = lexer();
+            let sql = "SELECT /* com */ id";
+            let tokens = l.tokenize(sql, sql.len());
+
+            assert!(!SqlLexer::is_in_string_or_comment_from_tokens(&tokens, 16));
+        }
+
+        #[test]
+        fn from_tokens_at_end_of_unterminated_string_returns_true() {
+            let l = lexer();
+            let sql = "SELECT 'hel";
+            let tokens = l.tokenize(sql, sql.len());
+
+            assert!(SqlLexer::is_in_string_or_comment_from_tokens(&tokens, 11));
+        }
+
+        #[test]
+        fn from_tokens_at_end_of_unterminated_escaped_string_returns_true() {
+            let l = lexer();
+            // The trailing '' is an escaped quote, not a terminator.
+            let sql = "SELECT 'ab''";
+            let tokens = l.tokenize(sql, sql.len());
+
+            assert!(SqlLexer::is_in_string_or_comment_from_tokens(&tokens, 12));
+        }
+
+        #[test]
+        fn from_tokens_before_line_comment_newline_returns_true() {
+            let l = lexer();
+            let sql = "SELECT -- com\nFROM t";
+            let tokens = l.tokenize(sql, sql.len());
+
+            // Position 13 is just before the newline: still on the comment line.
+            assert!(SqlLexer::is_in_string_or_comment_from_tokens(&tokens, 13));
+            // Position 14 is past the newline: outside the comment.
+            assert!(!SqlLexer::is_in_string_or_comment_from_tokens(&tokens, 14));
         }
     }
 

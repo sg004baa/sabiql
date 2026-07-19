@@ -2947,7 +2947,7 @@ mod tests {
 
             let cases = [
                 ("SELECT 'hello'", 10, true),     // inside string
-                ("SELECT 'hello'", 14, true),     // at closing quote
+                ("SELECT 'hello'", 14, false),    // right after closing quote
                 ("SELECT 'hello'", 7, false),     // at opening quote (boundary)
                 ("SELECT 'hello' ", 15, false),   // after string
                 ("SELECT -- comment", 12, true),  // inside line comment
