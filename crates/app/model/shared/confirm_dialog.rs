@@ -11,7 +11,7 @@ pub enum ConfirmIntent {
     CsvExport {
         export_query: String,
         file_name: String,
-        row_count: Option<usize>,
+        row_count: usize,
     },
     DisableReadOnly,
 }

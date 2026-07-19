@@ -25,6 +25,8 @@ pub enum SettingsStoreError {
     TomlDeserialize(#[source] Arc<toml::de::Error>),
     #[error("Config version mismatch: found {found}, expected {expected}")]
     VersionMismatch { found: u32, expected: u32 },
+    #[error("Unknown theme `{0}` (expected one of: dark, light)")]
+    UnknownTheme(String),
 }
 
 impl From<std::io::Error> for SettingsStoreError {

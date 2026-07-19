@@ -60,17 +60,18 @@ enum Command {
     Update,
 }
 
-#[tokio::main]
 #[allow(
     clippy::print_stderr,
     reason = "CLI error output before TUI initialization"
 )]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     dotenvy::dotenv().ok();
     error::install_hooks()?;
 
     let args = Args::parse();
     if matches!(args.command, Some(Command::Update)) {
+        // Runs before the tokio runtime starts: self_update uses a blocking HTTP
+        // client that must not be dropped inside an async context.
         #[cfg(feature = "self-update")]
         {
             return run_update();
@@ -82,6 +83,15 @@ async fn main() -> Result<()> {
         }
     }
 
+    run_tui()
+}
+
+#[tokio::main]
+#[allow(
+    clippy::print_stderr,
+    reason = "CLI error output before TUI initialization"
+)]
+async fn run_tui() -> Result<()> {
     let project_root = find_project_root()?;
     let project_name = get_project_name(&project_root);
 
@@ -92,7 +102,6 @@ async fn main() -> Result<()> {
     let completion_engine = RefCell::new(CompletionEngine::new());
     let connection_store = TomlConnectionStore::new()?;
     let settings_store = TomlSettingsStore::new()?;
-    let app_settings = settings_store.load().unwrap_or_default();
     let all_profiles = connection_store.load_all();
     let connection_store = Arc::new(connection_store);
     let settings_store = Arc::new(settings_store);
@@ -130,7 +139,6 @@ async fn main() -> Result<()> {
     };
 
     let mut state = AppState::new(project_name);
-    state.ui.set_theme(app_settings.theme_id);
 
     match all_profiles {
         Ok(profiles) if profiles.is_empty() => {
@@ -165,11 +173,28 @@ async fn main() -> Result<()> {
             );
             std::process::exit(1);
         }
-        Err(_) => {
-            state.connection_setup.is_first_run = true;
-            state.modal.set_mode(InputMode::ConnectionSetup);
+        Err(err) => {
+            eprintln!(
+                "Error: Failed to load connection profiles from {}: {err}\n\
+                 The file may be corrupted. Back it up, then fix or remove it and restart.",
+                connection_store.storage_path().display()
+            );
+            std::process::exit(1);
         }
     }
+
+    let app_settings = match settings_store.load() {
+        Ok(settings) => settings,
+        Err(err) => {
+            eprintln!(
+                "Error: Failed to load settings from {}: {err}\n\
+                 The file may be corrupted. Back it up, then fix or remove it and restart.",
+                connection_store.storage_path().display()
+            );
+            std::process::exit(1);
+        }
+    };
+    state.ui.set_theme(app_settings.theme_id);
 
     let mut tui = TuiRunner::new()?;
     tui.enter()?;
@@ -479,27 +504,133 @@ fn load_service_entries(state: &mut AppState, reader: Option<&dyn PgServiceEntry
 #[cfg(feature = "self-update")]
 #[allow(clippy::print_stdout, reason = "CLI subcommand output, TUI not active")]
 fn run_update() -> Result<()> {
+    use color_eyre::eyre::eyre;
+
+    const REPO_OWNER: &str = "riii111";
+    const REPO_NAME: &str = "sabiql";
+
     let current = env!("CARGO_PKG_VERSION");
     println!("Current version: v{current}");
     println!("Checking for updates...");
 
+    let releases = self_update::backends::github::Update::configure()
+        .repo_owner(REPO_OWNER)
+        .repo_name(REPO_NAME)
+        .bin_name("sabiql")
+        .current_version(current)
+        .build()?
+        .get_latest_releases()?;
+
+    if !releases.is_update_available()? {
+        println!("Already up to date (v{current}).");
+        return Ok(());
+    }
+
+    // Mirror the crate's selection: newest semver-compatible release, else newest.
+    let releases = releases.into_vec();
+    let release = releases
+        .iter()
+        .find(|release| {
+            self_update::version::bump_is_compatible(current, &release.version).unwrap_or(false)
+        })
+        .or_else(|| releases.first())
+        .ok_or_else(|| eyre!("No newer release found"))?;
+
+    let archive_name = release_archive_name();
+    let expected_sha256 = fetch_expected_sha256(release, &archive_name)?;
+
+    // Pin the update to the exact release the checksum was fetched for, so a release
+    // published mid-update cannot be installed against the wrong digest.
+    let release_tag = format!("v{}", release.version);
     let status = self_update::backends::github::Update::configure()
-        .repo_owner("riii111")
-        .repo_name("sabiql")
+        .repo_owner(REPO_OWNER)
+        .repo_name(REPO_NAME)
         .bin_name("sabiql")
         .show_download_progress(true)
-        .no_confirm(true)
         .current_version(current)
+        .release_tag(release_tag)
+        .asset_matcher(move |assets: &[self_update::ReleaseAsset]| {
+            assets
+                .iter()
+                .find(|asset| asset.name == archive_name)
+                .cloned()
+        })
+        .verify_checksum(self_update::Checksum::Sha256(expected_sha256))
         .build()?
         .update()?;
 
-    if status.updated() {
-        println!("Updated successfully: v{} -> {}", current, status.version());
+    if status.is_updated() {
+        println!(
+            "Updated successfully: v{} -> v{}",
+            current,
+            status.version()
+        );
     } else {
         println!("Already up to date (v{current}).");
     }
 
     Ok(())
+}
+
+/// cargo-dist release archive name for the running platform, e.g.
+/// `sabiql-x86_64-unknown-linux-gnu.tar.gz`.
+#[cfg(feature = "self-update")]
+fn release_archive_name() -> String {
+    let target = self_update::get_target();
+    let extension = if cfg!(target_os = "windows") {
+        "zip"
+    } else {
+        "tar.gz"
+    };
+    format!("sabiql-{target}.{extension}")
+}
+
+/// Download the cargo-dist `<archive>.sha256` release asset and return the expected
+/// hex digest. Fails if the asset is missing or its content is not a SHA-256 digest.
+#[cfg(feature = "self-update")]
+fn fetch_expected_sha256(
+    release: &self_update::update::Release,
+    archive_name: &str,
+) -> Result<String> {
+    use color_eyre::eyre::eyre;
+
+    let checksum_name = format!("{archive_name}.sha256");
+    let asset = release
+        .assets
+        .iter()
+        .find(|asset| asset.name == checksum_name)
+        .ok_or_else(|| {
+            eyre!(
+                "Checksum asset `{checksum_name}` not found in release v{}; refusing to update without verification",
+                release.version
+            )
+        })?;
+
+    let mut raw = Vec::new();
+    let mut download = self_update::Download::from_url(&asset.download_url);
+    download.header("Accept", "application/octet-stream")?;
+    download.download_to(&mut raw)?;
+
+    let content = String::from_utf8(raw)
+        .map_err(|_| eyre!("Checksum asset `{checksum_name}` is not valid UTF-8"))?;
+    parse_sha256_digest(&content, &checksum_name)
+}
+
+/// Parse a cargo-dist checksum asset: `sha256sum`-style content, `<hex digest>  <file name>`.
+#[cfg(feature = "self-update")]
+fn parse_sha256_digest(content: &str, checksum_name: &str) -> Result<String> {
+    use color_eyre::eyre::eyre;
+
+    let digest = content
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| eyre!("Checksum asset `{checksum_name}` is empty"))?;
+    if digest.len() != 64 || !digest.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(eyre!(
+            "Checksum asset `{checksum_name}` does not contain a SHA-256 digest: `{digest}`"
+        ));
+    }
+    Ok(digest.to_lowercase())
 }
 
 #[cfg(not(feature = "self-update"))]

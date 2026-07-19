@@ -80,17 +80,21 @@ pub struct SqlModalContext {
     pub prefetching_tables: HashSet<String>,
     pub failed_prefetch_tables: HashMap<String, FailedPrefetchEntry>,
     prefetch_started: bool,
+    prefetch_generation: u64,
     active_tab: SqlModalTab,
 }
 
 impl SqlModalContext {
     // ── Prefetch lifecycle ──────────────────────────────────────────
 
+    // Invalidates in-flight prefetch results: bumping the generation makes the
+    // reducer reject any TableDetailCached/CacheFailed emitted before the reset.
     pub fn reset_prefetch(&mut self) {
         self.prefetch_started = false;
         self.prefetch_queue.clear();
         self.prefetching_tables.clear();
         self.failed_prefetch_tables.clear();
+        self.prefetch_generation += 1;
     }
 
     // Preserves `prefetching_tables` so in-flight requests drain naturally.
@@ -106,6 +110,10 @@ impl SqlModalContext {
 
     pub fn is_prefetch_started(&self) -> bool {
         self.prefetch_started
+    }
+
+    pub fn prefetch_generation(&self) -> u64 {
+        self.prefetch_generation
     }
 
     // ── Adhoc status ────────────────────────────────────────────────
@@ -412,6 +420,21 @@ mod tests {
             assert!(ctx.prefetch_queue.is_empty());
             assert!(ctx.prefetching_tables.is_empty());
             assert!(ctx.failed_prefetch_tables.is_empty());
+        }
+
+        #[test]
+        fn reset_bumps_generation_but_begin_does_not() {
+            let mut ctx = SqlModalContext::default();
+            let initial = ctx.prefetch_generation();
+
+            ctx.begin_prefetch();
+            assert_eq!(ctx.prefetch_generation(), initial);
+
+            ctx.reset_prefetch();
+            assert_eq!(ctx.prefetch_generation(), initial + 1);
+
+            ctx.reset_prefetch();
+            assert_eq!(ctx.prefetch_generation(), initial + 2);
         }
     }
 

@@ -5,6 +5,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tokio::time::timeout;
 
+use crate::adapters::csv_record_counter::CsvRecordCounter;
 use crate::app::ports::outbound::DbOperationError;
 use crate::domain::{QueryResult, QuerySource, WriteExecutionResult};
 
@@ -121,6 +122,28 @@ fn extract_last_csv_block<'a>(stdout: &'a str, sql: &str) -> &'a str {
     &stdout[byte_offset..]
 }
 
+/// Split the percent-encoded password out of a `postgres://` /
+/// `postgresql://` URI so it can be handed to psql via `PGPASSWORD` instead
+/// of the argv, where it would be visible in the process list.
+///
+/// Keyword/value and `service=` DSNs carry no inline password and pass
+/// through unchanged.
+fn split_dsn_password(dsn: &str) -> Result<(String, Option<String>), DbOperationError> {
+    let Some((scheme, rest)) = dsn.split_once("://") else {
+        return Ok((dsn.to_string(), None));
+    };
+    let Some((userinfo, host_part)) = rest.split_once('@') else {
+        return Ok((dsn.to_string(), None));
+    };
+    let Some((user, encoded_password)) = userinfo.split_once(':') else {
+        return Ok((dsn.to_string(), None));
+    };
+    let password = urlencoding::decode(encoded_password)
+        .map_err(|e| DbOperationError::ConnectionFailed(e.to_string()))?
+        .into_owned();
+    Ok((format!("{scheme}://{user}@{host_part}"), Some(password)))
+}
+
 struct PsqlOutput {
     status: ExitStatus,
     stdout: String,
@@ -130,6 +153,46 @@ struct PsqlOutput {
 impl PostgresAdapter {
     const PGOPTIONS_READ_ONLY: &str = "-c default_transaction_read_only=on";
 
+    /// psql args for tabular data fetches (preview/adhoc/CSV export): CSV
+    /// output with NULLs rendered as the literal `NULL` sentinel so they stay
+    /// distinguishable from empty strings, matching the mysql adapter and the
+    /// `sql_literal_or_null` sentinel convention.
+    const CSV_DATA_ARGS: &[&str] = &["--csv", "-P", "null=NULL"];
+
+    fn build_psql_cmd(
+        dsn: &str,
+        extra_args: &[&str],
+        query: &str,
+        read_only: bool,
+    ) -> Result<Command, DbOperationError> {
+        let (dsn, password) = split_dsn_password(dsn)?;
+
+        let mut cmd = Command::new("psql");
+        if read_only {
+            Self::apply_read_only_pgoptions(&mut cmd);
+        }
+        // Pass the password via the environment so it never shows up in the
+        // process list as part of the connection URI.
+        if let Some(password) = password {
+            cmd.env("PGPASSWORD", password);
+        }
+        cmd.arg(dsn)
+            .arg("-X")
+            .arg("-v")
+            .arg("ON_ERROR_STOP=1")
+            .arg("-v")
+            .arg("VERBOSITY=verbose")
+            .arg("-v")
+            .arg("SHOW_CONTEXT=never");
+
+        for arg in extra_args {
+            cmd.arg(arg);
+        }
+
+        cmd.arg("-c").arg(query);
+        Ok(cmd)
+    }
+
     async fn run_psql(
         &self,
         dsn: &str,
@@ -137,18 +200,7 @@ impl PostgresAdapter {
         query: &str,
         read_only: bool,
     ) -> Result<PsqlOutput, DbOperationError> {
-        let mut cmd = Command::new("psql");
-        if read_only {
-            Self::apply_read_only_pgoptions(&mut cmd);
-        }
-        Self::apply_psql_base_args(&mut cmd, dsn);
-
-        for arg in extra_args {
-            cmd.arg(arg);
-        }
-
-        cmd.arg("-c").arg(query);
-
+        let mut cmd = Self::build_psql_cmd(dsn, extra_args, query, read_only)?;
         Self::collect_output(&mut cmd, self.timeout_secs).await
     }
 
@@ -158,17 +210,6 @@ impl PostgresAdapter {
             Err(_) => Self::PGOPTIONS_READ_ONLY.to_string(),
         };
         cmd.env("PGOPTIONS", merged);
-    }
-
-    fn apply_psql_base_args(cmd: &mut Command, dsn: &str) {
-        cmd.arg(dsn)
-            .arg("-X")
-            .arg("-v")
-            .arg("ON_ERROR_STOP=1")
-            .arg("-v")
-            .arg("VERBOSITY=verbose")
-            .arg("-v")
-            .arg("SHOW_CONTEXT=never");
     }
 
     async fn collect_output(
@@ -244,7 +285,9 @@ impl PostgresAdapter {
     ) -> Result<QueryResult, DbOperationError> {
         let start = Instant::now();
 
-        let output = self.run_psql(dsn, &["--csv"], query, read_only).await?;
+        let output = self
+            .run_psql(dsn, Self::CSV_DATA_ARGS, query, read_only)
+            .await?;
 
         let elapsed = start.elapsed().as_millis() as u64;
 
@@ -344,12 +387,7 @@ impl PostgresAdapter {
         path: &std::path::Path,
         read_only: bool,
     ) -> Result<usize, DbOperationError> {
-        let mut cmd = Command::new("psql");
-        if read_only {
-            Self::apply_read_only_pgoptions(&mut cmd);
-        }
-        Self::apply_psql_base_args(&mut cmd, dsn);
-        cmd.arg("--csv").arg("-c").arg(query);
+        let mut cmd = Self::build_psql_cmd(dsn, Self::CSV_DATA_ARGS, query, read_only)?;
 
         let mut child = cmd
             .stdout(Stdio::piped())
@@ -367,7 +405,7 @@ impl PostgresAdapter {
         let mut writer = tokio::io::BufWriter::new(file);
 
         let result = timeout(Duration::from_secs(self.timeout_secs * 10), async {
-            let mut newline_count: usize = 0;
+            let mut counter = CsvRecordCounter::new();
             if let Some(mut out) = stdout {
                 let mut buf = [0u8; 8192];
                 loop {
@@ -375,7 +413,7 @@ impl PostgresAdapter {
                     if n == 0 {
                         break;
                     }
-                    newline_count += buf[..n].iter().filter(|&&b| b == b'\n').count();
+                    counter.feed(&buf[..n]);
                     writer.write_all(&buf[..n]).await?;
                 }
                 writer.flush().await?;
@@ -390,7 +428,7 @@ impl PostgresAdapter {
             };
 
             let status = child.wait().await?;
-            Ok::<_, std::io::Error>((status, stderr, newline_count))
+            Ok::<_, std::io::Error>((status, stderr, counter.finish()))
         })
         .await;
 
@@ -402,14 +440,14 @@ impl PostgresAdapter {
             }
         };
 
-        let (status, stderr, newline_count) = result;
+        let (status, stderr, record_count) = result;
         if !status.success() {
             let _ = tokio::fs::remove_file(path).await;
             return Err(Self::classify_psql_error(&stderr));
         }
 
-        // Subtract 1 for the CSV header line
-        let row_count = newline_count.saturating_sub(1);
+        // Subtract 1 for the CSV header record
+        let row_count = record_count.saturating_sub(1);
         Ok(row_count)
     }
 
@@ -593,6 +631,21 @@ mod tests {
     }
 
     mod csv_parsing {
+        #[test]
+        fn null_sentinel_distinguishes_null_from_empty_string() {
+            // With `-P null=NULL`, psql emits SQL NULL as the bare sentinel
+            // while an empty string stays an empty field.
+            let csv_data = "id,note\n1,NULL\n2,\"\"\n";
+            let mut reader = csv::ReaderBuilder::new()
+                .has_headers(true)
+                .from_reader(csv_data.as_bytes());
+
+            let rows: Vec<_> = reader.records().map(|r| r.unwrap()).collect();
+
+            assert_eq!(rows[0].get(1), Some("NULL"));
+            assert_eq!(rows[1].get(1), Some(""));
+        }
+
         #[test]
         fn empty_csv_output_has_no_headers() {
             let csv_data = "";
@@ -845,6 +898,98 @@ mod tests {
                     "header '{input}' must not pass the command-tag filter"
                 );
             }
+        }
+    }
+
+    mod split_dsn_password {
+        use super::super::split_dsn_password;
+
+        #[test]
+        fn uri_password_removed_and_decoded() {
+            let (dsn, password) = split_dsn_password(
+                "postgres://user:p%40ss%3Aword@localhost:5432/db?sslmode=prefer",
+            )
+            .unwrap();
+            assert_eq!(dsn, "postgres://user@localhost:5432/db?sslmode=prefer");
+            assert_eq!(password.as_deref(), Some("p@ss:word"));
+        }
+
+        #[test]
+        fn empty_password_still_stripped_from_uri() {
+            let (dsn, password) = split_dsn_password("postgres://user:@localhost:5432/db").unwrap();
+            assert_eq!(dsn, "postgres://user@localhost:5432/db");
+            assert_eq!(password.as_deref(), Some(""));
+        }
+
+        #[test]
+        fn uri_without_password_passes_through() {
+            let (dsn, password) = split_dsn_password("postgres://user@localhost:5432/db").unwrap();
+            assert_eq!(dsn, "postgres://user@localhost:5432/db");
+            assert_eq!(password, None);
+        }
+
+        #[test]
+        fn uri_without_userinfo_passes_through() {
+            let (dsn, password) = split_dsn_password("postgres://localhost:5432/db").unwrap();
+            assert_eq!(dsn, "postgres://localhost:5432/db");
+            assert_eq!(password, None);
+        }
+
+        #[test]
+        fn service_dsn_passes_through() {
+            let (dsn, password) = split_dsn_password("service=mydb").unwrap();
+            assert_eq!(dsn, "service=mydb");
+            assert_eq!(password, None);
+        }
+    }
+
+    mod build_psql_cmd {
+        use crate::adapters::postgres::PostgresAdapter;
+
+        fn argv(cmd: &tokio::process::Command) -> Vec<String> {
+            cmd.as_std()
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect()
+        }
+
+        #[test]
+        fn password_kept_out_of_argv_and_passed_via_env() {
+            let cmd = PostgresAdapter::build_psql_cmd(
+                "postgres://user:s3cret@localhost:5432/db?sslmode=prefer",
+                &[],
+                "SELECT 1",
+                false,
+            )
+            .unwrap();
+
+            let args = argv(&cmd);
+            assert!(args.iter().all(|arg| !arg.contains("s3cret")));
+            assert_eq!(args[0], "postgres://user@localhost:5432/db?sslmode=prefer");
+
+            let pgpassword = cmd
+                .as_std()
+                .get_envs()
+                .find(|(key, _)| *key == std::ffi::OsStr::new("PGPASSWORD"))
+                .and_then(|(_, value)| value)
+                .map(|value| value.to_string_lossy().into_owned());
+            assert_eq!(pgpassword.as_deref(), Some("s3cret"));
+        }
+
+        #[test]
+        fn data_query_args_render_null_as_sentinel() {
+            let cmd = PostgresAdapter::build_psql_cmd(
+                "postgres://user:pw@localhost:5432/db",
+                PostgresAdapter::CSV_DATA_ARGS,
+                "SELECT 1",
+                false,
+            )
+            .unwrap();
+
+            let args = argv(&cmd);
+            let pset_pos = args.iter().position(|arg| arg == "-P").unwrap();
+            assert_eq!(args[pset_pos + 1], "null=NULL");
+            assert!(args.contains(&"--csv".to_string()));
         }
     }
 }

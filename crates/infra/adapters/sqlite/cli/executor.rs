@@ -5,6 +5,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tokio::time::timeout;
 
+use crate::adapters::csv_record_counter::CsvRecordCounter;
 use crate::app::ports::outbound::DbOperationError;
 use crate::domain::{QueryResult, QuerySource, WriteExecutionResult};
 
@@ -17,6 +18,12 @@ struct SqliteOutput {
 }
 
 impl SqliteAdapter {
+    /// sqlite3 args for tabular data fetches (preview/adhoc/CSV export): CSV
+    /// output with NULLs rendered as the literal `NULL` sentinel so they stay
+    /// distinguishable from empty strings, matching the mysql adapter and the
+    /// `sql_literal_or_null` sentinel convention.
+    const CSV_DATA_ARGS: &[&str] = &["-header", "-csv", "-nullvalue", "NULL"];
+
     fn db_path_from_dsn(dsn: &str) -> Result<&str, DbOperationError> {
         let path = Self::path_from_dsn(dsn).ok_or_else(|| {
             DbOperationError::ConnectionFailed("Invalid SQLite DSN scheme".into())
@@ -130,9 +137,10 @@ impl SqliteAdapter {
 
     /// Execute a data query (preview or adhoc) returning tabular results.
     ///
-    /// Uses `sqlite3 -csv -header`: the shell emits RFC 4180 CSV (fields with
-    /// commas, quotes, or newlines are quoted; rows end in CRLF), which the
-    /// `csv` crate parses with its defaults.
+    /// Uses `sqlite3 -csv -header -nullvalue NULL`: the shell emits RFC 4180
+    /// CSV (fields with commas, quotes, or newlines are quoted; rows end in
+    /// CRLF), which the `csv` crate parses with its defaults. NULLs arrive as
+    /// the bare `NULL` sentinel so they stay distinguishable from `""`.
     pub(in crate::adapters::sqlite) async fn execute_query_raw(
         &self,
         dsn: &str,
@@ -142,7 +150,7 @@ impl SqliteAdapter {
     ) -> Result<QueryResult, DbOperationError> {
         let start = Instant::now();
 
-        let mut cmd = Self::build_sqlite_cmd(dsn, &["-header", "-csv"], query, read_only)?;
+        let mut cmd = Self::build_sqlite_cmd(dsn, Self::CSV_DATA_ARGS, query, read_only)?;
         let output = Self::collect_output(&mut cmd, self.timeout_secs).await?;
         let elapsed = start.elapsed().as_millis() as u64;
 
@@ -241,7 +249,7 @@ impl SqliteAdapter {
         path: &std::path::Path,
         read_only: bool,
     ) -> Result<usize, DbOperationError> {
-        let mut cmd = Self::build_sqlite_cmd(dsn, &["-header", "-csv"], query, read_only)?;
+        let mut cmd = Self::build_sqlite_cmd(dsn, Self::CSV_DATA_ARGS, query, read_only)?;
 
         let mut child = cmd
             .stdout(Stdio::piped())
@@ -259,7 +267,7 @@ impl SqliteAdapter {
         let mut writer = tokio::io::BufWriter::new(file);
 
         let result = timeout(Duration::from_secs(self.timeout_secs * 10), async {
-            let mut newline_count: usize = 0;
+            let mut counter = CsvRecordCounter::new();
             if let Some(mut out) = stdout {
                 let mut buf = [0u8; 8192];
                 loop {
@@ -267,7 +275,7 @@ impl SqliteAdapter {
                     if n == 0 {
                         break;
                     }
-                    newline_count += buf[..n].iter().filter(|&&b| b == b'\n').count();
+                    counter.feed(&buf[..n]);
                     writer.write_all(&buf[..n]).await?;
                 }
                 writer.flush().await?;
@@ -282,7 +290,7 @@ impl SqliteAdapter {
             };
 
             let status = child.wait().await?;
-            Ok::<_, std::io::Error>((status, stderr, newline_count))
+            Ok::<_, std::io::Error>((status, stderr, counter.finish()))
         })
         .await;
 
@@ -294,14 +302,14 @@ impl SqliteAdapter {
             }
         };
 
-        let (status, stderr, newline_count) = result;
+        let (status, stderr, record_count) = result;
         if !status.success() {
             let _ = tokio::fs::remove_file(path).await;
             return Err(DbOperationError::QueryFailed(stderr.trim().to_string()));
         }
 
-        // Subtract 1 for the CSV header line
-        let row_count = newline_count.saturating_sub(1);
+        // Subtract 1 for the CSV header record
+        let row_count = record_count.saturating_sub(1);
         Ok(row_count)
     }
 
@@ -431,6 +439,43 @@ mod tests {
             let (cols, rows) = parse_csv_output(stdout).unwrap();
             assert_eq!(cols, vec!["id", "name"]);
             assert_eq!(rows, vec![vec!["1", "Alice"]]);
+        }
+
+        #[test]
+        fn null_sentinel_distinguishes_null_from_empty_string() {
+            // With `-nullvalue NULL`, sqlite3 emits SQL NULL as the bare
+            // sentinel while an empty string stays an empty field.
+            let stdout = "id,note\r\n1,NULL\r\n2,\"\"\r\n";
+            let (_, rows) = parse_csv_output(stdout).unwrap();
+            assert_eq!(rows[0], vec!["1", "NULL"]);
+            assert_eq!(rows[1], vec!["2", ""]);
+        }
+    }
+
+    mod data_query_args {
+        use crate::adapters::sqlite::SqliteAdapter;
+
+        #[test]
+        fn null_rendered_as_sentinel_in_argv() {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            let dsn = format!("sqlite://{}", file.path().display());
+
+            let cmd = SqliteAdapter::build_sqlite_cmd(
+                &dsn,
+                SqliteAdapter::CSV_DATA_ARGS,
+                "SELECT 1",
+                false,
+            )
+            .unwrap();
+
+            let args: Vec<String> = cmd
+                .as_std()
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
+            let null_pos = args.iter().position(|arg| arg == "-nullvalue").unwrap();
+            assert_eq!(args[null_pos + 1], "NULL");
+            assert!(args.contains(&"-csv".to_string()));
         }
     }
 }
