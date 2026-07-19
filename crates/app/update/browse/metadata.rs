@@ -343,32 +343,39 @@ pub fn reduce_metadata(state: &mut AppState, action: &Action, now: Instant) -> O
                 }
             }
 
+            let Some(dsn) = state.session.dsn.clone() else {
+                // No DSN: don't record bookkeeping, or the duplicate guard above
+                // would permanently block this table once a connection exists.
+                return Some(vec![]);
+            };
+
             state
                 .sql_modal
                 .prefetching_tables
                 .insert(qualified_name.clone());
             state.er_preparation.pending_tables.remove(&qualified_name);
-            state
-                .er_preparation
-                .fetching_tables
-                .insert(qualified_name.clone());
+            state.er_preparation.fetching_tables.insert(qualified_name);
 
-            if let Some(dsn) = &state.session.dsn {
-                Some(vec![Effect::PrefetchTableDetail {
-                    dsn: dsn.clone(),
-                    schema: schema.clone(),
-                    table: table.clone(),
-                }])
-            } else {
-                Some(vec![])
-            }
+            Some(vec![Effect::PrefetchTableDetail {
+                dsn,
+                schema: schema.clone(),
+                table: table.clone(),
+                generation: state.sql_modal.prefetch_generation(),
+            }])
         }
 
         Action::TableDetailCached {
             schema,
             table,
             detail,
+            generation,
         } => {
+            if *generation != state.sql_modal.prefetch_generation() {
+                // Stale result from before a prefetch reset (connection switch,
+                // reload, DDL): must not pollute the current completion cache.
+                return Some(vec![]);
+            }
+
             let qualified_name = format!("{schema}.{table}");
             state.sql_modal.prefetching_tables.remove(&qualified_name);
             state
@@ -395,7 +402,12 @@ pub fn reduce_metadata(state: &mut AppState, action: &Action, now: Instant) -> O
             schema,
             table,
             error,
+            generation,
         } => {
+            if *generation != state.sql_modal.prefetch_generation() {
+                return Some(vec![]);
+            }
+
             let qualified_name = format!("{schema}.{table}");
             state.sql_modal.prefetching_tables.remove(&qualified_name);
 
@@ -427,7 +439,15 @@ pub fn reduce_metadata(state: &mut AppState, action: &Action, now: Instant) -> O
             Some(effects)
         }
 
-        Action::TableDetailAlreadyCached { schema, table } => {
+        Action::TableDetailAlreadyCached {
+            schema,
+            table,
+            generation,
+        } => {
+            if *generation != state.sql_modal.prefetch_generation() {
+                return Some(vec![]);
+            }
+
             let qualified_name = format!("{schema}.{table}");
             state.sql_modal.prefetching_tables.remove(&qualified_name);
             state
@@ -649,6 +669,158 @@ mod tests {
                     .any(|e| matches!(e, Effect::PrefetchTableDetail { .. }))
             );
         }
+
+        #[test]
+        fn skips_bookkeeping_when_dsn_missing() {
+            let mut state = AppState::new("test".to_string());
+            state.sql_modal.begin_prefetch();
+            let qualified = "public.users".to_string();
+            let action = Action::PrefetchTableDetail {
+                schema: "public".to_string(),
+                table: "users".to_string(),
+            };
+
+            let effects = reduce_metadata(&mut state, &action, Instant::now()).unwrap();
+
+            // No DSN: nothing recorded, or the duplicate guard would block
+            // this table forever once a connection exists.
+            assert!(effects.is_empty());
+            assert!(!state.sql_modal.prefetching_tables.contains(&qualified));
+            assert!(!state.er_preparation.fetching_tables.contains(&qualified));
+
+            // Once a DSN exists, the same table fetches normally.
+            state.session.dsn = Some("postgres://localhost/test".to_string());
+            let effects = reduce_metadata(&mut state, &action, Instant::now()).unwrap();
+
+            assert!(state.sql_modal.prefetching_tables.contains(&qualified));
+            assert!(
+                effects
+                    .iter()
+                    .any(|e| matches!(e, Effect::PrefetchTableDetail { .. }))
+            );
+        }
+
+        #[test]
+        fn stamps_current_prefetch_generation_into_effect() {
+            let mut state = state_with_dsn("postgres://localhost/test");
+            state.sql_modal.reset_prefetch();
+            state.sql_modal.begin_prefetch();
+            let expected = state.sql_modal.prefetch_generation();
+
+            let effects = reduce_metadata(
+                &mut state,
+                &Action::PrefetchTableDetail {
+                    schema: "public".to_string(),
+                    table: "users".to_string(),
+                },
+                Instant::now(),
+            )
+            .unwrap();
+
+            assert!(effects.iter().any(
+                |e| matches!(e, Effect::PrefetchTableDetail { generation, .. } if *generation == expected)
+            ));
+        }
+    }
+
+    mod table_detail_cached {
+        use super::*;
+        use crate::domain::Table;
+
+        fn make_test_table() -> Box<Table> {
+            Box::new(Table {
+                schema: "public".to_string(),
+                name: "users".to_string(),
+                owner: None,
+                columns: vec![],
+                primary_key: None,
+                indexes: vec![],
+                foreign_keys: vec![],
+                rls: None,
+                triggers: vec![],
+                row_count_estimate: None,
+                comment: None,
+            })
+        }
+
+        #[test]
+        fn rejects_stale_generation() {
+            let mut state = state_with_dsn("postgres://localhost/test");
+            let qualified = "public.users".to_string();
+            let stale_generation = state.sql_modal.prefetch_generation();
+            // Connection switch while the gen-0 prefetch is still in flight.
+            state.sql_modal.reset_prefetch();
+            // A fresh prefetch for the new connection is already tracked.
+            state.sql_modal.prefetching_tables.insert(qualified.clone());
+
+            let effects = reduce_metadata(
+                &mut state,
+                &Action::TableDetailCached {
+                    schema: "public".to_string(),
+                    table: "users".to_string(),
+                    detail: make_test_table(),
+                    generation: stale_generation,
+                },
+                Instant::now(),
+            )
+            .unwrap();
+
+            // Stale result: no cache write, and the in-flight tracking for the
+            // new connection stays untouched.
+            assert!(effects.is_empty());
+            assert!(state.sql_modal.prefetching_tables.contains(&qualified));
+        }
+
+        #[test]
+        fn accepts_current_generation_after_reset() {
+            let mut state = state_with_dsn("postgres://localhost/test");
+            let qualified = "public.users".to_string();
+            state.sql_modal.reset_prefetch();
+            state.sql_modal.prefetching_tables.insert(qualified.clone());
+            let current_generation = state.sql_modal.prefetch_generation();
+
+            let effects = reduce_metadata(
+                &mut state,
+                &Action::TableDetailCached {
+                    schema: "public".to_string(),
+                    table: "users".to_string(),
+                    detail: make_test_table(),
+                    generation: current_generation,
+                },
+                Instant::now(),
+            )
+            .unwrap();
+
+            assert!(
+                effects
+                    .iter()
+                    .any(|e| matches!(e, Effect::CacheTableInCompletionEngine { .. }))
+            );
+            assert!(!state.sql_modal.prefetching_tables.contains(&qualified));
+        }
+
+        #[test]
+        fn already_cached_rejects_stale_generation() {
+            let mut state = state_with_dsn("postgres://localhost/test");
+            let qualified = "public.users".to_string();
+            let stale_generation = state.sql_modal.prefetch_generation();
+            state.sql_modal.reset_prefetch();
+            state.sql_modal.prefetching_tables.insert(qualified.clone());
+
+            let effects = reduce_metadata(
+                &mut state,
+                &Action::TableDetailAlreadyCached {
+                    schema: "public".to_string(),
+                    table: "users".to_string(),
+                    generation: stale_generation,
+                },
+                Instant::now(),
+            )
+            .unwrap();
+
+            assert!(effects.is_empty());
+            assert!(state.sql_modal.prefetching_tables.contains(&qualified));
+        }
     }
 
     mod table_detail_cache_failed {
@@ -676,6 +848,7 @@ mod tests {
                     schema: "public".to_string(),
                     table: "users".to_string(),
                     error: DbOperationError::QueryFailed("new error".to_string()),
+                    generation: 0,
                 },
                 now,
             );
@@ -705,6 +878,7 @@ mod tests {
                     schema: "public".to_string(),
                     table: "users".to_string(),
                     error: DbOperationError::Timeout("timed out".to_string()),
+                    generation: 0,
                 },
                 now,
             );
@@ -715,6 +889,38 @@ mod tests {
                 .get(&qualified)
                 .unwrap();
             assert_eq!(entry.retry_count, 1);
+        }
+
+        #[test]
+        fn rejects_stale_generation() {
+            let mut state = state_with_dsn("postgres://localhost/test");
+            let qualified = "public.users".to_string();
+            let stale_generation = state.sql_modal.prefetch_generation();
+            // Connection switch while the gen-0 prefetch is still in flight.
+            state.sql_modal.reset_prefetch();
+            state.sql_modal.prefetching_tables.insert(qualified.clone());
+
+            let effects = reduce_metadata(
+                &mut state,
+                &Action::TableDetailCacheFailed {
+                    schema: "public".to_string(),
+                    table: "users".to_string(),
+                    error: DbOperationError::Timeout("timed out".to_string()),
+                    generation: stale_generation,
+                },
+                Instant::now(),
+            )
+            .unwrap();
+
+            // Stale failure: no retry bookkeeping for the new connection.
+            assert!(effects.is_empty());
+            assert!(
+                !state
+                    .sql_modal
+                    .failed_prefetch_tables
+                    .contains_key(&qualified)
+            );
+            assert!(state.sql_modal.prefetching_tables.contains(&qualified));
         }
     }
 

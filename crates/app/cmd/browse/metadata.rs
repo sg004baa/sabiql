@@ -33,7 +33,12 @@ pub async fn run(
             fetch_table_detail(action_tx, metadata_provider, dsn, schema, table, generation);
             Ok(())
         }
-        Effect::PrefetchTableDetail { dsn, schema, table } => {
+        Effect::PrefetchTableDetail {
+            dsn,
+            schema,
+            table,
+            generation,
+        } => {
             prefetch_table_detail(
                 action_tx,
                 metadata_provider,
@@ -41,6 +46,7 @@ pub async fn run(
                 dsn,
                 schema,
                 table,
+                generation,
             )
             .await
         }
@@ -128,13 +134,18 @@ async fn prefetch_table_detail(
     dsn: String,
     schema: String,
     table: String,
+    generation: u64,
 ) -> Result<()> {
     let qualified_name = format!("{schema}.{table}");
     let already_cached = completion_engine.borrow().has_cached_table(&qualified_name);
 
     if already_cached {
         action_tx
-            .send(Action::TableDetailAlreadyCached { schema, table })
+            .send(Action::TableDetailAlreadyCached {
+                schema,
+                table,
+                generation,
+            })
             .await
             .ok();
         return Ok(());
@@ -155,6 +166,7 @@ async fn prefetch_table_detail(
                     schema,
                     table,
                     detail: Box::new(detail),
+                    generation,
                 })
                 .await
                 .ok();
@@ -164,6 +176,7 @@ async fn prefetch_table_detail(
                     schema,
                     table,
                     error: e,
+                    generation,
                 })
                 .await
                 .ok();
@@ -173,6 +186,7 @@ async fn prefetch_table_detail(
                     schema,
                     table,
                     error: DbOperationError::Timeout("timed out".to_string()),
+                    generation,
                 })
                 .await
                 .ok();
@@ -455,6 +469,7 @@ mod tests {
                         dsn: "dsn://test".to_string(),
                         schema: "public".to_string(),
                         table: "users".to_string(),
+                        generation: 7,
                     }],
                     &mut renderer,
                     state,
@@ -469,8 +484,8 @@ mod tests {
                 .expect("action timeout")
                 .expect("channel closed");
             assert!(
-                matches!(action, Action::TableDetailCached { .. }),
-                "expected TableDetailCached, got {action:?}"
+                matches!(action, Action::TableDetailCached { generation: 7, .. }),
+                "expected TableDetailCached with generation 7, got {action:?}"
             );
         }
     }

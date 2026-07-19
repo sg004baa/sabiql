@@ -304,17 +304,23 @@ pub async fn run(
             let tx = action_tx.clone();
 
             tokio::spawn(async move {
-                let row_count = executor
+                match executor
                     .count_query_rows(&dsn, &count_query, read_only)
                     .await
-                    .ok();
-                tx.send(Action::CsvExportRowsCounted {
-                    row_count,
-                    export_query,
-                    file_name,
-                })
-                .await
-                .ok();
+                {
+                    Ok(row_count) => {
+                        tx.send(Action::CsvExportRowsCounted {
+                            row_count,
+                            export_query,
+                            file_name,
+                        })
+                        .await
+                        .ok();
+                    }
+                    Err(e) => {
+                        tx.send(Action::CsvExportCountFailed(e)).await.ok();
+                    }
+                }
             });
             Ok(())
         }

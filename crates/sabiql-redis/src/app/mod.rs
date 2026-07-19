@@ -9,7 +9,8 @@ use crate::domain::{
     RedisKey, RedisKind, RedisValue, redis_string_display_value, redis_value_table,
 };
 use crate::infra::{
-    RedisCli, RedisCliFactory, RedisDsn, command_requires_confirmation, complete_command,
+    DbOverview, RedisCli, RedisCliFactory, RedisDsn, command_requires_confirmation,
+    complete_command,
 };
 
 const DEFAULT_TABLE_VISIBLE_ROWS: usize = 20;
@@ -94,6 +95,9 @@ pub struct DbOverlayState {
     pub entries: Vec<(u8, Option<usize>)>,
     pub selected: usize,
     pub loading: bool,
+    /// `false` when the server refused to reveal its database count (e.g. an
+    /// ACL denying CONFIG); the overlay then only lists observed databases.
+    pub database_count_known: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -213,7 +217,7 @@ pub enum Action {
     DbOverlaySelectPrev,
     SubmitDbSelection,
     DbOverviewLoaded {
-        entries: Vec<(u8, usize)>,
+        overview: DbOverview,
     },
     DbOverviewFailed {
         message: String,
@@ -522,6 +526,7 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
                 entries: Vec::new(),
                 selected: 0,
                 loading: true,
+                database_count_known: true,
             });
             vec![Effect::LoadDbOverview]
         }
@@ -545,16 +550,19 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             Vec::new()
         }
         Action::SubmitDbSelection => submit_db_selection(state),
-        Action::DbOverviewLoaded { entries } => {
+        Action::DbOverviewLoaded { overview } => {
             if let Some(overlay) = &mut state.db_overlay {
-                overlay.selected = entries
+                overlay.selected = overview
+                    .entries
                     .iter()
                     .position(|(db, _)| *db == state.current_db)
                     .unwrap_or(0);
-                overlay.entries = entries
+                overlay.entries = overview
+                    .entries
                     .into_iter()
                     .map(|(db, count)| (db, Some(count)))
                     .collect();
+                overlay.database_count_known = overview.database_count_known;
                 overlay.loading = false;
             }
             Vec::new()
@@ -1268,7 +1276,7 @@ impl EffectRunner {
                 Effect::LoadDbOverview => {
                     let cli = self.current_cli().await;
                     let action = match cli.db_overview().await {
-                        Ok(entries) => Action::DbOverviewLoaded { entries },
+                        Ok(overview) => Action::DbOverviewLoaded { overview },
                         Err(e) => Action::DbOverviewFailed {
                             message: e.to_string(),
                         },
@@ -2331,6 +2339,7 @@ mod tests {
                     entries: Vec::new(),
                     selected: 0,
                     loading: true,
+                    database_count_known: true,
                 })
             );
         }
@@ -2342,12 +2351,16 @@ mod tests {
                 entries: Vec::new(),
                 selected: 0,
                 loading: true,
+                database_count_known: true,
             });
 
             let effects = reduce(
                 &mut state,
                 Action::DbOverviewLoaded {
-                    entries: vec![(0, 1), (2, 7), (3, 0)],
+                    overview: DbOverview {
+                        entries: vec![(0, 1), (2, 7), (3, 0)],
+                        database_count_known: true,
+                    },
                 },
             );
 
@@ -2358,6 +2371,39 @@ mod tests {
                     entries: vec![(0, Some(1)), (2, Some(7)), (3, Some(0))],
                     selected: 1,
                     loading: false,
+                    database_count_known: true,
+                })
+            );
+        }
+
+        #[test]
+        fn db_overview_loaded_with_unknown_count_marks_overlay_unknown() {
+            let mut state = AppState::new("redis://localhost:6379/2");
+            state.db_overlay = Some(DbOverlayState {
+                entries: Vec::new(),
+                selected: 0,
+                loading: true,
+                database_count_known: true,
+            });
+
+            let effects = reduce(
+                &mut state,
+                Action::DbOverviewLoaded {
+                    overview: DbOverview {
+                        entries: vec![(1, 4), (2, 0)],
+                        database_count_known: false,
+                    },
+                },
+            );
+
+            assert!(effects.is_empty());
+            assert_eq!(
+                state.db_overlay,
+                Some(DbOverlayState {
+                    entries: vec![(1, Some(4)), (2, Some(0))],
+                    selected: 1,
+                    loading: false,
+                    database_count_known: false,
                 })
             );
         }
@@ -2381,6 +2427,7 @@ mod tests {
                 entries: vec![(0, Some(2)), (3, Some(5))],
                 selected: 1,
                 loading: false,
+                database_count_known: true,
             });
 
             let effects = reduce(&mut state, Action::SubmitDbSelection);
@@ -2416,6 +2463,7 @@ mod tests {
                 entries: vec![(0, Some(0)), (1, Some(1))],
                 selected: 1,
                 loading: false,
+                database_count_known: true,
             });
 
             let effects = reduce(&mut state, Action::SubmitDbSelection);
@@ -2433,6 +2481,7 @@ mod tests {
                 entries: vec![(0, Some(1))],
                 selected: 0,
                 loading: false,
+                database_count_known: true,
             });
 
             let effects = reduce(&mut state, Action::CloseDbOverlay);
@@ -2450,6 +2499,7 @@ mod tests {
                 entries: vec![(0, Some(2)), (1, Some(5))],
                 selected: 0,
                 loading: false,
+                database_count_known: true,
             });
 
             let effects = reduce(&mut state, Action::DbOverlaySelectNext);
@@ -2462,6 +2512,7 @@ mod tests {
                     entries: vec![(0, Some(2)), (1, Some(5))],
                     selected: 1,
                     loading: false,
+                    database_count_known: true,
                 })
             );
             assert!(reduce(&mut state, Action::SelectNext).is_empty());
@@ -2686,6 +2737,7 @@ mod tests {
                 entries: Vec::new(),
                 selected: 0,
                 loading: true,
+                database_count_known: true,
             });
             assert!(reduce(&mut state, Action::Reload).is_empty());
 
@@ -3164,9 +3216,12 @@ mod tests {
         #[tokio::test]
         async fn load_db_overview_effect_dispatches_loaded_entries() {
             let mut cli = MockRedisCli::new();
-            cli.expect_db_overview()
-                .once()
-                .returning(|| Ok(vec![(0, 2), (1, 0), (2, 7)]));
+            cli.expect_db_overview().once().returning(|| {
+                Ok(DbOverview {
+                    entries: vec![(0, 2), (1, 0), (2, 7)],
+                    database_count_known: true,
+                })
+            });
 
             let (tx, mut rx) = mpsc::channel(4);
             let runner = runner_with_cli(cli, tx);
@@ -3180,7 +3235,10 @@ mod tests {
             assert_eq!(
                 action,
                 Action::DbOverviewLoaded {
-                    entries: vec![(0, 2), (1, 0), (2, 7)],
+                    overview: DbOverview {
+                        entries: vec![(0, 2), (1, 0), (2, 7)],
+                        database_count_known: true,
+                    },
                 }
             );
         }

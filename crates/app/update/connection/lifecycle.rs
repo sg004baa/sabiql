@@ -36,6 +36,10 @@ pub fn reduce(
                 state.connection_caches.save(&current_id, cache);
             }
 
+            // Prefetch bookkeeping and generation are connection-scoped: reset so
+            // in-flight prefetch results from the old connection are rejected.
+            state.sql_modal.reset_prefetch();
+
             // Try to restore from cache
             if let Some(cached) = state.connection_caches.get(id).cloned() {
                 restore_cache(state, &cached, services);
@@ -262,5 +266,46 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, Effect::ClearCompletionEngineCache))
         );
+    }
+
+    #[test]
+    fn resets_prefetch_bookkeeping_on_switch() {
+        let mut state = AppState::new("test".to_string());
+        let new_id = ConnectionId::new();
+        let services = AppServices::stub();
+
+        state.sql_modal.begin_prefetch();
+        state
+            .sql_modal
+            .prefetch_queue
+            .push_back("public.orders".to_string());
+        state
+            .sql_modal
+            .prefetching_tables
+            .insert("public.users".to_string());
+
+        let action = create_switch_action(&new_id, "fresh_db");
+        reduce(&mut state, &action, Instant::now(), &services);
+
+        assert!(!state.sql_modal.is_prefetch_started());
+        assert!(state.sql_modal.prefetch_queue.is_empty());
+        assert!(state.sql_modal.prefetching_tables.is_empty());
+    }
+
+    #[test]
+    fn bumps_prefetch_generation_on_switch_with_cache() {
+        let mut state = AppState::new("test".to_string());
+        let target_id = ConnectionId::new();
+        let services = AppServices::stub();
+
+        state
+            .connection_caches
+            .save(&target_id, ConnectionCache::default());
+        let generation_before = state.sql_modal.prefetch_generation();
+
+        let action = create_switch_action(&target_id, "cached_db");
+        reduce(&mut state, &action, Instant::now(), &services);
+
+        assert_eq!(state.sql_modal.prefetch_generation(), generation_before + 1);
     }
 }

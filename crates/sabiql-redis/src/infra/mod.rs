@@ -22,6 +22,8 @@ pub enum RedisCliError {
     CommandNotFound(String),
     #[error("{0}")]
     CommandDenied(String),
+    #[error("{0}")]
+    InvalidCommand(String),
     #[error("redis-cli failed: {0}")]
     CommandFailed(String),
     #[error("redis-cli timed out: {0}")]
@@ -38,7 +40,7 @@ pub trait RedisCli: Send + Sync {
     async fn ping(&self) -> Result<(), RedisCliError>;
     async fn dbsize(&self) -> Result<usize, RedisCliError>;
     fn select_db(&self, db: u8);
-    async fn db_overview(&self) -> Result<Vec<(u8, usize)>, RedisCliError>;
+    async fn db_overview(&self) -> Result<DbOverview, RedisCliError>;
     async fn scan_keys(&self, pattern: &str) -> Result<Vec<RedisKey>, RedisCliError>;
     async fn key_type_and_ttl(&self, key: &str) -> Result<(RedisKind, Option<u64>), RedisCliError>;
     async fn fetch_value(&self, key: &str, kind: RedisKind) -> Result<RedisValue, RedisCliError>;
@@ -132,7 +134,14 @@ pub fn parse_dbsize_reply(stdout: &str) -> Result<usize, RedisCliError> {
         .map_err(|_| RedisCliError::Parse(format!("invalid DBSIZE reply: {reply:?}")))
 }
 
-const DEFAULT_REDIS_DATABASES: u8 = 16;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DbOverview {
+    pub entries: Vec<(u8, usize)>,
+    /// `false` when the server rejected `CONFIG GET databases` (e.g. an ACL
+    /// that denies CONFIG); `entries` then only cover databases observed via
+    /// `INFO keyspace` plus the currently selected one.
+    pub database_count_known: bool,
+}
 
 pub fn parse_config_databases_reply(stdout: &str) -> Result<u8, RedisCliError> {
     let lines = stdout
@@ -158,8 +167,42 @@ pub fn parse_config_databases_reply(stdout: &str) -> Result<u8, RedisCliError> {
     Ok(databases)
 }
 
-fn config_databases_or_default(stdout: &str) -> u8 {
-    parse_config_databases_reply(stdout).unwrap_or(DEFAULT_REDIS_DATABASES)
+/// Interprets a `CONFIG GET databases` reply, mapping a server-side rejection
+/// (e.g. `NOPERM` from an ACL that denies CONFIG) to `Ok(None)` so callers can
+/// surface the database count as unknown. Any other malformed reply is an
+/// error.
+fn parse_config_databases_or_denied(stdout: &str) -> Result<Option<u8>, RedisCliError> {
+    let first_line = stdout.lines().find(|line| !line.trim().is_empty());
+    if first_line.is_some_and(is_redis_error_line) {
+        return Ok(None);
+    }
+    parse_config_databases_reply(stdout).map(Some)
+}
+
+fn build_db_overview(
+    database_count: Option<u8>,
+    key_counts: &HashMap<u8, usize>,
+    current_db: u8,
+) -> DbOverview {
+    let databases: Vec<u8> = database_count.map_or_else(
+        || {
+            let mut databases: Vec<u8> = key_counts.keys().copied().collect();
+            if !key_counts.contains_key(&current_db) {
+                databases.push(current_db);
+            }
+            databases.sort_unstable();
+            databases
+        },
+        |count| (0..count).collect(),
+    );
+
+    DbOverview {
+        entries: databases
+            .into_iter()
+            .map(|db| (db, key_counts.get(&db).copied().unwrap_or_default()))
+            .collect(),
+        database_count_known: database_count.is_some(),
+    }
 }
 
 pub fn parse_info_keyspace(stdout: &str) -> HashMap<u8, usize> {
@@ -569,13 +612,79 @@ pub fn command_requires_confirmation(
     Ok(!READ_ONLY_COMMANDS.contains(&upper.as_str()))
 }
 
-fn command_args(command: &str) -> Vec<String> {
-    // Whitespace splitting is intentionally simple for 2c. Quoted values with
-    // spaces need a later parser slice.
-    command
-        .split_whitespace()
-        .map(ToString::to_string)
-        .collect()
+/// Splits `:` command-modal input into redis-cli arguments with shell-style
+/// quoting: double and single quotes preserve embedded whitespace, backslash
+/// escapes (`\"`, `\\`, `\n`, `\t`, `\r`) apply inside double quotes, and
+/// `\'` escapes a quote inside single quotes. An unterminated quote is an
+/// explicit error.
+fn command_args(command: &str) -> Result<Vec<String>, RedisCliError> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut in_token = false;
+    let mut chars = command.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            c if c.is_whitespace() => {
+                if in_token {
+                    args.push(std::mem::take(&mut current));
+                    in_token = false;
+                }
+            }
+            '"' => {
+                in_token = true;
+                loop {
+                    match chars.next() {
+                        None => return Err(unclosed_quote_error('"')),
+                        Some('"') => break,
+                        Some('\\') => {
+                            let Some(escaped) = chars.next() else {
+                                return Err(unclosed_quote_error('"'));
+                            };
+                            match escaped {
+                                'n' => current.push('\n'),
+                                't' => current.push('\t'),
+                                'r' => current.push('\r'),
+                                '"' | '\\' => current.push(escaped),
+                                other => {
+                                    current.push('\\');
+                                    current.push(other);
+                                }
+                            }
+                        }
+                        Some(c) => current.push(c),
+                    }
+                }
+            }
+            '\'' => {
+                in_token = true;
+                loop {
+                    match chars.next() {
+                        None => return Err(unclosed_quote_error('\'')),
+                        Some('\'') => break,
+                        Some('\\') if chars.peek() == Some(&'\'') => {
+                            chars.next();
+                            current.push('\'');
+                        }
+                        Some(c) => current.push(c),
+                    }
+                }
+            }
+            c => {
+                in_token = true;
+                current.push(c);
+            }
+        }
+    }
+    if in_token {
+        args.push(current);
+    }
+
+    Ok(args)
+}
+
+fn unclosed_quote_error(quote: char) -> RedisCliError {
+    RedisCliError::InvalidCommand(format!("Unclosed {quote} quote in command."))
 }
 
 fn command_output_result(stdout: &str) -> Result<String, RedisCliError> {
@@ -963,7 +1072,7 @@ impl RedisCli for RedisCliSubprocess {
         self.current_db.store(db, Ordering::Relaxed);
     }
 
-    async fn db_overview(&self) -> Result<Vec<(u8, usize)>, RedisCliError> {
+    async fn db_overview(&self) -> Result<DbOverview, RedisCliError> {
         let database_count = match self
             .run_command(&[
                 "CONFIG".to_string(),
@@ -972,20 +1081,24 @@ impl RedisCli for RedisCliSubprocess {
             ])
             .await
         {
-            Ok(stdout) => config_databases_or_default(&stdout),
-            Err(_) => DEFAULT_REDIS_DATABASES,
+            Ok(stdout) => parse_config_databases_or_denied(&stdout)?,
+            // redis-cli reports server-side rejections (e.g. an ACL denying
+            // CONFIG) as a failed invocation; the overview then shows the
+            // database count as unknown instead of inventing a default.
+            Err(RedisCliError::CommandFailed(_)) => None,
+            Err(e) => return Err(e),
         };
-        let key_counts = match self
-            .run_command(&["INFO".to_string(), "keyspace".to_string()])
-            .await
-        {
-            Ok(stdout) => parse_info_keyspace(&stdout),
-            Err(_) => HashMap::new(),
-        };
+        let key_counts = parse_info_keyspace(
+            &self
+                .run_command(&["INFO".to_string(), "keyspace".to_string()])
+                .await?,
+        );
 
-        Ok((0..database_count)
-            .map(|db| (db, key_counts.get(&db).copied().unwrap_or_default()))
-            .collect())
+        Ok(build_db_overview(
+            database_count,
+            &key_counts,
+            self.current_db.load(Ordering::Relaxed),
+        ))
     }
 
     async fn scan_keys(&self, pattern: &str) -> Result<Vec<RedisKey>, RedisCliError> {
@@ -1085,7 +1198,7 @@ impl RedisCli for RedisCliSubprocess {
 
     async fn execute_command(&self, command: &str) -> Result<String, RedisCliError> {
         ensure_command_allowed(command, self.read_only)?;
-        let stdout = self.run_command(&command_args(command)).await?;
+        let stdout = self.run_command(&command_args(command)?).await?;
         command_output_result(&stdout)
     }
 }
@@ -1146,10 +1259,76 @@ mod tests {
     }
 
     #[test]
-    fn config_databases_falls_back_to_default_on_parse_failure() {
-        assert_eq!(config_databases_or_default("unexpected\n"), 16);
-        assert_eq!(config_databases_or_default("databases\nnot-a-number\n"), 16);
-        assert_eq!(config_databases_or_default("databases\n0\n"), 16);
+    fn config_databases_denied_reply_maps_to_unknown_count() {
+        assert_eq!(
+            parse_config_databases_or_denied(
+                "NOPERM this user has no permissions to run the 'config' command\n"
+            ),
+            Ok(None)
+        );
+        assert_eq!(
+            parse_config_databases_or_denied("ERR unknown command 'CONFIG'\n"),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn config_databases_valid_reply_maps_to_known_count() {
+        assert_eq!(
+            parse_config_databases_or_denied("databases\n32\n"),
+            Ok(Some(32))
+        );
+    }
+
+    #[test]
+    fn config_databases_garbage_reply_is_a_parse_error() {
+        for garbage in [
+            "unexpected\n",
+            "databases\nnot-a-number\n",
+            "databases\n0\n",
+        ] {
+            let err = parse_config_databases_or_denied(garbage).unwrap_err();
+            assert!(matches!(err, RedisCliError::Parse(_)), "input: {garbage:?}");
+        }
+    }
+
+    #[test]
+    fn db_overview_with_known_count_lists_every_database() {
+        let key_counts = HashMap::from([(0, 3), (2, 7)]);
+
+        assert_eq!(
+            build_db_overview(Some(4), &key_counts, 0),
+            DbOverview {
+                entries: vec![(0, 3), (1, 0), (2, 7), (3, 0)],
+                database_count_known: true,
+            }
+        );
+    }
+
+    #[test]
+    fn db_overview_with_unknown_count_lists_keyspace_and_current_db() {
+        let key_counts = HashMap::from([(3, 5), (1, 2)]);
+
+        assert_eq!(
+            build_db_overview(None, &key_counts, 6),
+            DbOverview {
+                entries: vec![(1, 2), (3, 5), (6, 0)],
+                database_count_known: false,
+            }
+        );
+    }
+
+    #[test]
+    fn db_overview_with_unknown_count_does_not_duplicate_current_db() {
+        let key_counts = HashMap::from([(0, 1)]);
+
+        assert_eq!(
+            build_db_overview(None, &key_counts, 0),
+            DbOverview {
+                entries: vec![(0, 1)],
+                database_count_known: false,
+            }
+        );
     }
 
     #[test]
@@ -1580,6 +1759,109 @@ mod tests {
                 "expected read-only denial for {command:?}, got {err:?}"
             );
         }
+    }
+
+    #[test]
+    fn command_args_splits_on_whitespace() {
+        assert_eq!(
+            command_args("  SET   mykey\tvalue \n"),
+            Ok(vec![
+                "SET".to_string(),
+                "mykey".to_string(),
+                "value".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn command_args_preserves_whitespace_inside_double_quotes() {
+        assert_eq!(
+            command_args(r#"SET mykey "hello world""#),
+            Ok(vec![
+                "SET".to_string(),
+                "mykey".to_string(),
+                "hello world".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn command_args_preserves_whitespace_inside_single_quotes() {
+        assert_eq!(
+            command_args("SET mykey 'hello  world'"),
+            Ok(vec![
+                "SET".to_string(),
+                "mykey".to_string(),
+                "hello  world".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn command_args_applies_backslash_escapes_inside_double_quotes() {
+        assert_eq!(
+            command_args(r#"SET k "a\"b\\c\nd\te\rf\zg""#),
+            Ok(vec![
+                "SET".to_string(),
+                "k".to_string(),
+                "a\"b\\c\nd\te\rf\\zg".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn command_args_escapes_quote_inside_single_quotes() {
+        assert_eq!(
+            command_args(r"SET k 'it\'s a \path'"),
+            Ok(vec![
+                "SET".to_string(),
+                "k".to_string(),
+                "it's a \\path".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn command_args_concatenates_adjacent_quoted_and_bare_segments() {
+        assert_eq!(
+            command_args(r#"SET k pre"mid dle"post"#),
+            Ok(vec![
+                "SET".to_string(),
+                "k".to_string(),
+                "premid dlepost".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn command_args_keeps_empty_quoted_token() {
+        assert_eq!(
+            command_args(r#"SET k """#),
+            Ok(vec!["SET".to_string(), "k".to_string(), String::new()])
+        );
+    }
+
+    #[test]
+    fn command_args_rejects_unclosed_double_quote() {
+        for command in [r#"SET k "unterminated"#, r#"SET k "trailing\"#] {
+            let err = command_args(command).unwrap_err();
+
+            assert_eq!(
+                err,
+                RedisCliError::InvalidCommand("Unclosed \" quote in command.".to_string()),
+                "input: {command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn command_args_rejects_unclosed_single_quote() {
+        let err = command_args("SET k 'unterminated").unwrap_err();
+
+        assert_eq!(
+            err,
+            RedisCliError::InvalidCommand("Unclosed ' quote in command.".to_string())
+        );
     }
 
     #[test]

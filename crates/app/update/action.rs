@@ -401,15 +401,18 @@ pub enum Action {
         schema: String,
         table: String,
         detail: Box<Table>,
+        generation: u64,
     },
     TableDetailCacheFailed {
         schema: String,
         table: String,
         error: DbOperationError,
+        generation: u64,
     },
     TableDetailAlreadyCached {
         schema: String,
         table: String,
+        generation: u64,
     },
 
     // Prefetch all tables for completion
@@ -554,18 +557,14 @@ pub enum Action {
     // CSV Export
     RequestCsvExport,
     CsvExportRowsCounted {
-        row_count: Option<usize>,
+        row_count: usize,
         export_query: String,
         file_name: String,
     },
-    ExecuteCsvExport {
-        export_query: String,
-        file_name: String,
-        row_count: Option<usize>,
-    },
+    CsvExportCountFailed(DbOperationError),
     CsvExportSucceeded {
         path: String,
-        row_count: Option<usize>,
+        row_count: usize,
     },
     CsvExportFailed(DbOperationError),
 

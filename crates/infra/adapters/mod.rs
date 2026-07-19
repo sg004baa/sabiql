@@ -1,4 +1,5 @@
 mod app_config_file;
+mod csv_record_counter;
 
 pub mod clipboard;
 pub mod config_writer;

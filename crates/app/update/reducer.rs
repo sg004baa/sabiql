@@ -1473,6 +1473,7 @@ mod tests {
                     schema: "public".to_string(),
                     table: "users".to_string(),
                     detail: make_test_table(),
+                    generation: 0,
                 },
                 now,
                 &AppServices::stub(),
@@ -1501,6 +1502,7 @@ mod tests {
                     schema: "public".to_string(),
                     table: "users".to_string(),
                     detail: make_test_table(),
+                    generation: 0,
                 },
                 now,
                 &AppServices::stub(),
@@ -2497,6 +2499,7 @@ mod tests {
                 Action::TableDetailAlreadyCached {
                     schema: "public".to_string(),
                     table: "users".to_string(),
+                    generation: 0,
                 },
                 now,
                 &AppServices::stub(),
@@ -2533,6 +2536,7 @@ mod tests {
                 Action::TableDetailAlreadyCached {
                     schema: "public".to_string(),
                     table: "users".to_string(),
+                    generation: 0,
                 },
                 now,
                 &AppServices::stub(),
