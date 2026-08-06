@@ -46,8 +46,6 @@ pub enum EditGuardrailError {
     RowIndexOutOfBounds,
     #[error("Column index out of bounds")]
     ColumnIndexOutOfBounds,
-    #[error("Primary key columns are read-only")]
-    PrimaryKeyColumnsReadOnly,
     #[error("No active row")]
     NoActiveRow,
     #[error("No active cell")]
@@ -164,7 +162,7 @@ pub fn build_bulk_delete_preview(
         table: state.query.pagination.table.clone(),
         key_values: pk_pairs_per_row.first().cloned().unwrap_or_default(),
     };
-    let guardrail = evaluate_guardrails(true, true, Some(target.clone()));
+    let guardrail = evaluate_guardrails(true, true, false, Some(target.clone()));
 
     Ok(BulkDeletePreviewResult {
         preview: WritePreview {

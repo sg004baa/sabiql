@@ -50,9 +50,7 @@ fn build_update_preview(
         .ok_or(EditGuardrailError::ColumnIndexOutOfBounds)?
         .clone();
 
-    if pk_cols.iter().any(|pk| pk == &column_name) {
-        return Err(EditGuardrailError::PrimaryKeyColumnsReadOnly);
-    }
+    let modifies_primary_key = pk_cols.iter().any(|pk| pk == &column_name);
 
     let pk_pairs = build_pk_pairs(&result.columns, row, pk_cols);
     let target = crate::policy::write::write_guardrails::TargetSummary {
@@ -62,7 +60,12 @@ fn build_update_preview(
     };
     let has_where = pk_pairs.as_ref().is_some_and(|pairs| !pairs.is_empty());
     let has_stable_row_identity = pk_pairs.is_some();
-    let guardrail = evaluate_guardrails(has_where, has_stable_row_identity, Some(target.clone()));
+    let guardrail = evaluate_guardrails(
+        has_where,
+        has_stable_row_identity,
+        modifies_primary_key,
+        Some(target.clone()),
+    );
     if guardrail.blocked {
         let reason = guardrail
             .reason
@@ -487,6 +490,47 @@ mod tests {
                 }
                 other => panic!("expected OpenWritePreviewConfirm, got {other:?}"),
             }
+        }
+
+        #[test]
+        fn primary_key_edit_previews_medium_risk_and_targets_original_key_value() {
+            let mut state = editable_state();
+            // col 0 = "id", the primary key; change it from "1" to "9"
+            state
+                .result_interaction
+                .begin_cell_edit(0, 0, "1".to_string());
+            state
+                .result_interaction
+                .cell_edit_input_mut()
+                .set_content("9".to_string());
+
+            let effects = reduce_query(
+                &mut state,
+                &Action::SubmitCellEditWrite,
+                Instant::now(),
+                &AppServices::stub(),
+            )
+            .unwrap();
+
+            let preview = match &effects[0] {
+                Effect::DispatchActions(actions) => match actions.first().expect("action") {
+                    Action::OpenWritePreviewConfirm(preview) => preview.clone(),
+                    other => panic!("expected OpenWritePreviewConfirm, got {other:?}"),
+                },
+                other => panic!("expected DispatchActions, got {other:?}"),
+            };
+
+            assert!(!preview.guardrail.blocked);
+            assert_eq!(preview.guardrail.risk_level, RiskLevel::Medium);
+            assert_eq!(
+                preview.guardrail.reason.as_deref(),
+                Some("Changing a primary key value can break rows that reference it")
+            );
+            // WHERE must use the pre-edit key value, SET the new one.
+            assert_eq!(
+                preview.sql,
+                r#"UPDATE "public"."users" SET "id" = '9' WHERE "id" = '1'"#
+            );
         }
 
         fn editable_state_with_jsonb() -> AppState {

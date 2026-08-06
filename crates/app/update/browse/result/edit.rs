@@ -40,14 +40,9 @@ fn editable_cell_context(state: &AppState) -> Result<(usize, usize, String), Edi
 
     let (result, pk_cols) = editable_preview_base(state)?;
 
-    let column_name = result
-        .columns
-        .get(col_idx)
-        .ok_or(EditGuardrailError::ColumnIndexOutOfBounds)?;
-    if pk_cols.iter().any(|pk| pk == column_name) {
-        return Err(EditGuardrailError::PrimaryKeyColumnsReadOnly);
+    if col_idx >= result.columns.len() {
+        return Err(EditGuardrailError::ColumnIndexOutOfBounds);
     }
-
     let row = result
         .rows
         .get(row_idx)
@@ -193,6 +188,25 @@ mod tests {
             state.query.pagination.table = "users".to_string();
             state.result_interaction.activate_cell(0, 1);
             state
+        }
+
+        #[test]
+        fn primary_key_column_enters_cell_edit() {
+            let mut state = preview_state_with_selection();
+            state
+                .session
+                .set_table_detail_raw(Some(minimal_users_table()));
+            // col 0 = "id", the primary key
+            state.result_interaction.activate_cell(0, 0);
+
+            let effects = reduce(&mut state, &Action::ResultEnterCellEdit, Instant::now()).unwrap();
+
+            assert!(effects.is_empty());
+            assert_eq!(state.input_mode(), InputMode::CellEdit);
+            assert!(state.result_interaction.cell_edit().is_active());
+            assert_eq!(state.result_interaction.cell_edit().col, Some(0));
+            assert_eq!(state.result_interaction.cell_edit().draft_value(), "1");
+            assert!(state.messages.last_error.is_none());
         }
 
         #[test]

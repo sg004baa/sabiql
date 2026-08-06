@@ -128,17 +128,21 @@ impl ConfirmDialog {
 
         let mut content_lines: Vec<Line> = Vec::new();
 
+        let risk_reason = |fallback: &str| {
+            preview
+                .guardrail
+                .reason
+                .as_deref()
+                .unwrap_or(fallback)
+                .to_string()
+        };
         let risk_label = match preview.guardrail.risk_level {
             RiskLevel::Low => "✓ LOW RISK".to_string(),
-            RiskLevel::Medium => "⚠ MEDIUM RISK: Multiple rows may be affected".to_string(),
-            RiskLevel::High => format!(
-                "⚠ HIGH RISK: {}",
-                preview
-                    .guardrail
-                    .reason
-                    .as_deref()
-                    .unwrap_or("Execution is blocked")
+            RiskLevel::Medium => format!(
+                "⚠ MEDIUM RISK: {}",
+                risk_reason("Multiple rows may be affected")
             ),
+            RiskLevel::High => format!("⚠ HIGH RISK: {}", risk_reason("Execution is blocked")),
         };
         content_lines.push(Line::from(Span::styled(
             risk_label,
