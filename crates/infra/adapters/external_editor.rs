@@ -17,7 +17,10 @@ impl ExternalEditor for SystemExternalEditor {
         // rename, which would orphan a held file handle. `TempDir` removes it all on drop.
         let dir = tempfile::Builder::new().prefix("sabiql-").tempdir()?;
         let path = dir.path().join(format!("buffer.{extension}"));
-        std::fs::write(&path, content)?;
+        // A text file's final newline is a terminator, not buffer content: editors such as
+        // vim add one when it is missing. Writing it here and stripping it on the way back
+        // makes the round-trip an identity instead of growing a blank line per invocation.
+        std::fs::write(&path, format!("{content}\n"))?;
 
         // Stdio is inherited (the default for `status()`), so the editor owns the terminal.
         let status = Command::new(program).args(tokens).arg(&path).status()?;
@@ -25,7 +28,14 @@ impl ExternalEditor for SystemExternalEditor {
             return Err(ExternalEditorError::EditorFailed(status.to_string()));
         }
 
-        Ok(std::fs::read_to_string(&path)?)
+        let mut edited = std::fs::read_to_string(&path)?;
+        if edited.ends_with('\n') {
+            edited.truncate(edited.len() - 1);
+            if edited.ends_with('\r') {
+                edited.truncate(edited.len() - 1);
+            }
+        }
+        Ok(edited)
     }
 }
 
@@ -86,6 +96,46 @@ mod tests {
         let content = "SELECT 1;\n-- unchanged\n";
         let edited = SystemExternalEditor.edit(content, "sql").unwrap();
         assert_eq!(edited, content);
+    }
+
+    /// Writes an executable script and returns it plus the dir keeping it alive.
+    fn editor_script(body: &str) -> (tempfile::TempDir, String) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("editor.sh");
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let command = path.to_str().unwrap().to_string();
+        (dir, command)
+    }
+
+    #[test]
+    fn editor_terminating_the_file_does_not_grow_the_buffer() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // vim and friends append a final newline to a file that lacks one, and leave a
+        // properly terminated file alone.
+        let (_dir, command) =
+            editor_script(r#"if [ -n "$(tail -c1 "$1")" ]; then printf '\n' >> "$1"; fi"#);
+        let _env = EditorEnv::set(Some(&command));
+
+        let edited = SystemExternalEditor.edit("SELECT 1;", "sql").unwrap();
+        assert_eq!(edited, "SELECT 1;");
+    }
+
+    #[test]
+    fn trailing_blank_line_written_by_the_editor_survives() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // The user added one empty line, so the file gains a newline beyond the terminator.
+        let (_dir, command) = editor_script(r#"printf 'SELECT 1;\n\n' > "$1""#);
+        let _env = EditorEnv::set(Some(&command));
+
+        let edited = SystemExternalEditor.edit("SELECT 1;", "sql").unwrap();
+        assert_eq!(edited, "SELECT 1;\n");
     }
 
     #[test]
