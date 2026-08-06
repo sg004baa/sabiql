@@ -99,6 +99,7 @@ pub fn evaluate_sql_risk(kind: &StatementKind) -> AdhocRiskDecision {
 pub fn evaluate_guardrails(
     has_where: bool,
     has_stable_row_identity: bool,
+    modifies_primary_key: bool,
     target_summary: Option<TargetSummary>,
 ) -> GuardrailDecision {
     if !has_where {
@@ -115,6 +116,17 @@ pub fn evaluate_guardrails(
             risk_level: RiskLevel::High,
             blocked: true,
             reason: Some("Stable row identity is missing".to_string()),
+            target_summary,
+        };
+    }
+
+    if modifies_primary_key {
+        return GuardrailDecision {
+            risk_level: RiskLevel::Medium,
+            blocked: false,
+            reason: Some(
+                "Changing a primary key value can break rows that reference it".to_string(),
+            ),
             target_summary,
         };
     }
@@ -136,16 +148,37 @@ mod tests {
 
         #[test]
         fn missing_where_returns_blocked_high_risk() {
-            let decision = evaluate_guardrails(false, true, None);
+            let decision = evaluate_guardrails(false, true, true, None);
             assert_eq!(decision.risk_level, RiskLevel::High);
             assert!(decision.blocked);
+            assert_eq!(decision.reason.as_deref(), Some("WHERE clause is missing"));
         }
 
         #[test]
         fn missing_stable_identity_returns_blocked_high_risk() {
-            let decision = evaluate_guardrails(true, false, None);
+            let decision = evaluate_guardrails(true, false, true, None);
             assert_eq!(decision.risk_level, RiskLevel::High);
             assert!(decision.blocked);
+            assert_eq!(
+                decision.reason.as_deref(),
+                Some("Stable row identity is missing")
+            );
+        }
+
+        #[test]
+        fn primary_key_change_returns_unblocked_medium_risk_with_reason() {
+            let target = TargetSummary {
+                schema: "public".to_string(),
+                table: "users".to_string(),
+                key_values: vec![("id".to_string(), "42".to_string())],
+            };
+            let decision = evaluate_guardrails(true, true, true, Some(target));
+            assert_eq!(decision.risk_level, RiskLevel::Medium);
+            assert!(!decision.blocked);
+            assert_eq!(
+                decision.reason.as_deref(),
+                Some("Changing a primary key value can break rows that reference it")
+            );
         }
 
         #[test]
@@ -155,9 +188,10 @@ mod tests {
                 table: "users".to_string(),
                 key_values: vec![("id".to_string(), "42".to_string())],
             };
-            let decision = evaluate_guardrails(true, true, Some(target));
+            let decision = evaluate_guardrails(true, true, false, Some(target));
             assert_eq!(decision.risk_level, RiskLevel::Low);
             assert!(!decision.blocked);
+            assert_eq!(decision.reason, None);
         }
 
         #[test]
