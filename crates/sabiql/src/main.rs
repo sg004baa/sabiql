@@ -34,7 +34,8 @@ use sabiql_app::update::input::handle_event;
 use sabiql_app::update::reducer::reduce;
 use sabiql_infra::adapters::{
     ArboardClipboard, DispatchAdapter, FileConfigWriter, FileQueryHistoryStore, FsErLogWriter,
-    NativeFolderOpener, PgServiceFileReader, TomlConnectionStore, TomlSettingsStore,
+    NativeFolderOpener, PgServiceFileReader, SystemExternalEditor, TomlConnectionStore,
+    TomlSettingsStore,
 };
 use sabiql_infra::config::project_root::{find_project_root, get_project_name};
 use sabiql_infra::export::DotExporter;
@@ -122,6 +123,7 @@ async fn run_tui() -> Result<()> {
         .pg_service_entry_reader(Arc::clone(&pg_service_entry_reader))
         .clipboard(Arc::new(ArboardClipboard))
         .folder_opener(Arc::new(NativeFolderOpener))
+        .external_editor(Arc::new(SystemExternalEditor))
         .file_system_walker(Arc::new(WalkdirFileWalker::new()))
         .query_history_store(Arc::new(FileQueryHistoryStore::new()))
         .settings_store(Arc::clone(&settings_store) as _)

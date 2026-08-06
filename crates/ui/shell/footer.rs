@@ -16,7 +16,7 @@ use crate::app::update::input::keybindings::{
     GENERATE_SQL_MENU_ROWS, GLOBAL_KEYS, HELP_ROWS, HISTORY_KEYS, INSPECTOR_DDL_KEYS,
     JSONB_DETAIL_ROWS, JSONB_EDIT_ROWS, JSONB_SEARCH_KEYS, OVERLAY_KEYS, QUERY_HISTORY_PICKER_ROWS,
     RESULT_ACTIVE_KEYS, SETTINGS_ROWS, SQL_MODAL_CONFIRMING_KEYS, SQL_MODAL_KEYS,
-    SQL_MODAL_PLAN_KEYS, TABLE_PICKER_ROWS, idx,
+    TABLE_PICKER_ROWS, idx,
 };
 use crate::primitives::atoms::key_text;
 use crate::primitives::atoms::spinner_char;
@@ -279,13 +279,8 @@ impl Footer {
                         SQL_MODAL_KEYS[idx::sql_modal::MOVE].as_hint(),
                         SQL_MODAL_KEYS[idx::sql_modal::ESC_NORMAL].as_hint(),
                     ];
-                    if services.db_capabilities.supports_explain()
-                        && state.sql_modal.status() == &SqlModalStatus::Editing
-                    {
-                        hints.insert(
-                            1,
-                            SQL_MODAL_PLAN_KEYS[idx::sql_modal_plan::EXPLAIN].as_hint(),
-                        );
+                    if state.sql_modal.status() == &SqlModalStatus::Editing {
+                        hints.insert(1, SQL_MODAL_KEYS[idx::sql_modal::EXTERNAL_EDITOR].as_hint());
                     }
                     hints
                 }
@@ -358,6 +353,7 @@ impl Footer {
             }
             InputMode::JsonbEdit => vec![
                 JSONB_EDIT_ROWS[idx::jsonb_edit::ESC_NORMAL].as_hint(),
+                JSONB_EDIT_ROWS[idx::jsonb_edit::EXTERNAL_EDITOR].as_hint(),
                 JSONB_EDIT_ROWS[idx::jsonb_edit::MOVE].as_hint(),
                 JSONB_EDIT_ROWS[idx::jsonb_edit::HOME_END].as_hint(),
             ],

@@ -244,6 +244,14 @@ mod tests {
         ) -> RenderResult<RenderOutput> {
             Ok(RenderOutput::default())
         }
+
+        fn suspend(&mut self) -> RenderResult<()> {
+            Ok(())
+        }
+
+        fn resume(&mut self) -> RenderResult<()> {
+            Ok(())
+        }
     }
 
     mod delete_connection {
@@ -401,6 +409,7 @@ mod tests {
                 .connection_store(Arc::new(mock_store))
                 .clipboard(Arc::new(NoopClipboardWriter))
                 .folder_opener(Arc::new(NoopFolderOpener))
+                .external_editor(Arc::new(NoopExternalEditor))
                 .query_history_store(Arc::new(NoopQueryHistoryStore))
                 .settings_store(Arc::new(NoopSettingsStore))
                 .metadata_cache(cache)

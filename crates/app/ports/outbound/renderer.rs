@@ -52,4 +52,11 @@ pub trait Renderer {
         services: &AppServices,
         now: Instant,
     ) -> RenderResult<RenderOutput>;
+
+    /// Release the terminal — stop reading input, leave the alternate screen,
+    /// disable raw mode — so an external interactive program owns the TTY.
+    fn suspend(&mut self) -> RenderResult<()>;
+
+    /// Re-acquire the terminal released by `suspend` and force a full repaint.
+    fn resume(&mut self) -> RenderResult<()>;
 }

@@ -83,6 +83,12 @@ fn reduce_inner(
         Action::Render => {
             vec![Effect::Render]
         }
+        Action::ExternalEditorFailed(error) => {
+            state
+                .messages
+                .set_error_at(format!("External editor: {error}"), now);
+            vec![]
+        }
 
         Action::ConfirmSelection => {
             if state.modal.active_mode() == InputMode::TablePicker {

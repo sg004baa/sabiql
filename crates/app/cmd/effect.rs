@@ -2,7 +2,7 @@ use crate::domain::Table;
 use crate::domain::connection::{ConnectionId, DatabaseType, SslMode};
 use crate::model::connection::file_picker::WalkOptions;
 use crate::model::shared::theme_id::ThemeId;
-use crate::update::action::Action;
+use crate::update::action::{Action, ExternalEditorTarget};
 
 #[derive(Debug, Clone)]
 pub enum Effect {
@@ -140,6 +140,11 @@ pub enum Effect {
     },
     OpenFolder {
         path: std::path::PathBuf,
+    },
+    /// Hand the terminal to `$EDITOR` and load the edited text back into `target`.
+    OpenExternalEditor {
+        target: ExternalEditorTarget,
+        content: String,
     },
 
     LoadQueryHistory {

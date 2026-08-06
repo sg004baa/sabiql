@@ -167,7 +167,7 @@ pub fn handle_jsonb_edit_keys(combo: KeyCombo) -> Action {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::update::action::CursorMove;
+    use crate::update::action::{CursorMove, ExternalEditorTarget};
     use crate::update::input::keybindings::{Key, KeyCombo};
 
     fn combo(k: Key) -> KeyCombo {
@@ -387,6 +387,16 @@ mod tests {
                     target: InputTarget::JsonbEdit,
                     direction: CursorMove::Up,
                 }
+            ));
+        }
+
+        #[test]
+        fn ctrl_e_opens_the_external_editor() {
+            let result = handle_jsonb_edit_keys(combo_ctrl(Key::Char('e')));
+
+            assert!(matches!(
+                result,
+                Action::OpenExternalEditor(ExternalEditorTarget::JsonbEditor)
             ));
         }
     }

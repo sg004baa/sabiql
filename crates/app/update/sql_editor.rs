@@ -18,7 +18,7 @@ use crate::policy::write::sql_risk::{
 };
 use crate::policy::write::write_guardrails::{AdhocRiskDecision, RiskLevel, evaluate_sql_risk};
 use crate::ports::outbound::ClipboardError;
-use crate::update::action::{Action, CursorMove, InputTarget, ModalKind};
+use crate::update::action::{Action, CursorMove, ExternalEditorTarget, InputTarget, ModalKind};
 
 pub fn reduce_sql_modal(
     state: &mut AppState,
@@ -55,6 +55,26 @@ pub fn reduce_sql_modal(
             state
                 .sql_modal
                 .schedule_completion_after_dismiss(now + Duration::from_millis(100));
+            state.sql_modal.enter_editing();
+            Some(vec![])
+        }
+        // External editor ($EDITOR)
+        Action::OpenExternalEditor(ExternalEditorTarget::SqlEditor) => {
+            Some(vec![Effect::OpenExternalEditor {
+                target: ExternalEditorTarget::SqlEditor,
+                content: state.sql_modal.editor.content().to_string(),
+            }])
+        }
+        Action::ExternalEditorFinished {
+            target: ExternalEditorTarget::SqlEditor,
+            content,
+        } => {
+            state.sql_modal.dismiss_completion();
+            state.sql_modal.editor.set_content(content.clone());
+            state
+                .sql_modal
+                .editor
+                .update_scroll(sql_modal_visible_rows(state.ui.terminal_height));
             state.sql_modal.enter_editing();
             Some(vec![])
         }
@@ -595,6 +615,51 @@ mod tests {
             assert!(matches!(
                 state.sql_modal.status(),
                 SqlModalStatus::ConfirmingHigh { .. }
+            ));
+        }
+    }
+
+    mod external_editor {
+        use super::*;
+
+        #[test]
+        fn finishing_replaces_the_editor_buffer() {
+            let mut state = sql_modal_state();
+            state.sql_modal.editor.set_content("SELECT 1".to_string());
+            state.sql_modal.completion_mut_for_test().visible = true;
+
+            let effects = reduce_sql_modal(
+                &mut state,
+                &Action::ExternalEditorFinished {
+                    target: ExternalEditorTarget::SqlEditor,
+                    content: "SELECT\n  2\nFROM t".to_string(),
+                },
+                Instant::now(),
+            );
+
+            assert_eq!(state.sql_modal.editor.content(), "SELECT\n  2\nFROM t");
+            assert!(!state.sql_modal.completion().visible);
+            assert!(matches!(state.sql_modal.status(), SqlModalStatus::Editing));
+            assert!(effects.is_some_and(|e| e.is_empty()));
+        }
+
+        #[test]
+        fn opening_emits_the_current_buffer() {
+            let mut state = sql_modal_state();
+            state.sql_modal.editor.set_content("SELECT 1".to_string());
+
+            let effects = reduce_sql_modal(
+                &mut state,
+                &Action::OpenExternalEditor(ExternalEditorTarget::SqlEditor),
+                Instant::now(),
+            );
+
+            assert!(matches!(
+                effects.as_deref(),
+                Some([Effect::OpenExternalEditor {
+                    target: ExternalEditorTarget::SqlEditor,
+                    content,
+                }]) if content == "SELECT 1"
             ));
         }
     }

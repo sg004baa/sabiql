@@ -161,6 +161,7 @@ pub mod idx {
         pub const COMPLETION_TRIGGER: usize = 5;
         pub const CLEAR: usize = 6;
         pub const QUERY_HISTORY: usize = 7;
+        pub const EXTERNAL_EDITOR: usize = 8;
     }
 
     pub mod sql_modal_plan {
@@ -342,6 +343,7 @@ pub mod idx {
         pub const ESC_NORMAL: usize = 0;
         pub const MOVE: usize = 1;
         pub const HOME_END: usize = 2;
+        pub const EXTERNAL_EDITOR: usize = 3;
     }
 
     pub mod history {
@@ -639,6 +641,7 @@ mod tests {
             assert!(idx::sql_modal::COMPLETION_TRIGGER < SQL_MODAL_KEYS.len());
             assert!(idx::sql_modal::CLEAR < SQL_MODAL_KEYS.len());
             assert!(idx::sql_modal::QUERY_HISTORY < SQL_MODAL_KEYS.len());
+            assert!(idx::sql_modal::EXTERNAL_EDITOR < SQL_MODAL_KEYS.len());
 
             // SQL_MODAL_PLAN_KEYS
             assert!(idx::sql_modal_plan::EXPLAIN < SQL_MODAL_PLAN_KEYS.len());
@@ -796,6 +799,7 @@ mod tests {
             assert!(idx::jsonb_edit::ESC_NORMAL < JSONB_EDIT_ROWS.len());
             assert!(idx::jsonb_edit::MOVE < JSONB_EDIT_ROWS.len());
             assert!(idx::jsonb_edit::HOME_END < JSONB_EDIT_ROWS.len());
+            assert!(idx::jsonb_edit::EXTERNAL_EDITOR < JSONB_EDIT_ROWS.len());
         }
 
         #[test]

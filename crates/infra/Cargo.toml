@@ -16,6 +16,7 @@ csv.workspace = true
 dirs.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 toml.workspace = true
@@ -26,5 +27,4 @@ sabiql-domain.workspace = true
 
 [dev-dependencies]
 rstest.workspace = true
-tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

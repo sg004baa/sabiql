@@ -34,6 +34,7 @@ Built in Rust for minimal memory footprint and near-zero idle CPU. A full-featur
 - **Row Deletion** (`dd` in Result) — DELETE with mandatory preview; risk level color-coded (yellow/orange/red)
 - **Yank** (`y`) — Copy any cell value to clipboard
 - **CSV Export** (`Ctrl+E`) — Export query results to a CSV file
+- **External Editor** (`Ctrl+E` in SQL editor insert mode / JSONB cell editor) — Open the current buffer in `$EDITOR` and load the edited text back on exit
 
 ### Query Analysis
 

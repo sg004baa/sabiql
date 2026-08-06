@@ -25,8 +25,8 @@ use crate::model::app_state::AppState;
 use crate::model::shared::ui_state::scroll_max_offset;
 use crate::ports::outbound::{
     ClipboardWriter, ConfigWriter, ConnectionStore, DsnBuilder, ErDiagramExporter, ErLogWriter,
-    FileSystemWalker, FolderOpener, MetadataProvider, PgServiceEntryReader, QueryExecutor,
-    QueryHistoryStore, Renderer, SettingsStore,
+    ExternalEditor, ExternalEditorError, FileSystemWalker, FolderOpener, MetadataProvider,
+    PgServiceEntryReader, QueryExecutor, QueryHistoryStore, Renderer, SettingsStore,
 };
 use crate::services::AppServices;
 use crate::update::action::Action;
@@ -51,6 +51,7 @@ struct ErDeps {
 struct UtilityDeps {
     clipboard: Arc<dyn ClipboardWriter>,
     folder_opener: Arc<dyn FolderOpener>,
+    external_editor: Arc<dyn ExternalEditor>,
     file_system_walker: Arc<dyn FileSystemWalker>,
 }
 
@@ -81,6 +82,7 @@ pub struct EffectRunnerBuilder {
     pg_service_entry_reader: Option<Arc<dyn PgServiceEntryReader>>,
     clipboard: Option<Arc<dyn ClipboardWriter>>,
     folder_opener: Option<Arc<dyn FolderOpener>>,
+    external_editor: Option<Arc<dyn ExternalEditor>>,
     file_system_walker: Option<Arc<dyn FileSystemWalker>>,
     query_history_store: Option<Arc<dyn QueryHistoryStore>>,
     settings_store: Option<Arc<dyn SettingsStore>>,
@@ -141,6 +143,11 @@ impl EffectRunnerBuilder {
         self
     }
     #[must_use]
+    pub fn external_editor(mut self, v: Arc<dyn ExternalEditor>) -> Self {
+        self.external_editor = Some(v);
+        self
+    }
+    #[must_use]
     pub fn file_system_walker(mut self, v: Arc<dyn FileSystemWalker>) -> Self {
         self.file_system_walker = Some(v);
         self
@@ -195,6 +202,7 @@ impl EffectRunnerBuilder {
             utility: UtilityDeps {
                 clipboard: self.clipboard.expect("clipboard is required"),
                 folder_opener: self.folder_opener.expect("folder_opener is required"),
+                external_editor: self.external_editor.expect("external_editor is required"),
                 file_system_walker: self
                     .file_system_walker
                     .unwrap_or_else(|| Arc::new(crate::cmd::file_picker::NoopFileSystemWalker)),
@@ -226,6 +234,7 @@ impl EffectRunner {
             pg_service_entry_reader: None,
             clipboard: None,
             folder_opener: None,
+            external_editor: None,
             file_system_walker: None,
             query_history_store: None,
             settings_store: None,
@@ -354,6 +363,25 @@ impl EffectRunner {
                 )
                 .await?;
                 Ok(vec![])
+            }
+
+            Effect::OpenExternalEditor { target, content } => {
+                tui.suspend()?;
+                let editor = Arc::clone(&self.utility.external_editor);
+                let extension = target.file_extension();
+                let result =
+                    tokio::task::spawn_blocking(move || editor.edit(&content, extension)).await;
+                tui.resume()?;
+                Ok(vec![match result {
+                    Ok(Ok(edited)) => Action::ExternalEditorFinished {
+                        target,
+                        content: edited,
+                    },
+                    Ok(Err(error)) => Action::ExternalEditorFailed(error),
+                    Err(join_error) => Action::ExternalEditorFailed(
+                        ExternalEditorError::EditorFailed(join_error.to_string()),
+                    ),
+                }])
             }
 
             e @ (Effect::SaveAndConnect { .. }
@@ -490,6 +518,14 @@ mod tests {
         ) -> RenderResult<RenderOutput> {
             Ok(RenderOutput::default())
         }
+
+        fn suspend(&mut self) -> RenderResult<()> {
+            Ok(())
+        }
+
+        fn resume(&mut self) -> RenderResult<()> {
+            Ok(())
+        }
     }
 
     mod render {
@@ -516,6 +552,14 @@ mod tests {
                     ..RenderOutput::default()
                 })
             }
+
+            fn suspend(&mut self) -> RenderResult<()> {
+                Ok(())
+            }
+
+            fn resume(&mut self) -> RenderResult<()> {
+                Ok(())
+            }
         }
 
         impl Renderer for JsonbVisibleRowsRenderer {
@@ -529,6 +573,14 @@ mod tests {
                     jsonb_detail_editor_visible_rows: Some(self.visible_rows),
                     ..RenderOutput::default()
                 })
+            }
+
+            fn suspend(&mut self) -> RenderResult<()> {
+                Ok(())
+            }
+
+            fn resume(&mut self) -> RenderResult<()> {
+                Ok(())
             }
         }
 
@@ -682,6 +734,141 @@ mod tests {
             assert_eq!(result.len(), 2);
             assert!(matches!(result[0], Action::ProcessPrefetchQueue));
             assert!(matches!(result[1], Action::ProcessPrefetchQueue));
+        }
+    }
+
+    mod external_editor {
+        use super::*;
+        use crate::update::action::ExternalEditorTarget;
+        use std::sync::atomic::{AtomicU8, Ordering};
+
+        const PHASE_START: u8 = 0;
+        const PHASE_SUSPENDED: u8 = 1;
+        const PHASE_EDITED: u8 = 2;
+        const PHASE_RESUMED: u8 = 3;
+
+        /// Monotonic suspend -> edit -> resume probe: each step only advances
+        /// when its predecessor already ran, so a final `PHASE_RESUMED` proves
+        /// the editor ran with the terminal released and that it was restored.
+        #[derive(Default)]
+        struct Phase(AtomicU8);
+
+        impl Phase {
+            fn advance(&self, from: u8, to: u8) {
+                if self.0.load(Ordering::SeqCst) == from {
+                    self.0.store(to, Ordering::SeqCst);
+                }
+            }
+
+            fn get(&self) -> u8 {
+                self.0.load(Ordering::SeqCst)
+            }
+        }
+
+        struct RecordingRenderer {
+            phase: Arc<Phase>,
+        }
+
+        impl Renderer for RecordingRenderer {
+            fn draw(
+                &mut self,
+                _state: &AppState,
+                _services: &AppServices,
+                _now: Instant,
+            ) -> RenderResult<RenderOutput> {
+                Ok(RenderOutput::default())
+            }
+
+            fn suspend(&mut self) -> RenderResult<()> {
+                self.phase.advance(PHASE_START, PHASE_SUSPENDED);
+                Ok(())
+            }
+
+            fn resume(&mut self) -> RenderResult<()> {
+                self.phase.advance(PHASE_EDITED, PHASE_RESUMED);
+                Ok(())
+            }
+        }
+
+        struct StubExternalEditor {
+            phase: Arc<Phase>,
+            outcome: Result<String, ExternalEditorError>,
+        }
+
+        impl ExternalEditor for StubExternalEditor {
+            fn edit(
+                &self,
+                _content: &str,
+                _extension: &str,
+            ) -> Result<String, ExternalEditorError> {
+                self.phase.advance(PHASE_SUSPENDED, PHASE_EDITED);
+                self.outcome.clone()
+            }
+        }
+
+        async fn run_open(
+            outcome: Result<String, ExternalEditorError>,
+        ) -> (Vec<Action>, Arc<Phase>) {
+            let phase = Arc::new(Phase::default());
+            let (tx, _rx) = mpsc::channel(8);
+            let runner = make_runner_builder(
+                Arc::new(MockMetadataProvider::new()),
+                Arc::new(MockQueryExecutor::new()),
+                Arc::new(MockConnectionStore::new()),
+                TtlCache::new(300),
+                tx,
+            )
+            .external_editor(Arc::new(StubExternalEditor {
+                phase: Arc::clone(&phase),
+                outcome,
+            }))
+            .build();
+
+            let state = &mut AppState::new("test".to_string());
+            let ce = RefCell::new(CompletionEngine::new());
+            let mut renderer = RecordingRenderer {
+                phase: Arc::clone(&phase),
+            };
+
+            let actions = runner
+                .run(
+                    vec![Effect::OpenExternalEditor {
+                        target: ExternalEditorTarget::SqlEditor,
+                        content: "select 1".into(),
+                    }],
+                    &mut renderer,
+                    state,
+                    &ce,
+                    &AppServices::stub(),
+                )
+                .await
+                .unwrap();
+
+            (actions, phase)
+        }
+
+        #[tokio::test]
+        async fn loads_edited_text_back_between_suspend_and_resume() {
+            let (actions, phase) = run_open(Ok("select 2".to_string())).await;
+
+            assert_eq!(actions.len(), 1);
+            assert!(matches!(
+                &actions[0],
+                Action::ExternalEditorFinished {
+                    target: ExternalEditorTarget::SqlEditor,
+                    content,
+                } if content == "select 2"
+            ));
+            assert_eq!(phase.get(), PHASE_RESUMED);
+        }
+
+        #[tokio::test]
+        async fn restores_the_terminal_when_the_editor_fails() {
+            let (actions, phase) = run_open(Err(ExternalEditorError::NotConfigured)).await;
+
+            assert_eq!(actions.len(), 1);
+            assert!(matches!(actions[0], Action::ExternalEditorFailed(_)));
+            assert_eq!(phase.get(), PHASE_RESUMED);
         }
     }
 }

@@ -117,6 +117,7 @@ test_project | test_db | - | no dsn | localhost:5432/test
 │                          │  Ctrl+Space                           Trigger completion                                                                   │                          │
 │                          │  Ctrl+L                               Clear editor                                                                         │                          │
 │                          │  Ctrl+O                               Open Query History                                                                   │                          │
+│                          │  Ctrl+E                               Edit query in $EDITOR                                                                │                          │
 │                          │                                                                                                                            │                          │
 │                          │▸ SQL Editor (Plan)                                                                                                         │                          │
 │                          │  Ctrl+E                               Run EXPLAIN on current query                                                         │                          │
@@ -150,9 +151,9 @@ test_project | test_db | - | no dsn | localhost:5432/test
 │                          │  Enter                                View error details                                                                   │                          │
 │                          │                                                                                                                            │                          │
 │                          │▸ Command Line                                                                                                              │                          │
-│                          │  :quit                                Quit application                                                                     │                          │
-│                          │  :help                                Show help                                                                            │──────────────────────────┘
-│                          │  :sql                                 Open SQL Editor                                                                      │──────────────────────────┐
+│                          │  :quit                                Quit application                                                                     │──────────────────────────┘
+│                          │  :help                                Show help                                                                            │──────────────────────────┐
+│                          │  :sql                                 Open SQL Editor                                                                      │                          │
 │                          │  :erd                                 Open ER Diagram                                                                      │                          │
 │                          │  :settings                            Open Settings                                                                        │                          │
 │                          │  :theme                               Open Theme Settings                                                                  │                          │
@@ -247,13 +248,12 @@ test_project | test_db | - | no dsn | localhost:5432/test
 │                          │  Esc                                  Return to Normal mode                                                                │                          │
 │                          │  ↑↓←→                                 Move cursor                                                                          │                          │
 │                          │  Home / End                           Line start/end                                                                       │                          │
+│                          │  Ctrl+E                               Edit in $EDITOR                                                                      │                          │
 │                          │                                                                                                                            │                          │
 │                          │▸ JSONB Search                                                                                                              │                          │
 │                          │  type                                 Type to search                                                                       │                          │
 │                          │  Enter                                Confirm search                                                                       │                          │
 │                          │  Esc                                  Cancel search                                                                        │                          │
-│                          │                                                                                                                            │                          │
-│                          │                                                                                                                            │                          │
 │                          │                                                                                                                            │                          │
 │                          │                                                                                                                            │                          │
 │                          │                                                                                                                            │                          │
