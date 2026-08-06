@@ -11,6 +11,7 @@ use crate::policy::write::write_guardrails::WritePreview;
 use crate::ports::outbound::DbOperationError;
 use crate::ports::outbound::clipboard::ClipboardError;
 use crate::ports::outbound::connection_store::ConnectionStoreError;
+use crate::ports::outbound::external_editor::ExternalEditorError;
 use crate::ports::outbound::folder_opener::FolderOpenError;
 use crate::ports::outbound::query_history::QueryHistoryError;
 use crate::ports::outbound::settings_store::SettingsStoreError;
@@ -154,6 +155,22 @@ pub enum InputTarget {
     FilePickerFilter,
     JsonbEdit,
     JsonbSearch,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalEditorTarget {
+    SqlEditor,
+    JsonbEditor,
+}
+
+impl ExternalEditorTarget {
+    /// Temp-file extension so the external editor picks the right syntax.
+    pub const fn file_extension(self) -> &'static str {
+        match self {
+            Self::SqlEditor => "sql",
+            Self::JsonbEditor => "json",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -578,6 +595,14 @@ pub enum Action {
     JsonbSearchNext,
     JsonbSearchPrev,
     JsonbSearchSubmit,
+
+    // External editor ($EDITOR)
+    OpenExternalEditor(ExternalEditorTarget),
+    ExternalEditorFinished {
+        target: ExternalEditorTarget,
+        content: String,
+    },
+    ExternalEditorFailed(ExternalEditorError),
 
     // ER Diagram (full or partial, depending on selected tables)
     ErOpenDiagram,

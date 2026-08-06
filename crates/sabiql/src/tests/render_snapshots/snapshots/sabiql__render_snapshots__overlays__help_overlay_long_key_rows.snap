@@ -34,6 +34,7 @@ test_project | test_db | - | no dsn | localhost:5432/test
 │                        │  Ctrl+Space                           Trigger completion                                                       ││                        │
 │                        │  Ctrl+L                               Clear editor                                                             ││                        │
 │                        │  Ctrl+O                               Open Query History                                                       ││                        │
+│                        │  Ctrl+E                               Edit query in $EDITOR                                                    ││                        │
 │                        │                                                                                                                ││                        │
 │                        │▸ SQL Editor (Plan)                                                                                             ││                        │
 │                        │  Ctrl+E                               Run EXPLAIN on current query                                             ││                        │
@@ -45,8 +46,7 @@ test_project | test_db | - | no dsn | localhost:5432/test
 │                        │  Esc / q                              Close editor                                                             ││                        │
 │                        │                                                                                                                ││                        │
 │                        │▸ SQL Editor (Compare)                                                                                          ││                        │
-│                        │  Ctrl+E                               Run EXPLAIN on current query                                             ││                        │
-│                        │  Alt+E                                Run EXPLAIN ANALYZE on current query                                     ▼│                        │
+│                        │  Ctrl+E                               Run EXPLAIN on current query                                             ▼│                        │
 │                        ╰ ?/Esc/q Close ──────────────────────────────────────────────────────────────────────────────────────────────────╯                        │
 │                                       ││                                                                                                                          │
 │                                       ││                                                                                                                          │

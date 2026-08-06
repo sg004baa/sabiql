@@ -13,7 +13,7 @@ use crate::model::shared::key_sequence::KeySequenceState;
 use crate::model::shared::text_input::TextInputLike;
 use crate::model::shared::ui_state::DEFAULT_JSONB_DETAIL_EDITOR_VISIBLE_ROWS;
 use crate::ports::outbound::ClipboardError;
-use crate::update::action::{Action, CursorMove, InputTarget, ModalKind};
+use crate::update::action::{Action, CursorMove, ExternalEditorTarget, InputTarget, ModalKind};
 
 pub fn reduce(state: &mut AppState, action: &Action, now: Instant) -> Option<Vec<Effect>> {
     match action {
@@ -188,6 +188,24 @@ pub fn reduce(state: &mut AppState, action: &Action, now: Instant) -> Option<Vec
 
         Action::Paste(text) if state.input_mode() == InputMode::JsonbEdit => {
             state.jsonb_detail.editor_mut().insert_str(text);
+            update_editor_scroll(state);
+            validate_editor_inline(state);
+            Some(vec![])
+        }
+
+        // External editor ($EDITOR)
+        Action::OpenExternalEditor(ExternalEditorTarget::JsonbEditor) => {
+            Some(vec![Effect::OpenExternalEditor {
+                target: ExternalEditorTarget::JsonbEditor,
+                content: state.jsonb_detail.editor().content().to_string(),
+            }])
+        }
+
+        Action::ExternalEditorFinished {
+            target: ExternalEditorTarget::JsonbEditor,
+            content,
+        } => {
+            state.jsonb_detail.editor_mut().set_content(content.clone());
             update_editor_scroll(state);
             validate_editor_inline(state);
             Some(vec![])
@@ -841,6 +859,58 @@ mod tests {
 
             assert_eq!(state.input_mode(), InputMode::Normal);
             assert!(!state.result_interaction.cell_edit().has_pending_draft());
+        }
+    }
+
+    mod external_editor {
+        use super::*;
+        use crate::cmd::effect::Effect;
+
+        fn editing_state() -> AppState {
+            let mut state = state_with_jsonb_cell();
+            open_detail(&mut state);
+            reduce(&mut state, &Action::JsonbEnterEdit, Instant::now());
+            state
+        }
+
+        #[test]
+        fn finishing_replaces_the_editor_buffer() {
+            let mut state = editing_state();
+
+            let effects = reduce(
+                &mut state,
+                &Action::ExternalEditorFinished {
+                    target: ExternalEditorTarget::JsonbEditor,
+                    content: r#"{"theme":"light"}"#.to_string(),
+                },
+                Instant::now(),
+            );
+
+            assert_eq!(
+                state.jsonb_detail.editor().content(),
+                r#"{"theme":"light"}"#
+            );
+            assert!(effects.is_some_and(|e| e.is_empty()));
+        }
+
+        #[test]
+        fn opening_emits_the_current_buffer() {
+            let mut state = editing_state();
+
+            let effects = reduce(
+                &mut state,
+                &Action::OpenExternalEditor(ExternalEditorTarget::JsonbEditor),
+                Instant::now(),
+            );
+
+            let effects = effects.expect("should return effects");
+            assert!(matches!(
+                &effects[..],
+                [Effect::OpenExternalEditor {
+                    target: ExternalEditorTarget::JsonbEditor,
+                    content,
+                }] if content.contains("theme")
+            ));
         }
     }
 

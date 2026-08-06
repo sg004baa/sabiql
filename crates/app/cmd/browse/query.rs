@@ -441,6 +441,14 @@ mod tests {
             ) -> RenderResult<RenderOutput> {
                 Ok(RenderOutput::default())
             }
+
+            fn suspend(&mut self) -> RenderResult<()> {
+                Ok(())
+            }
+
+            fn resume(&mut self) -> RenderResult<()> {
+                Ok(())
+            }
         }
 
         #[tokio::test]

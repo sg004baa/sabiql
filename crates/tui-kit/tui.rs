@@ -13,6 +13,7 @@ use crossterm::terminal::{
 use futures::{FutureExt, StreamExt};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use ratatui::layout::Rect;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -45,29 +46,35 @@ impl TuiRunner {
     }
 
     pub fn enter(&mut self) -> Result<()> {
-        enable_raw_mode()?;
-        execute!(
-            stdout(),
-            EnterAlternateScreen,
-            EnableMouseCapture,
-            EnableBracketedPaste
-        )?;
+        acquire_terminal()?;
         self.start_event_loop();
         Ok(())
     }
 
     pub fn exit(&mut self) -> Result<()> {
         self.stop_event_loop();
-        if crossterm::terminal::is_raw_mode_enabled()? {
-            let _ = execute!(stdout(), SetCursorStyle::DefaultUserShape);
-            execute!(
-                stdout(),
-                LeaveAlternateScreen,
-                DisableMouseCapture,
-                DisableBracketedPaste
-            )?;
-            disable_raw_mode()?;
-        }
+        release_terminal()?;
+        Ok(())
+    }
+
+    /// Release the terminal so an external interactive program (e.g. `$EDITOR`) owns the TTY.
+    pub fn suspend(&mut self) -> std::io::Result<()> {
+        self.stop_event_loop();
+        release_terminal()
+    }
+
+    /// Re-acquire the terminal released by [`Self::suspend`] and force a full repaint.
+    pub fn resume(&mut self) -> std::io::Result<()> {
+        // `stop_event_loop` cancels the token permanently, so the reader task needs a fresh one.
+        self.cancellation_token = CancellationToken::new();
+        acquire_terminal()?;
+        // `Terminal::clear` snapshots the cursor with a DSR query, which needs a reader on
+        // stdin and blocks until it times out. `resize` to the current size clears the screen
+        // and resets the back buffer — a full repaint — without the round-trip.
+        let size = self.terminal.size()?;
+        self.terminal
+            .resize(Rect::new(0, 0, size.width, size.height))?;
+        self.start_event_loop();
         Ok(())
     }
 
@@ -123,4 +130,28 @@ impl TuiRunner {
     pub fn terminal(&mut self) -> &mut Tui {
         &mut self.terminal
     }
+}
+
+fn acquire_terminal() -> std::io::Result<()> {
+    enable_raw_mode()?;
+    execute!(
+        stdout(),
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )
+}
+
+fn release_terminal() -> std::io::Result<()> {
+    if crossterm::terminal::is_raw_mode_enabled()? {
+        let _ = execute!(stdout(), SetCursorStyle::DefaultUserShape);
+        execute!(
+            stdout(),
+            LeaveAlternateScreen,
+            DisableMouseCapture,
+            DisableBracketedPaste
+        )?;
+        disable_raw_mode()?;
+    }
+    Ok(())
 }

@@ -1,6 +1,6 @@
 use super::KeyBinding;
 use super::{Key, KeyCombo};
-use crate::update::action::{Action, ModalKind};
+use crate::update::action::{Action, ExternalEditorTarget, ModalKind};
 
 // =============================================================================
 // SQL Modal (Normal mode — default when opened)
@@ -291,6 +291,14 @@ pub const SQL_MODAL_KEYS: &[KeyBinding] = &[
         description: "Open Query History",
         action: Action::OpenModal(ModalKind::QueryHistoryPicker),
         combos: &[KeyCombo::ctrl(Key::Char('o'))],
+    },
+    KeyBinding {
+        key_short: "^E",
+        key: "Ctrl+E",
+        desc_short: "Editor",
+        description: "Edit query in $EDITOR",
+        action: Action::OpenExternalEditor(ExternalEditorTarget::SqlEditor),
+        combos: &[KeyCombo::ctrl(Key::Char('e'))],
     },
 ];
 

@@ -11,9 +11,9 @@ use crate::domain::query_history::QueryHistoryEntry;
 use crate::domain::{ConnectionId, DatabaseMetadata, ErTableInfo, QueryResult, QuerySource};
 use crate::ports::outbound::{
     ClipboardError, ClipboardWriter, ConfigWriter, ConfigWriterError, ConnectionStore, DsnBuilder,
-    ErDiagramExporter, ErExportResult, ErLogWriter, FolderOpenError, FolderOpener,
-    MetadataProvider, PgServiceEntryReader, QueryExecutor, QueryHistoryError, QueryHistoryStore,
-    ServiceFileError, SettingsStore, SettingsStoreError,
+    ErDiagramExporter, ErExportResult, ErLogWriter, ExternalEditor, ExternalEditorError,
+    FolderOpenError, FolderOpener, MetadataProvider, PgServiceEntryReader, QueryExecutor,
+    QueryHistoryError, QueryHistoryStore, ServiceFileError, SettingsStore, SettingsStoreError,
 };
 use crate::update::action::Action;
 
@@ -72,6 +72,13 @@ pub struct NoopFolderOpener;
 impl FolderOpener for NoopFolderOpener {
     fn open(&self, _path: &Path) -> Result<(), FolderOpenError> {
         Ok(())
+    }
+}
+
+pub struct NoopExternalEditor;
+impl ExternalEditor for NoopExternalEditor {
+    fn edit(&self, content: &str, _extension: &str) -> Result<String, ExternalEditorError> {
+        Ok(content.to_string())
     }
 }
 
@@ -144,6 +151,7 @@ pub fn make_runner_builder(
         .connection_store(connection_store)
         .clipboard(Arc::new(NoopClipboardWriter))
         .folder_opener(Arc::new(NoopFolderOpener))
+        .external_editor(Arc::new(NoopExternalEditor))
         .query_history_store(Arc::new(NoopQueryHistoryStore))
         .settings_store(Arc::new(NoopSettingsStore))
         .metadata_cache(cache)

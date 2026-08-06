@@ -49,6 +49,18 @@ impl Renderer for TuiAdapter<'_> {
         }
         Ok(output)
     }
+
+    fn suspend(&mut self) -> RenderResult<()> {
+        self.tui.suspend()?;
+        Ok(())
+    }
+
+    fn resume(&mut self) -> RenderResult<()> {
+        self.tui.resume()?;
+        // The external program owned the TTY, so the cursor style must be re-applied.
+        self.last_cursor_insert = None;
+        Ok(())
+    }
 }
 
 fn uses_insert_cursor(state: &AppState) -> bool {

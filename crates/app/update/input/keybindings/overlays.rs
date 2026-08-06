@@ -1,8 +1,8 @@
 use super::{ExecBinding, KeyBinding, ModeRow};
 use super::{Key, KeyCombo};
 use crate::update::action::{
-    Action, CursorMove, InputTarget, ListMotion, ListTarget, ModalKind, ScrollAmount,
-    ScrollDirection, ScrollTarget,
+    Action, CursorMove, ExternalEditorTarget, InputTarget, ListMotion, ListTarget, ModalKind,
+    ScrollAmount, ScrollDirection, ScrollTarget,
 };
 
 // =============================================================================
@@ -1092,5 +1092,15 @@ pub const JSONB_EDIT_ROWS: &[ModeRow] = &[
                 combos: &[KeyCombo::plain(Key::End)],
             },
         ],
+    },
+    ModeRow {
+        key_short: "^E",
+        key: "Ctrl+E",
+        desc_short: "Editor",
+        description: "Edit in $EDITOR",
+        bindings: &[ExecBinding {
+            action: Action::OpenExternalEditor(ExternalEditorTarget::JsonbEditor),
+            combos: &[KeyCombo::ctrl(Key::Char('e'))],
+        }],
     },
 ];

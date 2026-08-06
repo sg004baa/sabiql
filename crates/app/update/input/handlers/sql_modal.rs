@@ -1,7 +1,8 @@
 use crate::model::shared::key_sequence::Prefix;
 use crate::model::sql_editor::modal::{SqlModalStatus, SqlModalTab};
 use crate::update::action::{
-    Action, InputTarget, ModalKind, ScrollAmount, ScrollDirection, ScrollTarget,
+    Action, ExternalEditorTarget, InputTarget, ModalKind, ScrollAmount, ScrollDirection,
+    ScrollTarget,
 };
 use crate::update::input::keybindings::{Key, KeyCombo, Modifiers};
 use crate::update::input::vim::{
@@ -262,7 +263,7 @@ pub fn handle_sql_modal_keys_with_prefix(
     }
 
     if ctrl && combo.key == Key::Char('e') {
-        return Action::ExplainRequest;
+        return Action::OpenExternalEditor(ExternalEditorTarget::SqlEditor);
     }
 
     if ctrl && combo.key == Key::Char('l') {
@@ -375,6 +376,7 @@ mod tests {
         OpenModal(ModalKind),
         SqlModalClear,
         ExplainRequest,
+        OpenExternalEditor(ExternalEditorTarget),
         ExplainAnalyzeRequest,
         SqlModalNextTab,
         SqlModalPrevTab,
@@ -436,6 +438,11 @@ mod tests {
             }
             Expected::SqlModalClear => assert!(matches!(result, Action::SqlModalClear)),
             Expected::ExplainRequest => assert!(matches!(result, Action::ExplainRequest)),
+            Expected::OpenExternalEditor(expected_target) => {
+                assert!(
+                    matches!(result, Action::OpenExternalEditor(target) if target == expected_target)
+                );
+            }
             Expected::ExplainAnalyzeRequest => {
                 assert!(matches!(result, Action::ExplainAnalyzeRequest));
             }
@@ -1060,11 +1067,26 @@ mod tests {
         use super::*;
 
         #[test]
-        fn editing_mode_ctrl_e_requests_explain() {
+        fn ctrl_e_opens_the_external_editor() {
             let result = handle_sql_modal_keys(
                 combo_ctrl(Key::Char('e')),
                 false,
                 &SqlModalStatus::Editing,
+                SqlModalTab::Sql,
+            );
+
+            assert_action(
+                result,
+                Expected::OpenExternalEditor(ExternalEditorTarget::SqlEditor),
+            );
+        }
+
+        #[test]
+        fn ctrl_e_still_requests_explain_outside_editing() {
+            let result = handle_sql_modal_keys(
+                combo_ctrl(Key::Char('e')),
+                false,
+                &SqlModalStatus::Normal,
                 SqlModalTab::Sql,
             );
 

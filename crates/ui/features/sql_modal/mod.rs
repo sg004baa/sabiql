@@ -77,7 +77,7 @@ impl SqlModal {
             }
         } else {
             let hint: &str = match state.sql_modal.status() {
-                SqlModalStatus::Editing => Self::editing_hint(services),
+                SqlModalStatus::Editing => Self::editing_hint(),
                 SqlModalStatus::Running => " Running\u{2026} ",
                 SqlModalStatus::ConfirmingAnalyzeHigh {
                     input, target_name, ..
@@ -322,29 +322,17 @@ impl SqlModal {
         }
     }
 
-    fn editing_hint(services: &AppServices) -> &'static str {
+    fn editing_hint() -> &'static str {
         static HINT: LazyLock<String> = LazyLock::new(|| {
             SqlModal::join_hint_pairs(&[
                 SQL_MODAL_KEYS[idx::sql_modal::RUN].as_hint(),
-                SQL_MODAL_PLAN_KEYS[idx::sql_modal_plan::EXPLAIN].as_hint(),
+                SQL_MODAL_KEYS[idx::sql_modal::EXTERNAL_EDITOR].as_hint(),
                 SQL_MODAL_KEYS[idx::sql_modal::CLEAR].as_hint(),
                 SQL_MODAL_KEYS[idx::sql_modal::QUERY_HISTORY].as_hint(),
                 SQL_MODAL_KEYS[idx::sql_modal::ESC_NORMAL].as_hint(),
             ])
         });
-        static HINT_NO_EXPLAIN: LazyLock<String> = LazyLock::new(|| {
-            SqlModal::join_hint_pairs(&[
-                SQL_MODAL_KEYS[idx::sql_modal::RUN].as_hint(),
-                SQL_MODAL_KEYS[idx::sql_modal::CLEAR].as_hint(),
-                SQL_MODAL_KEYS[idx::sql_modal::QUERY_HISTORY].as_hint(),
-                SQL_MODAL_KEYS[idx::sql_modal::ESC_NORMAL].as_hint(),
-            ])
-        });
-        if services.db_capabilities.supports_explain() {
-            &HINT
-        } else {
-            &HINT_NO_EXPLAIN
-        }
+        &HINT
     }
 
     fn join_hint_pairs(pairs: &[(&str, &str)]) -> String {
