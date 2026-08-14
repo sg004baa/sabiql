@@ -101,6 +101,9 @@ fn process_action(
 
 fn handle_event(event: InputEvent, state: &AppState) -> Option<Action> {
     match event {
+        InputEvent::Paste(text) if state.connection_form.is_some() => {
+            Some(Action::ConnectionFormPaste(text))
+        }
         InputEvent::Key(combo) if state.confirm_state.is_some() => handle_confirm_key(combo),
         InputEvent::Key(combo) if state.connection_form.is_some() => {
             handle_connection_form_key(combo)
@@ -423,6 +426,24 @@ mod tests {
         assert_eq!(
             handle_event(InputEvent::Key(KeyCombo::plain(Key::Esc)), &state),
             Some(Action::CancelConnectionForm)
+        );
+    }
+
+    #[test]
+    fn connection_form_routes_paste_before_command_modal() {
+        let mut state = AppState::new("redis://localhost");
+        state.connection_form = Some(app::ConnectionFormState {
+            dsn: "redis://localhost".to_string(),
+            read_only: false,
+            cursor: "redis://localhost".chars().count(),
+        });
+        state.command_modal.is_open = true;
+
+        let action = handle_event(InputEvent::Paste("秘密🔐".to_string()), &state);
+
+        assert_eq!(
+            action,
+            Some(Action::ConnectionFormPaste("秘密🔐".to_string()))
         );
     }
 

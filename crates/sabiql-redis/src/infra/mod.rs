@@ -68,37 +68,51 @@ pub struct RedisDsn {
     pub host: String,
     pub port: u16,
     pub db: u8,
+    pub tls: bool,
+    pub username: Option<String>,
+    pub password: Option<String>,
 }
 
 impl RedisDsn {
     pub fn parse(dsn: &str) -> Result<Self, RedisCliError> {
-        let rest = dsn
-            .trim()
-            .strip_prefix("redis://")
-            .ok_or_else(|| RedisCliError::Parse("DSN must start with redis://".to_string()))?;
-        let (authority, db_part) = rest.split_once('/').unwrap_or((rest, ""));
-        if authority.is_empty() {
-            return Err(RedisCliError::Parse("Redis host is required".to_string()));
-        }
-
-        let (host, port) = match authority.rsplit_once(':') {
-            Some((host, port)) => {
-                if host.is_empty() {
-                    return Err(RedisCliError::Parse("Redis host is required".to_string()));
-                }
-                let parsed_port = port
-                    .parse::<u16>()
-                    .map_err(|_| RedisCliError::Parse(format!("invalid Redis port: {port}")))?;
-                (host.to_string(), parsed_port)
+        let url = url::Url::parse(dsn.trim())
+            .map_err(|error| RedisCliError::Parse(format!("invalid Redis DSN: {error}")))?;
+        let tls = match url.scheme() {
+            "redis" => false,
+            "rediss" => true,
+            scheme => {
+                return Err(RedisCliError::Parse(format!(
+                    "unsupported Redis DSN scheme: {scheme}"
+                )));
             }
-            None => (authority.to_string(), 6379),
         };
 
+        if url.query().is_some() {
+            return Err(RedisCliError::Parse(
+                "Redis DSN queries are not supported".to_string(),
+            ));
+        }
+        if url.fragment().is_some() {
+            return Err(RedisCliError::Parse(
+                "Redis DSN fragments are not supported".to_string(),
+            ));
+        }
+
+        let host = match url.host() {
+            Some(url::Host::Domain(host)) if !host.is_empty() => host.to_string(),
+            Some(url::Host::Ipv4(host)) => host.to_string(),
+            Some(url::Host::Ipv6(host)) => host.to_string(),
+            _ => return Err(RedisCliError::Parse("Redis host is required".to_string())),
+        };
+        let port = url.port().unwrap_or(6379);
+
+        let db_part = url.path().strip_prefix('/').unwrap_or_else(|| url.path());
         let db = if db_part.is_empty() {
             0
         } else if db_part.contains('/') {
             return Err(RedisCliError::Parse(format!(
-                "invalid Redis database path: /{db_part}"
+                "invalid Redis database path: {}",
+                url.path()
             )));
         } else {
             db_part
@@ -106,7 +120,43 @@ impl RedisDsn {
                 .map_err(|_| RedisCliError::Parse(format!("invalid Redis database: {db_part}")))?
         };
 
-        Ok(Self { host, port, db })
+        let decode_credential = |value: &str, name: &str| {
+            let mut bytes = value.bytes();
+            while let Some(byte) = bytes.next() {
+                if byte == b'%'
+                    && (!matches!(bytes.next(), Some(byte) if byte.is_ascii_hexdigit())
+                        || !matches!(bytes.next(), Some(byte) if byte.is_ascii_hexdigit()))
+                {
+                    return Err(RedisCliError::Parse(format!(
+                        "invalid percent-encoded Redis {name}"
+                    )));
+                }
+            }
+
+            urlencoding::decode(value)
+                .map(String::from)
+                .map_err(|error| {
+                    RedisCliError::Parse(format!("invalid percent-encoded Redis {name}: {error}"))
+                })
+        };
+        let (username, password) = match (url.username(), url.password()) {
+            (username, Some(password)) => {
+                let username = decode_credential(username, "username")?;
+                let password = decode_credential(password, "password")?;
+                ((!username.is_empty()).then_some(username), Some(password))
+            }
+            ("", None) => (None, None),
+            (password, None) => (None, Some(decode_credential(password, "password")?)),
+        };
+
+        Ok(Self {
+            host,
+            port,
+            db,
+            tls,
+            username,
+            password,
+        })
     }
 }
 
@@ -1016,19 +1066,31 @@ impl RedisCliSubprocess {
             .await
     }
 
-    async fn run_command_in_db(&self, db: u8, args: &[String]) -> Result<String, RedisCliError> {
+    fn command_in_db(&self, db: u8, args: &[String]) -> Command {
         let mut cmd = Command::new("redis-cli");
-        cmd.kill_on_drop(true)
-            .arg("-h")
+        cmd.kill_on_drop(true);
+        if self.dsn.tls {
+            cmd.arg("--tls");
+        }
+        if let Some(username) = &self.dsn.username {
+            cmd.arg("--user").arg(username);
+        }
+        if let Some(password) = &self.dsn.password {
+            cmd.env("REDISCLI_AUTH", password);
+        }
+        cmd.arg("-h")
             .arg(&self.dsn.host)
             .arg("-p")
             .arg(self.dsn.port.to_string())
             .arg("-n")
             .arg(db.to_string())
-            .arg("--raw");
-        for arg in args {
-            cmd.arg(arg);
-        }
+            .arg("--raw")
+            .args(args);
+        cmd
+    }
+
+    async fn run_command_in_db(&self, db: u8, args: &[String]) -> Result<String, RedisCliError> {
+        let mut cmd = self.command_in_db(db, args);
 
         let output = timeout(self.timeout, cmd.output())
             .await
@@ -1217,6 +1279,9 @@ mod tests {
                 host: "localhost".to_string(),
                 port: 6379,
                 db: 0,
+                tls: false,
+                username: None,
+                password: None,
             }
         );
     }
@@ -1231,7 +1296,144 @@ mod tests {
                 host: "redis.example.com".to_string(),
                 port: 6380,
                 db: 2,
+                tls: false,
+                username: None,
+                password: None,
             }
+        );
+    }
+
+    #[test]
+    fn parses_rediss_elasticache_url() {
+        let dsn = RedisDsn::parse("rediss://cache.example.amazonaws.com:6379/0").unwrap();
+
+        assert_eq!(dsn.host, "cache.example.amazonaws.com");
+        assert_eq!(dsn.port, 6379);
+        assert_eq!(dsn.db, 0);
+        assert!(dsn.tls);
+        assert_eq!(dsn.username, None);
+        assert_eq!(dsn.password, None);
+    }
+
+    #[test]
+    fn percent_decodes_redis_credentials() {
+        let dsn = RedisDsn::parse("rediss://app%40prod:p%40ss%2Fword@cache.example.com/2").unwrap();
+
+        assert_eq!(dsn.username.as_deref(), Some("app@prod"));
+        assert_eq!(dsn.password.as_deref(), Some("p@ss/word"));
+    }
+
+    #[test]
+    fn parses_password_only_redis_credentials() {
+        let dsn = RedisDsn::parse("redis://p%40ssword@localhost").unwrap();
+
+        assert_eq!(dsn.username, None);
+        assert_eq!(dsn.password.as_deref(), Some("p@ssword"));
+    }
+
+    #[test]
+    fn rejects_malformed_or_unsupported_redis_urls() {
+        for input in [
+            "http://localhost",
+            "redis:///0",
+            "redis://localhost:not-a-port",
+            "redis://localhost:65536",
+            "redis://localhost/not-a-db",
+            "redis://localhost/1/2",
+            "redis://localhost/256",
+            "redis://localhost/0?foo=bar",
+            "redis://localhost/0#fragment",
+            "redis://user:%ZZ@localhost",
+            "redis://user:%@localhost",
+            "redis://user:%A@localhost",
+            "redis://%ZZ:password@localhost",
+            "redis://%:password@localhost",
+            "redis://%A:password@localhost",
+        ] {
+            let error = RedisDsn::parse(input).unwrap_err();
+            assert!(
+                matches!(error, RedisCliError::Parse(_)),
+                "input {input:?} returned {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn builds_tls_authenticated_redis_cli_command_without_password_argv() {
+        let client = RedisCliSubprocess::new(
+            "rediss://app%40prod:p%40ss%2Fword@cache.example.amazonaws.com:6380/2",
+        )
+        .unwrap();
+        let command = client.command_in_db(3, &["PING".to_string()]);
+        let std_command = command.as_std();
+        let args = std_command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            args,
+            [
+                "--tls",
+                "--user",
+                "app@prod",
+                "-h",
+                "cache.example.amazonaws.com",
+                "-p",
+                "6380",
+                "-n",
+                "3",
+                "--raw",
+                "PING",
+            ]
+        );
+        assert!(!args.iter().any(|arg| arg.contains("p@ss/word")));
+        let password = std_command
+            .get_envs()
+            .find(|(name, _)| *name == "REDISCLI_AUTH")
+            .and_then(|(_, value)| value)
+            .map(|value| value.to_string_lossy().into_owned());
+        assert_eq!(password.as_deref(), Some("p@ss/word"));
+    }
+
+    #[test]
+    fn builds_password_only_command_without_user_argument() {
+        let client = RedisCliSubprocess::new("redis://:secret@localhost").unwrap();
+        let command = client.command_in_db(0, &["PING".to_string()]);
+        let std_command = command.as_std();
+        let args = std_command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert!(!args.iter().any(|arg| arg == "--user"));
+        assert!(!args.iter().any(|arg| arg.contains("secret")));
+        let password = std_command
+            .get_envs()
+            .find(|(name, _)| *name == "REDISCLI_AUTH")
+            .and_then(|(_, value)| value)
+            .map(|value| value.to_string_lossy().into_owned());
+        assert_eq!(password.as_deref(), Some("secret"));
+    }
+
+    #[test]
+    fn builds_legacy_redis_cli_command_without_tls_or_auth() {
+        let client = RedisCliSubprocess::new("redis://localhost").unwrap();
+        let command = client.command_in_db(0, &["PING".to_string()]);
+        let std_command = command.as_std();
+        let args = std_command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            args,
+            ["-h", "localhost", "-p", "6379", "-n", "0", "--raw", "PING"]
+        );
+        assert!(
+            std_command
+                .get_envs()
+                .all(|(name, _)| name != "REDISCLI_AUTH")
         );
     }
 

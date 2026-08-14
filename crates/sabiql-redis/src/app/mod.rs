@@ -205,6 +205,7 @@ pub enum Action {
     CloseCommandModal,
     OpenConnectionForm,
     ConnectionFormInput(char),
+    ConnectionFormPaste(String),
     ConnectionFormBackspace,
     ConnectionFormCursorLeft,
     ConnectionFormCursorRight,
@@ -473,6 +474,12 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
         Action::ConnectionFormInput(ch) => {
             if let Some(form) = &mut state.connection_form {
                 insert_connection_form_char(form, ch);
+            }
+            Vec::new()
+        }
+        Action::ConnectionFormPaste(text) => {
+            if let Some(form) = &mut state.connection_form {
+                insert_connection_form_text(form, &text);
             }
             Vec::new()
         }
@@ -954,6 +961,13 @@ fn insert_connection_form_char(form: &mut ConnectionFormState, ch: char) {
     form.cursor = cursor + 1;
 }
 
+fn insert_connection_form_text(form: &mut ConnectionFormState, text: &str) {
+    let cursor = form.cursor.min(form.dsn.chars().count());
+    let byte_index = byte_index_at_char(&form.dsn, cursor);
+    form.dsn.insert_str(byte_index, text);
+    form.cursor = cursor + text.chars().count();
+}
+
 fn backspace_connection_form_char(form: &mut ConnectionFormState) {
     let cursor = form.cursor.min(form.dsn.chars().count());
     if cursor == 0 {
@@ -1016,10 +1030,15 @@ fn submit_db_selection(state: &mut AppState) -> Vec<Effect> {
 }
 
 fn dsn_with_db(dsn: &str, db: u8) -> String {
-    RedisDsn::parse(dsn).map_or_else(
-        |_| dsn.to_string(),
-        |parsed| format!("redis://{}:{}/{db}", parsed.host, parsed.port),
-    )
+    if RedisDsn::parse(dsn).is_err() {
+        return dsn.to_string();
+    }
+
+    let Ok(mut url) = url::Url::parse(dsn.trim()) else {
+        return dsn.to_string();
+    };
+    url.set_path(&format!("/{db}"));
+    url.to_string()
 }
 
 pub fn key_count(state: &AppState) -> usize {
@@ -2000,6 +2019,30 @@ mod tests {
         }
 
         #[test]
+        fn connection_form_paste_inserts_unicode_at_character_cursor_only() {
+            let mut state = AppState::new("redis://localhost");
+            state.connection_form = Some(ConnectionFormState {
+                dsn: "redis://ホスト/0".to_string(),
+                read_only: true,
+                cursor: "redis://ホ".chars().count(),
+            });
+            state.command_modal.is_open = true;
+            state.command_modal.input = "PING".to_string();
+            state.command_modal.cursor = 2;
+
+            assert!(reduce(&mut state, Action::ConnectionFormPaste("名🔐".to_string())).is_empty());
+
+            let form = state.connection_form.as_ref().unwrap();
+            assert_eq!(form.dsn, "redis://ホ名🔐スト/0");
+            assert_eq!(form.cursor, "redis://ホ名🔐".chars().count());
+            assert!(form.read_only);
+            assert_eq!(state.dsn, "redis://localhost");
+            assert!(!state.read_only);
+            assert_eq!(state.command_modal.input, "PING");
+            assert_eq!(state.command_modal.cursor, 2);
+        }
+
+        #[test]
         fn connection_form_cursor_left_and_right_clamp_at_bounds() {
             let mut state = AppState::new("redis://localhost");
             state.connection_form = Some(ConnectionFormState {
@@ -2452,6 +2495,38 @@ mod tests {
                     },
                 ]
             );
+        }
+
+        #[test]
+        fn submit_db_selection_preserves_tls_and_encoded_credentials() {
+            let original = "rediss://app%40prod:p%40ss%2Fword@cache.example.amazonaws.com:6380/0";
+            let expected = "rediss://app%40prod:p%40ss%2Fword@cache.example.amazonaws.com:6380/3";
+            let mut state = AppState::new(original);
+            state.db_overlay = Some(DbOverlayState {
+                entries: vec![(0, Some(2)), (3, Some(5))],
+                selected: 1,
+                loading: false,
+                database_count_known: true,
+            });
+
+            let effects = reduce(&mut state, Action::SubmitDbSelection);
+
+            assert_eq!(state.dsn, expected);
+            assert_eq!(
+                effects,
+                vec![
+                    Effect::SelectDb { db: 3 },
+                    Effect::Connect {
+                        dsn: expected.to_string(),
+                        read_only: false,
+                    },
+                ]
+            );
+        }
+
+        #[test]
+        fn dsn_with_db_preserves_invalid_input() {
+            assert_eq!(dsn_with_db("not a Redis DSN", 3), "not a Redis DSN");
         }
 
         #[test]
