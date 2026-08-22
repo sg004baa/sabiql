@@ -48,6 +48,7 @@ tokio-util = "0.7"
 toml = "0.8"
 unicode-casefold = "0.2"
 unicode-width = "0.2"
+url = "2"
 urlencoding = "2"
 uuid = { version = "1", features = ["v4"] }
 
