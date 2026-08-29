@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher};
@@ -83,6 +83,27 @@ impl CommandModalState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ValueSelection {
+    pub row: usize,
+    pub column: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ValueEditTarget {
+    String { key: String },
+    List { key: String, index: usize },
+    Hash { key: String, field: String },
+    ZSet { key: String, member: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValueEditState {
+    pub input: String,
+    pub cursor: usize,
+    target: ValueEditTarget,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StatusMessage {
     Info(String),
@@ -134,6 +155,9 @@ pub struct AppState {
     pub table_visible_rows: usize,
     pub dbsize: Option<usize>,
     pub value_state: ValueState,
+    pub value_selection: Option<ValueSelection>,
+    pub value_edit: Option<ValueEditState>,
+    value_write_pending: Option<()>,
     pub command_modal: CommandModalState,
     pub db_overlay: Option<DbOverlayState>,
     pub confirm_state: Option<ConfirmState>,
@@ -165,6 +189,9 @@ impl AppState {
             table_visible_rows: DEFAULT_TABLE_VISIBLE_ROWS,
             dbsize: None,
             value_state: ValueState::Empty,
+            value_selection: None,
+            value_edit: None,
+            value_write_pending: None,
             command_modal: CommandModalState::new(),
             db_overlay: None,
             confirm_state: None,
@@ -193,6 +220,32 @@ pub enum Action {
     SelectPrev,
     ValueScrollDown,
     ValueScrollUp,
+    ActivateValue,
+    DeactivateValue,
+    ValueSelectNext,
+    ValueSelectPrev,
+    ValueSelectLeft,
+    ValueSelectRight,
+    YankSelected,
+    ClipboardSucceeded,
+    ClipboardFailed {
+        message: String,
+    },
+    OpenValueEditor,
+    RequestExternalValueEditor,
+    ExternalValueEditSucceeded {
+        content: String,
+    },
+    ExternalValueEditFailed {
+        message: String,
+    },
+    ValueEditInput(char),
+    ValueEditPaste(String),
+    ValueEditBackspace,
+    ValueEditCursorLeft,
+    ValueEditCursorRight,
+    SubmitValueEdit,
+    CancelValueEdit,
     Quit,
     Resize(u16, u16),
     OpenFilter,
@@ -284,6 +337,12 @@ pub enum Effect {
         headers: Vec<String>,
         rows: Vec<Vec<String>>,
     },
+    CopyToClipboard {
+        text: String,
+    },
+    OpenExternalValueEditor {
+        content: String,
+    },
 }
 
 pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
@@ -313,6 +372,8 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             state.scroll_offset = 0;
             state.value_scroll_offset = 0;
             state.value_state = ValueState::Empty;
+            state.value_selection = None;
+            state.value_edit = None;
             Vec::new()
         }
         Action::KeysScanned { keys } => {
@@ -370,6 +431,122 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             if matches!(state.value_state, ValueState::Loaded { .. }) {
                 state.value_scroll_offset = state.value_scroll_offset.saturating_sub(1);
             }
+            Vec::new()
+        }
+        Action::ActivateValue => {
+            let ValueState::Loaded { value, .. } = &state.value_state else {
+                return Vec::new();
+            };
+            let (rows, columns) = value_target_dimensions(value);
+            if rows == 0 || columns == 0 {
+                state.status_message = Some(StatusMessage::Info(
+                    "This value has no selectable cells.".to_string(),
+                ));
+                return Vec::new();
+            }
+            state.value_selection = Some(ValueSelection { row: 0, column: 0 });
+            state.value_scroll_offset = 0;
+            Vec::new()
+        }
+        Action::DeactivateValue => {
+            state.value_selection = None;
+            Vec::new()
+        }
+        Action::ValueSelectNext => {
+            move_value_selection(state, 1, 0);
+            Vec::new()
+        }
+        Action::ValueSelectPrev => {
+            move_value_selection(state, -1, 0);
+            Vec::new()
+        }
+        Action::ValueSelectLeft => {
+            move_value_selection(state, 0, -1);
+            Vec::new()
+        }
+        Action::ValueSelectRight => {
+            move_value_selection(state, 0, 1);
+            Vec::new()
+        }
+        Action::YankSelected => {
+            let text = if state.value_selection.is_some() {
+                selected_value_cell(state)
+            } else {
+                selected_key(state)
+            };
+            let Some(text) = text else {
+                state.status_message = Some(StatusMessage::Info(
+                    "Nothing is selected to copy.".to_string(),
+                ));
+                return Vec::new();
+            };
+            vec![Effect::CopyToClipboard { text }]
+        }
+        Action::ClipboardSucceeded => {
+            state.status_message = Some(StatusMessage::Success("Copied to clipboard.".to_string()));
+            Vec::new()
+        }
+        Action::ClipboardFailed { message } => {
+            state.status_message = Some(StatusMessage::Error(format!(
+                "Clipboard copy failed: {message}"
+            )));
+            Vec::new()
+        }
+        Action::OpenValueEditor => open_value_editor(state),
+        Action::RequestExternalValueEditor => request_external_value_editor(state),
+        Action::ExternalValueEditSucceeded { content } => {
+            if let Some(editor) = &mut state.value_edit {
+                editor.cursor = content.chars().count();
+                editor.input = content;
+                state.status_message = None;
+            }
+            Vec::new()
+        }
+        Action::ExternalValueEditFailed { message } => {
+            state.status_message = Some(StatusMessage::Error(format!(
+                "External editor failed: {message}"
+            )));
+            Vec::new()
+        }
+        Action::ValueEditInput(ch) => {
+            if let Some(editor) = &mut state.value_edit {
+                insert_value_edit_char(editor, ch);
+            }
+            Vec::new()
+        }
+        Action::ValueEditPaste(text) => {
+            if let Some(editor) = &mut state.value_edit {
+                insert_value_edit_text(editor, &text);
+            }
+            Vec::new()
+        }
+        Action::ValueEditBackspace => {
+            if let Some(editor) = &mut state.value_edit {
+                backspace_value_edit(editor);
+            }
+            Vec::new()
+        }
+        Action::ValueEditCursorLeft => {
+            if let Some(editor) = &mut state.value_edit {
+                let char_count = editor.input.chars().count();
+                editor.cursor = editor.cursor.min(char_count).saturating_sub(1);
+            }
+            Vec::new()
+        }
+        Action::ValueEditCursorRight => {
+            if let Some(editor) = &mut state.value_edit {
+                let char_count = editor.input.chars().count();
+                editor.cursor = editor
+                    .cursor
+                    .min(char_count)
+                    .saturating_add(1)
+                    .min(char_count);
+            }
+            Vec::new()
+        }
+        Action::SubmitValueEdit => submit_value_edit(state),
+        Action::CancelValueEdit => {
+            state.value_edit = None;
             Vec::new()
         }
         Action::Quit => {
@@ -439,6 +616,8 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
                 || state.connection_form.is_some()
                 || state.confirm_state.is_some()
                 || state.filter_active
+                || state.value_selection.is_some()
+                || state.value_edit.is_some()
             {
                 return Vec::new();
             }
@@ -525,6 +704,8 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
                 || state.db_overlay.is_some()
                 || state.confirm_state.is_some()
                 || state.connection_form.is_some()
+                || state.value_selection.is_some()
+                || state.value_edit.is_some()
             {
                 return Vec::new();
             }
@@ -746,12 +927,21 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             state.command_modal.input.clear();
             state.command_modal.cursor = 0;
             state.command_modal.status = CommandStatus::Success(output);
+            if state.value_write_pending.take().is_some() {
+                state.status_message =
+                    Some(StatusMessage::Success("Redis value updated.".to_string()));
+            }
             vec![Effect::Connect {
                 dsn: state.dsn.clone(),
                 read_only: state.read_only,
             }]
         }
         Action::CommandFailed { message } => {
+            if state.value_write_pending.take().is_some() {
+                state.status_message = Some(StatusMessage::Error(format!(
+                    "Redis value update failed: {message}"
+                )));
+            }
             state.command_modal.status = CommandStatus::Error(message);
             Vec::new()
         }
@@ -777,6 +967,8 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
                 value,
             };
             state.value_scroll_offset = 0;
+            state.value_selection = None;
+            state.value_edit = None;
             Vec::new()
         }
         Action::ValueFetchFailed { key, message } => {
@@ -785,6 +977,8 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             }
             state.value_scroll_offset = 0;
             state.value_state = ValueState::Failed { key, message };
+            state.value_selection = None;
+            state.value_edit = None;
             Vec::new()
         }
         Action::RequestExportCsv => {
@@ -810,6 +1004,7 @@ pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
         Action::ConfirmWrite => confirm_write(state),
         Action::CancelWrite => {
             state.confirm_state = None;
+            state.value_write_pending = None;
             state.command_modal.status = CommandStatus::Idle;
             Vec::new()
         }
@@ -826,10 +1021,17 @@ fn reset_for_connect(state: &mut AppState) {
     state.scroll_offset = 0;
     state.value_scroll_offset = 0;
     state.value_state = ValueState::Empty;
+    state.value_selection = None;
+    state.value_edit = None;
+    state.value_write_pending = None;
 }
 
 fn key_navigation_blocked(state: &AppState) -> bool {
-    state.db_overlay.is_some() || state.connection_form.is_some() || state.confirm_state.is_some()
+    state.db_overlay.is_some()
+        || state.connection_form.is_some()
+        || state.confirm_state.is_some()
+        || state.value_selection.is_some()
+        || state.value_edit.is_some()
 }
 
 fn overlay_or_modal_open(state: &AppState) -> bool {
@@ -837,6 +1039,8 @@ fn overlay_or_modal_open(state: &AppState) -> bool {
         || state.connection_form.is_some()
         || state.command_modal.is_open
         || state.confirm_state.is_some()
+        || state.value_selection.is_some()
+        || state.value_edit.is_some()
 }
 
 fn push_command_history(modal: &mut CommandModalState, command: &str) {
@@ -988,6 +1192,32 @@ fn byte_index_at_char(input: &str, char_index: usize) -> usize {
         .map_or(input.len(), |(index, _)| index)
 }
 
+fn insert_value_edit_char(editor: &mut ValueEditState, ch: char) {
+    let cursor = editor.cursor.min(editor.input.chars().count());
+    let byte_index = byte_index_at_char(&editor.input, cursor);
+    editor.input.insert(byte_index, ch);
+    editor.cursor = cursor + 1;
+}
+
+fn insert_value_edit_text(editor: &mut ValueEditState, text: &str) {
+    let cursor = editor.cursor.min(editor.input.chars().count());
+    let byte_index = byte_index_at_char(&editor.input, cursor);
+    editor.input.insert_str(byte_index, text);
+    editor.cursor = cursor + text.chars().count();
+}
+
+fn backspace_value_edit(editor: &mut ValueEditState) {
+    let cursor = editor.cursor.min(editor.input.chars().count());
+    if cursor == 0 {
+        editor.cursor = 0;
+        return;
+    }
+    let start = byte_index_at_char(&editor.input, cursor - 1);
+    let end = byte_index_at_char(&editor.input, cursor);
+    editor.input.replace_range(start..end, "");
+    editor.cursor = cursor - 1;
+}
+
 fn submit_connection_form(state: &mut AppState) -> Vec<Effect> {
     let Some(form) = state.connection_form.take() else {
         return Vec::new();
@@ -1055,6 +1285,247 @@ fn selected_key(state: &AppState) -> Option<String> {
         .map(|redis_key| redis_key.key.clone())
 }
 
+fn value_target_dimensions(value: &RedisValue) -> (usize, usize) {
+    match value {
+        RedisValue::String(_) => (1, 1),
+        RedisValue::List(rows) => (rows.len(), 2),
+        RedisValue::Set(rows) => (rows.len(), 1),
+        RedisValue::Hash(rows) | RedisValue::ZSet(rows) | RedisValue::Stream(rows) => {
+            (rows.len(), 2)
+        }
+    }
+}
+
+fn move_value_selection(state: &mut AppState, row_delta: isize, column_delta: isize) {
+    let (Some(mut selection), ValueState::Loaded { value, .. }) =
+        (state.value_selection, &state.value_state)
+    else {
+        return;
+    };
+    let (rows, columns) = value_target_dimensions(value);
+    if rows == 0 || columns == 0 {
+        state.value_selection = None;
+        return;
+    }
+
+    selection.row = if row_delta.is_negative() {
+        selection.row.saturating_sub(row_delta.unsigned_abs())
+    } else {
+        selection
+            .row
+            .saturating_add(row_delta as usize)
+            .min(rows - 1)
+    };
+    selection.column = if column_delta.is_negative() {
+        selection.column.saturating_sub(column_delta.unsigned_abs())
+    } else {
+        selection
+            .column
+            .saturating_add(column_delta as usize)
+            .min(columns - 1)
+    };
+    selection.row = selection.row.min(rows - 1);
+    selection.column = selection.column.min(columns - 1);
+    state.value_selection = Some(selection);
+
+    let visible_rows = state.table_visible_rows.max(1);
+    if selection.row < state.value_scroll_offset {
+        state.value_scroll_offset = selection.row;
+    } else if selection.row >= state.value_scroll_offset.saturating_add(visible_rows) {
+        state.value_scroll_offset = selection.row.saturating_sub(visible_rows - 1);
+    }
+}
+
+fn selected_value_cell(state: &AppState) -> Option<String> {
+    let selection = state.value_selection?;
+    let ValueState::Loaded { value, .. } = &state.value_state else {
+        return None;
+    };
+    match value {
+        RedisValue::String(value) if selection.row == 0 && selection.column == 0 => {
+            Some(value.clone())
+        }
+        RedisValue::List(values) => match selection.column {
+            0 => values.get(selection.row).map(|_| selection.row.to_string()),
+            1 => values.get(selection.row).cloned(),
+            _ => None,
+        },
+        RedisValue::Set(values) if selection.column == 0 => values.get(selection.row).cloned(),
+        RedisValue::String(_) | RedisValue::Set(_) => None,
+        RedisValue::Hash(entries) | RedisValue::ZSet(entries) | RedisValue::Stream(entries) => {
+            entries
+                .get(selection.row)
+                .and_then(|(left, right)| match selection.column {
+                    0 => Some(left.clone()),
+                    1 => Some(right.clone()),
+                    _ => None,
+                })
+        }
+    }
+}
+
+fn open_value_editor(state: &mut AppState) -> Vec<Effect> {
+    let Some(selection) = state.value_selection else {
+        return Vec::new();
+    };
+    let ValueState::Loaded { key, value, .. } = &state.value_state else {
+        return Vec::new();
+    };
+
+    let editable = match editable_value_target(key, value, selection) {
+        Ok(editable) => editable,
+        Err(message) => {
+            state.status_message = Some(StatusMessage::Info(message.to_string()));
+            return Vec::new();
+        }
+    };
+    let (target, input) = editable;
+    let cursor = input.chars().count();
+    state.value_edit = Some(ValueEditState {
+        input,
+        cursor,
+        target,
+    });
+    state.status_message = None;
+    Vec::new()
+}
+
+fn request_external_value_editor(state: &AppState) -> Vec<Effect> {
+    let Some(editor) = &state.value_edit else {
+        return Vec::new();
+    };
+
+    vec![Effect::OpenExternalValueEditor {
+        content: editor.input.clone(),
+    }]
+}
+
+fn editable_value_target(
+    key: &str,
+    value: &RedisValue,
+    selection: ValueSelection,
+) -> Result<(ValueEditTarget, String), &'static str> {
+    match value {
+        RedisValue::String(value) if selection.row == 0 && selection.column == 0 => Ok((
+            ValueEditTarget::String {
+                key: key.to_string(),
+            },
+            value.clone(),
+        )),
+        RedisValue::String(_) => Err("The selected string cell is unavailable."),
+        RedisValue::List(values) if selection.column == 1 => values
+            .get(selection.row)
+            .cloned()
+            .map(|value| {
+                (
+                    ValueEditTarget::List {
+                        key: key.to_string(),
+                        index: selection.row,
+                    },
+                    value,
+                )
+            })
+            .ok_or("The selected list item is unavailable."),
+        RedisValue::List(_) => Err("List indexes cannot be edited."),
+        RedisValue::Set(_) => {
+            Err("Set members cannot be edited safely because replacement is non-atomic.")
+        }
+        RedisValue::Hash(entries) if selection.column == 1 => entries
+            .get(selection.row)
+            .map(|(field, value)| {
+                (
+                    ValueEditTarget::Hash {
+                        key: key.to_string(),
+                        field: field.clone(),
+                    },
+                    value.clone(),
+                )
+            })
+            .ok_or("The selected hash value is unavailable."),
+        RedisValue::Hash(_) => Err("Hash fields cannot be edited."),
+        RedisValue::ZSet(entries) if selection.column == 1 => entries
+            .get(selection.row)
+            .map(|(member, score)| {
+                (
+                    ValueEditTarget::ZSet {
+                        key: key.to_string(),
+                        member: member.clone(),
+                    },
+                    score.clone(),
+                )
+            })
+            .ok_or("The selected sorted-set score is unavailable."),
+        RedisValue::ZSet(_) => Err("Sorted-set members cannot be edited."),
+        RedisValue::Stream(_) => Err("Stream entries are immutable and cannot be edited."),
+    }
+}
+
+fn submit_value_edit(state: &mut AppState) -> Vec<Effect> {
+    let Some(editor) = &state.value_edit else {
+        return Vec::new();
+    };
+    let command = value_edit_command(&editor.target, &editor.input);
+    let requires_confirmation = match command_requires_confirmation(&command, state.read_only) {
+        Ok(requires_confirmation) => requires_confirmation,
+        Err(error) => {
+            state.status_message = Some(StatusMessage::Error(error.to_string()));
+            return Vec::new();
+        }
+    };
+
+    state.value_edit = None;
+    state.value_write_pending = Some(());
+    if requires_confirmation {
+        state.confirm_state = Some(ConfirmState {
+            op: PendingWrite::Command { command },
+            prompt: "Update the selected Redis value?".to_string(),
+        });
+        Vec::new()
+    } else {
+        state.command_modal.status = CommandStatus::Running;
+        vec![Effect::ExecuteCommand { command }]
+    }
+}
+
+fn value_edit_command(target: &ValueEditTarget, value: &str) -> String {
+    let value = quote_redis_argument(value);
+    match target {
+        ValueEditTarget::String { key } => {
+            format!("SET {} {value}", quote_redis_argument(key))
+        }
+        ValueEditTarget::List { key, index } => {
+            format!("LSET {} {index} {value}", quote_redis_argument(key))
+        }
+        ValueEditTarget::Hash { key, field } => format!(
+            "HSET {} {} {value}",
+            quote_redis_argument(key),
+            quote_redis_argument(field)
+        ),
+        ValueEditTarget::ZSet { key, member } => format!(
+            "ZADD {} {value} {}",
+            quote_redis_argument(key),
+            quote_redis_argument(member)
+        ),
+    }
+}
+
+fn quote_redis_argument(value: &str) -> String {
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('"');
+    for ch in value.chars() {
+        match ch {
+            '\\' => quoted.push_str("\\\\"),
+            '"' => quoted.push_str("\\\""),
+            '\n' => quoted.push_str("\\n"),
+            '\t' => quoted.push_str("\\t"),
+            '\r' => quoted.push_str("\\r"),
+            _ => quoted.push(ch),
+        }
+    }
+    quoted.push('"');
+    quoted
+}
+
 fn confirm_write(state: &mut AppState) -> Vec<Effect> {
     let Some(confirm_state) = state.confirm_state.take() else {
         return Vec::new();
@@ -1062,8 +1533,14 @@ fn confirm_write(state: &mut AppState) -> Vec<Effect> {
     match confirm_state.op {
         PendingWrite::Command { command } => {
             if let Err(e) = command_requires_confirmation(&command, state.read_only) {
+                if state.value_write_pending.take().is_some() {
+                    state.status_message = Some(StatusMessage::Error(e.to_string()));
+                }
                 state.command_modal.status = CommandStatus::Error(e.to_string());
                 return Vec::new();
+            }
+            if state.value_write_pending.is_some() {
+                state.value_selection = None;
             }
             push_command_history(&mut state.command_modal, &command);
             state.command_modal.status = CommandStatus::Running;
@@ -1090,6 +1567,8 @@ fn line_count(value: &str) -> usize {
 
 fn fetch_selected_key(state: &mut AppState) -> Vec<Effect> {
     state.value_scroll_offset = 0;
+    state.value_selection = None;
+    state.value_edit = None;
     let Some(key) = selected_key(state) else {
         state.value_state = ValueState::Empty;
         return Vec::new();
@@ -1231,6 +1710,7 @@ pub struct EffectRunner {
     current_cli: RwLock<Arc<dyn RedisCli>>,
     factory: Arc<dyn RedisCliFactory>,
     action_tx: mpsc::Sender<Action>,
+    clipboard: Arc<Mutex<Option<arboard::Clipboard>>>,
 }
 
 impl EffectRunner {
@@ -1244,6 +1724,7 @@ impl EffectRunner {
             current_cli: RwLock::new(initial_cli),
             factory,
             action_tx,
+            clipboard: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -1318,6 +1799,37 @@ impl EffectRunner {
                         },
                     };
                     let _ = self.action_tx.send(action).await;
+                }
+                Effect::CopyToClipboard { text } => {
+                    let clipboard = Arc::clone(&self.clipboard);
+                    let result = tokio::task::spawn_blocking(move || {
+                        let mut owner = clipboard
+                            .lock()
+                            .map_err(|error| format!("clipboard lock poisoned: {error}"))?;
+                        if owner.is_none() {
+                            *owner =
+                                Some(arboard::Clipboard::new().map_err(|error| error.to_string())?);
+                        }
+                        owner
+                            .as_mut()
+                            .ok_or_else(|| {
+                                "clipboard owner unavailable after initialization".to_string()
+                            })?
+                            .set_text(text)
+                            .map_err(|error| error.to_string())
+                    })
+                    .await;
+                    let action = match result {
+                        Ok(Ok(())) => Action::ClipboardSucceeded,
+                        Ok(Err(message)) => Action::ClipboardFailed { message },
+                        Err(error) => Action::ClipboardFailed {
+                            message: error.to_string(),
+                        },
+                    };
+                    let _ = self.action_tx.send(action).await;
+                }
+                Effect::OpenExternalValueEditor { .. } => {
+                    unreachable!("external editor effects must be handled by the TUI owner")
                 }
             }
         }
@@ -2991,6 +3503,339 @@ mod tests {
                 ))
             );
         }
+
+        #[test]
+        fn value_selection_activates_navigates_with_bounds_and_deactivates() {
+            let mut state = AppState::new("redis://localhost");
+            state.value_state = ValueState::Loaded {
+                key: "items".to_string(),
+                kind: RedisKind::Hash,
+                ttl: None,
+                value: RedisValue::Hash(vec![
+                    ("a".to_string(), "one".to_string()),
+                    ("b".to_string(), "two".to_string()),
+                ]),
+            };
+
+            assert!(reduce(&mut state, Action::ActivateValue).is_empty());
+            assert_eq!(
+                state.value_selection,
+                Some(ValueSelection { row: 0, column: 0 })
+            );
+            reduce(&mut state, Action::ValueSelectRight);
+            reduce(&mut state, Action::ValueSelectRight);
+            reduce(&mut state, Action::ValueSelectNext);
+            reduce(&mut state, Action::ValueSelectNext);
+            assert_eq!(
+                state.value_selection,
+                Some(ValueSelection { row: 1, column: 1 })
+            );
+            reduce(&mut state, Action::DeactivateValue);
+            assert_eq!(state.value_selection, None);
+        }
+
+        #[test]
+        fn yank_uses_selected_key_or_table_value_cell() {
+            let mut state = AppState::new("redis://localhost");
+            set_keys(&mut state, vec![key("profile key")]);
+
+            assert_eq!(
+                reduce(&mut state, Action::YankSelected),
+                vec![Effect::CopyToClipboard {
+                    text: "profile key".to_string()
+                }]
+            );
+
+            state.value_state = ValueState::Loaded {
+                key: "profile key".to_string(),
+                kind: RedisKind::Hash,
+                ttl: None,
+                value: RedisValue::Hash(vec![("name".to_string(), "Ada Lovelace".to_string())]),
+            };
+            state.value_selection = Some(ValueSelection { row: 0, column: 1 });
+            assert_eq!(
+                reduce(&mut state, Action::YankSelected),
+                vec![Effect::CopyToClipboard {
+                    text: "Ada Lovelace".to_string()
+                }]
+            );
+
+            reduce(&mut state, Action::ClipboardSucceeded);
+            assert_eq!(
+                state.status_message,
+                Some(StatusMessage::Success("Copied to clipboard.".to_string()))
+            );
+            reduce(
+                &mut state,
+                Action::ClipboardFailed {
+                    message: "unavailable".to_string(),
+                },
+            );
+            assert_eq!(
+                state.status_message,
+                Some(StatusMessage::Error(
+                    "Clipboard copy failed: unavailable".to_string()
+                ))
+            );
+        }
+
+        #[test]
+        fn json_string_yank_uses_raw_value_while_display_remains_pretty() {
+            let mut state = AppState::new("redis://localhost");
+            let raw = r#"{"items":[1,2]}"#;
+            state.value_state = ValueState::Loaded {
+                key: "json".to_string(),
+                kind: RedisKind::String,
+                ttl: None,
+                value: RedisValue::String(raw.to_string()),
+            };
+            state.value_selection = Some(ValueSelection { row: 0, column: 0 });
+
+            assert_eq!(
+                redis_string_display_value(raw),
+                "{\n  \"items\": [\n    1,\n    2\n  ]\n}"
+            );
+            assert_eq!(
+                reduce(&mut state, Action::YankSelected),
+                vec![Effect::CopyToClipboard {
+                    text: raw.to_string()
+                }]
+            );
+        }
+
+        #[test]
+        fn unsupported_value_edit_targets_explain_why_without_writing() {
+            let mut state = AppState::new("redis://localhost");
+            state.value_state = ValueState::Loaded {
+                key: "members".to_string(),
+                kind: RedisKind::Set,
+                ttl: None,
+                value: RedisValue::Set(vec!["member".to_string()]),
+            };
+            state.value_selection = Some(ValueSelection { row: 0, column: 0 });
+
+            assert!(reduce(&mut state, Action::OpenValueEditor).is_empty());
+            assert!(state.value_edit.is_none());
+            assert_eq!(
+                state.status_message,
+                Some(StatusMessage::Info(
+                    "Set members cannot be edited safely because replacement is non-atomic."
+                        .to_string()
+                ))
+            );
+            assert!(state.confirm_state.is_none());
+        }
+
+        #[test]
+        fn value_edit_commands_quote_every_argument_and_supported_target() {
+            let unusual = "space \"quote\" \\\\ tab\tcr\rline\n";
+            assert_eq!(
+                value_edit_command(
+                    &ValueEditTarget::String {
+                        key: "string key".to_string()
+                    },
+                    unusual
+                ),
+                "SET \"string key\" \"space \\\"quote\\\" \\\\\\\\ tab\\tcr\\rline\\n\""
+            );
+            assert_eq!(
+                value_edit_command(
+                    &ValueEditTarget::List {
+                        key: "list key".to_string(),
+                        index: 2
+                    },
+                    "new value"
+                ),
+                "LSET \"list key\" 2 \"new value\""
+            );
+            assert_eq!(
+                value_edit_command(
+                    &ValueEditTarget::Hash {
+                        key: "hash key".to_string(),
+                        field: "field name".to_string()
+                    },
+                    "new value"
+                ),
+                "HSET \"hash key\" \"field name\" \"new value\""
+            );
+            assert_eq!(
+                value_edit_command(
+                    &ValueEditTarget::ZSet {
+                        key: "rank key".to_string(),
+                        member: "member name".to_string()
+                    },
+                    "4.25"
+                ),
+                "ZADD \"rank key\" \"4.25\" \"member name\""
+            );
+        }
+
+        #[test]
+        fn submitting_value_edit_uses_confirmation_pipeline() {
+            let mut state = AppState::new("redis://localhost");
+            state.value_edit = Some(ValueEditState {
+                input: "new value".to_string(),
+                cursor: 9,
+                target: ValueEditTarget::List {
+                    key: "items".to_string(),
+                    index: 3,
+                },
+            });
+
+            assert!(reduce(&mut state, Action::SubmitValueEdit).is_empty());
+            assert!(state.value_edit.is_none());
+            assert_eq!(
+                state.confirm_state,
+                Some(ConfirmState {
+                    op: PendingWrite::Command {
+                        command: "LSET \"items\" 3 \"new value\"".to_string()
+                    },
+                    prompt: "Update the selected Redis value?".to_string()
+                })
+            );
+            assert_eq!(
+                reduce(&mut state, Action::ConfirmWrite),
+                vec![Effect::ExecuteCommand {
+                    command: "LSET \"items\" 3 \"new value\"".to_string()
+                }]
+            );
+        }
+
+        #[test]
+        fn read_only_value_edit_keeps_editor_open_and_never_executes() {
+            let mut state = AppState::with_read_only("redis://localhost", true);
+            state.value_edit = Some(ValueEditState {
+                input: "new value".to_string(),
+                cursor: 9,
+                target: ValueEditTarget::String {
+                    key: "item".to_string(),
+                },
+            });
+
+            assert!(reduce(&mut state, Action::SubmitValueEdit).is_empty());
+            assert!(state.value_edit.is_some());
+            assert!(state.confirm_state.is_none());
+            assert!(matches!(
+                &state.status_message,
+                Some(StatusMessage::Error(message)) if message.contains("read-only")
+            ));
+        }
+
+        #[test]
+        fn value_editor_supports_cursor_input_paste_backspace_and_cancel() {
+            let mut state = AppState::new("redis://localhost");
+            state.value_edit = Some(ValueEditState {
+                input: "ac".to_string(),
+                cursor: 1,
+                target: ValueEditTarget::String {
+                    key: "item".to_string(),
+                },
+            });
+
+            reduce(&mut state, Action::ValueEditInput('b'));
+            reduce(&mut state, Action::ValueEditPaste("日".to_string()));
+            assert_eq!(state.value_edit.as_ref().unwrap().input, "ab日c");
+            reduce(&mut state, Action::ValueEditCursorLeft);
+            reduce(&mut state, Action::ValueEditBackspace);
+            assert_eq!(state.value_edit.as_ref().unwrap().input, "a日c");
+            reduce(&mut state, Action::CancelValueEdit);
+            assert!(state.value_edit.is_none());
+        }
+
+        #[test]
+        fn external_editor_request_without_inline_draft_has_no_effect() {
+            let mut state = AppState::new("redis://localhost");
+            state.value_state = ValueState::Loaded {
+                key: "item".to_string(),
+                kind: RedisKind::String,
+                ttl: None,
+                value: RedisValue::String("old value".to_string()),
+            };
+            state.value_selection = Some(ValueSelection { row: 0, column: 0 });
+
+            assert!(reduce(&mut state, Action::RequestExternalValueEditor).is_empty());
+            assert!(state.value_edit.is_none());
+            assert!(state.status_message.is_none());
+        }
+
+        #[test]
+        fn external_editor_request_uses_current_inline_draft() {
+            let mut state = AppState::new("redis://localhost");
+            state.value_edit = Some(ValueEditState {
+                input: "draft 日本語".to_string(),
+                cursor: 2,
+                target: ValueEditTarget::String {
+                    key: "item".to_string(),
+                },
+            });
+
+            assert_eq!(
+                reduce(&mut state, Action::RequestExternalValueEditor),
+                vec![Effect::OpenExternalValueEditor {
+                    content: "draft 日本語".to_string()
+                }]
+            );
+            assert_eq!(state.value_edit.as_ref().unwrap().cursor, 2);
+        }
+
+        #[test]
+        fn external_editor_success_replaces_draft_and_uses_character_cursor_end() {
+            let mut state = AppState::new("redis://localhost");
+            state.value_edit = Some(ValueEditState {
+                input: "old".to_string(),
+                cursor: 1,
+                target: ValueEditTarget::String {
+                    key: "item".to_string(),
+                },
+            });
+
+            assert!(
+                reduce(
+                    &mut state,
+                    Action::ExternalValueEditSucceeded {
+                        content: "新しい🦀値".to_string()
+                    }
+                )
+                .is_empty()
+            );
+
+            let editor = state.value_edit.as_ref().unwrap();
+            assert_eq!(editor.input, "新しい🦀値");
+            assert_eq!(editor.cursor, "新しい🦀値".chars().count());
+            assert!(state.confirm_state.is_none());
+        }
+
+        #[test]
+        fn external_editor_failure_preserves_inline_draft_and_reports_status() {
+            let mut state = AppState::new("redis://localhost");
+            state.value_edit = Some(ValueEditState {
+                input: "keep this".to_string(),
+                cursor: 4,
+                target: ValueEditTarget::String {
+                    key: "item".to_string(),
+                },
+            });
+
+            assert!(
+                reduce(
+                    &mut state,
+                    Action::ExternalValueEditFailed {
+                        message: "editor exited with status 1".to_string()
+                    }
+                )
+                .is_empty()
+            );
+
+            let editor = state.value_edit.as_ref().unwrap();
+            assert_eq!(editor.input, "keep this");
+            assert_eq!(editor.cursor, 4);
+            assert_eq!(
+                state.status_message,
+                Some(StatusMessage::Error(
+                    "External editor failed: editor exited with status 1".to_string()
+                ))
+            );
+        }
     }
 
     mod effect_runner {
@@ -3000,6 +3845,42 @@ mod tests {
             let mut factory = MockRedisCliFactory::new();
             factory.expect_create().never();
             EffectRunner::new(Arc::new(cli), Arc::new(factory), action_tx)
+        }
+
+        #[test]
+        fn runner_is_send_sync_and_creates_clipboard_lazily() {
+            fn assert_send_sync<T: Send + Sync>() {}
+
+            assert_send_sync::<EffectRunner>();
+            let (tx, _rx) = mpsc::channel(1);
+            let runner = runner_with_cli(MockRedisCli::new(), tx);
+            assert!(runner.clipboard.lock().unwrap().is_none());
+        }
+
+        #[tokio::test]
+        async fn poisoned_clipboard_lock_dispatches_failure_instead_of_panicking() {
+            let (tx, mut rx) = mpsc::channel(1);
+            let runner = runner_with_cli(MockRedisCli::new(), tx);
+            let clipboard = Arc::clone(&runner.clipboard);
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _guard = clipboard.lock().unwrap();
+                panic!("poison clipboard lock");
+            }));
+
+            runner
+                .run(vec![Effect::CopyToClipboard {
+                    text: "value".to_string(),
+                }])
+                .await;
+
+            let action = tokio::time::timeout(Duration::from_millis(500), rx.recv())
+                .await
+                .expect("action timeout")
+                .expect("channel closed");
+            let Action::ClipboardFailed { message } = action else {
+                panic!("expected clipboard failure action");
+            };
+            assert!(message.contains("clipboard lock poisoned"));
         }
 
         #[tokio::test]

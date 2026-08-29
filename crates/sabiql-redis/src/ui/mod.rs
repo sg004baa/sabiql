@@ -1,8 +1,8 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Cell, Clear, Paragraph, Wrap};
+use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Wrap};
 use sabiql_tui_kit::primitives::atoms::text_cursor_spans;
 use sabiql_tui_kit::primitives::molecules::{
     StripedTableConfig, hint_line, render_modal, render_striped_table,
@@ -11,7 +11,7 @@ use sabiql_tui_kit::theme::{DEFAULT_THEME, StatusTone};
 
 use crate::app::{
     AppState, CommandStatus, ConfirmState, ConnectionFormState, ConnectionStatus, DbOverlayState,
-    StatusMessage, ValueState,
+    StatusMessage, ValueEditState, ValueState,
 };
 use crate::domain::{RedisValue, redis_string_display_value, redis_value_table};
 
@@ -26,17 +26,18 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
         Constraint::Length(1),
     ])
     .split(area);
-    let body = Layout::horizontal([
-        Constraint::Min(40),
-        Constraint::Length(1),
-        Constraint::Length(VALUE_PANE_WIDTH),
-    ])
-    .split(vertical[1]);
+    let body = Layout::horizontal([Constraint::Min(40), Constraint::Length(VALUE_PANE_WIDTH)])
+        .split(vertical[1]);
+    let key_area = Rect {
+        width: body[0].width.saturating_add(u16::from(body[1].width > 0)),
+        ..body[0]
+    };
+    let value_area = body[1];
 
     render_status(frame, vertical[0], state);
-    render_keys(frame, body[0], state);
-    render_body_divider(frame, body[1]);
-    render_value_pane(frame, body[2], state);
+    let (key_inner, value_inner) = render_pane_borders(frame, key_area, value_area, state);
+    render_keys(frame, key_inner, state);
+    render_value_pane(frame, value_inner, state);
     render_footer(frame, vertical[2], state);
     if state.command_modal.is_open {
         render_command_modal(frame, state);
@@ -46,6 +47,9 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
     }
     if let Some(form) = &state.connection_form {
         render_connection_form(frame, form);
+    }
+    if let Some(editor) = &state.value_edit {
+        render_value_edit_modal(frame, editor);
     }
     if let Some(confirm_state) = &state.confirm_state {
         render_confirm_dialog(frame, confirm_state);
@@ -170,74 +174,114 @@ fn render_keys(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     );
 }
 
-fn render_body_divider(frame: &mut Frame<'_>, area: Rect) {
+fn render_pane_borders(
+    frame: &mut Frame<'_>,
+    key_area: Rect,
+    value_area: Rect,
+    state: &AppState,
+) -> (Rect, Rect) {
     let theme = DEFAULT_THEME;
-    let divider = (0..area.height).map(|_| "│").collect::<Vec<_>>().join("\n");
-    frame.render_widget(
-        Paragraph::new(divider).style(Style::default().fg(theme.semantic.surface.unfocus_border)),
-        area,
-    );
+    let value_active = state.value_selection.is_some();
+    let key_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme.panel_border_style(!value_active, false));
+    let value_block = Block::default()
+        .title(value_pane_title(state))
+        .borders(Borders::ALL)
+        .border_style(theme.panel_border_style(value_active, false));
+    let key_inner = key_block.inner(key_area);
+    let value_inner = value_block.inner(value_area);
+
+    if value_active {
+        frame.render_widget(key_block, key_area);
+        frame.render_widget(value_block, value_area);
+    } else {
+        frame.render_widget(value_block, value_area);
+        frame.render_widget(key_block, key_area);
+    }
+
+    if value_area.width > 0 && value_area.height > 0 {
+        let separator_style = theme.panel_border_style(true, false);
+        let top_joint = Rect::new(value_area.x, value_area.y, 1, 1);
+        frame.render_widget(Paragraph::new("┬").style(separator_style), top_joint);
+        if value_area.height > 1 {
+            let bottom_joint = Rect::new(
+                value_area.x,
+                value_area.y.saturating_add(value_area.height - 1),
+                1,
+                1,
+            );
+            frame.render_widget(Paragraph::new("┴").style(separator_style), bottom_joint);
+        }
+    }
+
+    (key_inner, value_inner)
+}
+
+fn value_pane_title(state: &AppState) -> String {
+    match &state.value_state {
+        ValueState::Empty => "value | no key selected".to_string(),
+        ValueState::Loading { key } => format!("value | {key} | loading"),
+        ValueState::Failed { key, .. } => format!("value | {key} | failed"),
+        ValueState::Loaded { key, kind, ttl, .. } => {
+            format!("value | {key} | type {kind} | {}", ttl_label(*ttl))
+        }
+    }
 }
 
 fn render_value_pane(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
-    let chunks = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(area);
     match &state.value_state {
         ValueState::Empty => {
-            render_value_title(frame, chunks[0], "value | no key selected");
-            frame.render_widget(Paragraph::new("No key selected"), chunks[1]);
+            frame.render_widget(Paragraph::new("No key selected"), area);
         }
-        ValueState::Loading { key } => {
-            render_value_title(frame, chunks[0], &format!("value | {key} | loading"));
-            frame.render_widget(Paragraph::new("Loading..."), chunks[1]);
+        ValueState::Loading { .. } => {
+            frame.render_widget(Paragraph::new("Loading..."), area);
         }
-        ValueState::Failed { key, message } => {
-            render_value_title(frame, chunks[0], &format!("value | {key} | failed"));
+        ValueState::Failed { message, .. } => {
             frame.render_widget(
                 Paragraph::new(message.clone())
                     .style(DEFAULT_THEME.status_style(StatusTone::Error)),
-                chunks[1],
+                area,
             );
         }
-        ValueState::Loaded {
-            key,
-            kind,
-            ttl,
-            value,
-        } => {
-            render_value_title(
-                frame,
-                chunks[0],
-                &format!("value | {key} | type {kind} | {}", ttl_label(*ttl)),
-            );
+        ValueState::Loaded { value, .. } => {
+            let active = state.value_selection.is_some();
             match value {
                 RedisValue::String(value) => {
-                    render_value_string(frame, chunks[1], value, state.value_scroll_offset);
+                    render_value_string(frame, area, value, state.value_scroll_offset, active);
                 }
                 RedisValue::List(_)
                 | RedisValue::Set(_)
                 | RedisValue::Hash(_)
                 | RedisValue::ZSet(_)
                 | RedisValue::Stream(_) => {
-                    render_value_table(frame, chunks[1], value, state.value_scroll_offset);
+                    render_value_table(
+                        frame,
+                        area,
+                        value,
+                        state.value_scroll_offset,
+                        state.value_selection,
+                    );
                 }
             }
         }
     }
 }
 
-fn render_value_title(frame: &mut Frame<'_>, area: Rect, title: &str) {
-    let theme = DEFAULT_THEME;
-    frame.render_widget(
-        Paragraph::new(Line::from(title.to_string()))
-            .style(Style::default().fg(theme.semantic.text.secondary)),
-        area,
-    );
-}
-
-fn render_value_table(frame: &mut Frame<'_>, area: Rect, value: &RedisValue, offset: usize) {
+fn render_value_table(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    value: &RedisValue,
+    offset: usize,
+    selection: Option<crate::app::ValueSelection>,
+) {
     let theme = DEFAULT_THEME;
     let table = redis_value_table(value);
     let widths = value_widths(table.headers.len());
+    let selected_style = Style::default()
+        .bg(theme.component.table.result_cell_active_bg)
+        .fg(theme.semantic.text.primary)
+        .add_modifier(Modifier::BOLD);
 
     render_striped_table(
         frame,
@@ -255,18 +299,42 @@ fn render_value_table(frame: &mut Frame<'_>, area: Rect, value: &RedisValue, off
         |index| {
             table.rows[index]
                 .iter()
-                .map(|value| Cell::from(value.clone()))
+                .enumerate()
+                .map(|(column, value)| {
+                    let cell = Cell::from(value.clone());
+                    if selection
+                        .is_some_and(|selected| selected.row == index && selected.column == column)
+                    {
+                        cell.style(selected_style)
+                    } else {
+                        cell
+                    }
+                })
                 .collect()
         },
     );
 }
 
-fn render_value_string(frame: &mut Frame<'_>, area: Rect, value: &str, offset: usize) {
+fn render_value_string(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    value: &str,
+    offset: usize,
+    active: bool,
+) {
     let theme = DEFAULT_THEME;
     let scroll_offset = u16::try_from(offset).unwrap_or(u16::MAX);
+    let style = if active {
+        Style::default()
+            .bg(theme.component.table.result_cell_active_bg)
+            .fg(theme.semantic.text.primary)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.semantic.text.primary)
+    };
+    let text = Text::styled(redis_string_display_value(value), style);
     frame.render_widget(
-        Paragraph::new(redis_string_display_value(value))
-            .style(Style::default().fg(theme.semantic.text.primary))
+        Paragraph::new(text)
             .wrap(Wrap { trim: false })
             .scroll((scroll_offset, 0)),
         area,
@@ -332,15 +400,27 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     if state.read_only {
         hints.push(("[READ-ONLY]", "writes blocked"));
     }
-    hints.extend([
-        ("j/k", "navigate"),
-        ("/", "search"),
-        (":", "command"),
-        ("c", "connect"),
-        ("r", "reload"),
-        ("e", "export"),
-        ("q", "quit"),
-    ]);
+    if state.value_selection.is_some() {
+        hints.extend([
+            ("Esc", "keys"),
+            ("j/k", "row"),
+            ("h/l", "cell"),
+            ("y", "copy"),
+            ("e", "edit"),
+        ]);
+    } else {
+        hints.extend([
+            ("j/k", "navigate"),
+            ("Enter", "value"),
+            ("y", "copy key"),
+            ("/", "search"),
+            (":", "command"),
+            ("c", "connect"),
+            ("r", "reload"),
+            ("e", "export"),
+            ("q", "quit"),
+        ]);
+    }
     frame.render_widget(
         Paragraph::new(hint_line(&hints, &theme))
             .style(Style::default().fg(theme.semantic.text.muted)),
@@ -652,6 +732,49 @@ fn render_command_output(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     );
 }
 
+fn render_value_edit_modal(frame: &mut Frame<'_>, editor: &ValueEditState) {
+    let theme = DEFAULT_THEME;
+    let (_, inner) = render_modal(
+        frame,
+        Constraint::Percentage(80),
+        Constraint::Length(5),
+        "Edit Redis Value",
+        " Enter:update  ^E:$EDITOR  Esc:cancel ",
+        &theme,
+    );
+    let char_boundaries = editor
+        .input
+        .char_indices()
+        .map(|(byte_index, _)| byte_index)
+        .chain(std::iter::once(editor.input.len()))
+        .collect::<Vec<_>>();
+    let total_chars = char_boundaries.len().saturating_sub(1);
+    let cursor = editor.cursor.min(total_chars);
+    let visible_width = inner.width.saturating_sub(1) as usize;
+    let max_cursor_width = visible_width.saturating_sub(1);
+    let mut viewport = cursor.saturating_sub(max_cursor_width);
+    while viewport < cursor
+        && Line::from(&editor.input[char_boundaries[viewport]..char_boundaries[cursor]]).width()
+            > max_cursor_width
+    {
+        viewport += 1;
+    }
+    let view_end = viewport.saturating_add(visible_width).min(total_chars);
+    let visible_draft = &editor.input[char_boundaries[viewport]..char_boundaries[view_end]];
+    let cursor_width =
+        Line::from(&editor.input[char_boundaries[viewport]..char_boundaries[cursor]]).width();
+
+    frame.render_widget(
+        Paragraph::new(visible_draft)
+            .style(Style::default().fg(theme.semantic.text.primary))
+            .wrap(Wrap { trim: false }),
+        inner,
+    );
+    if inner.width > 0 && inner.height > 0 {
+        frame.set_cursor_position((inner.x + cursor_width as u16, inner.y));
+    }
+}
+
 fn render_confirm_dialog(frame: &mut Frame<'_>, confirm_state: &ConfirmState) {
     let theme = DEFAULT_THEME;
     let (_, inner) = render_modal(
@@ -685,8 +808,9 @@ fn render_confirm_dialog(frame: &mut Frame<'_>, confirm_state: &ConfirmState) {
 mod tests {
     use super::*;
     use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
+    use ratatui::backend::{Backend, TestBackend};
     use ratatui::buffer::Buffer;
+    use ratatui::layout::Position;
     use ratatui::style::Modifier;
 
     fn render_to_string(state: &AppState) -> String {
@@ -702,6 +826,32 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| render(frame, state)).unwrap();
         terminal.backend().buffer().clone()
+    }
+
+    fn render_buffer_and_cursor_with_size(
+        state: &AppState,
+        width: u16,
+        height: u16,
+    ) -> (Buffer, Position) {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, state)).unwrap();
+        let cursor = terminal.backend_mut().get_cursor_position().unwrap();
+        (terminal.backend().buffer().clone(), cursor)
+    }
+
+    fn state_with_value_edit(input: &str, cursor: usize) -> AppState {
+        let mut state = AppState::new("redis://localhost");
+        state.value_state = ValueState::Loaded {
+            key: "item".to_string(),
+            kind: crate::domain::RedisKind::String,
+            ttl: None,
+            value: RedisValue::String(input.to_string()),
+        };
+        state.value_selection = Some(crate::app::ValueSelection { row: 0, column: 0 });
+        crate::app::reduce(&mut state, crate::app::Action::OpenValueEditor);
+        state.value_edit.as_mut().unwrap().cursor = cursor;
+        state
     }
 
     fn buffer_to_string(buffer: &Buffer) -> String {
@@ -771,18 +921,48 @@ mod tests {
     }
 
     #[test]
-    fn body_renders_vertical_divider_between_keys_and_value() {
-        let state = AppState::new("redis://localhost");
+    fn pane_borders_swap_focus_color_without_doubling_center_separator() {
         let width = 160;
         let height = 12;
-        let divider_x = (width - VALUE_PANE_WIDTH - 1) as usize;
+        let center_x = width - VALUE_PANE_WIDTH;
+        let body_y = 5;
+        let focus = DEFAULT_THEME.semantic.surface.focus_border;
+        let unfocus = DEFAULT_THEME.semantic.surface.unfocus_border;
 
-        let rendered = render_to_string_with_size(&state, width, height);
-        let lines = rendered.lines().collect::<Vec<_>>();
+        let keys_active =
+            render_buffer_with_size(&AppState::new("redis://localhost"), width, height);
+        assert_eq!(keys_active.cell((0, body_y)).unwrap().fg, focus);
+        assert_eq!(keys_active.cell((width - 1, body_y)).unwrap().fg, unfocus);
+        assert_eq!(keys_active.cell((center_x, body_y)).unwrap().symbol(), "│");
+        assert_ne!(
+            keys_active.cell((center_x - 1, body_y)).unwrap().symbol(),
+            "│"
+        );
+        assert_ne!(
+            keys_active.cell((center_x + 1, body_y)).unwrap().symbol(),
+            "│"
+        );
+        assert!(
+            !keys_active
+                .cell((0, body_y))
+                .unwrap()
+                .modifier
+                .contains(Modifier::BOLD)
+        );
 
-        for line in &lines[1..height as usize - 1] {
-            assert_eq!(line.chars().nth(divider_x), Some('│'));
-        }
+        let mut value_active = AppState::new("redis://localhost");
+        value_active.value_selection = Some(crate::app::ValueSelection { row: 0, column: 0 });
+        let value_active = render_buffer_with_size(&value_active, width, height);
+        assert_eq!(value_active.cell((0, body_y)).unwrap().fg, unfocus);
+        assert_eq!(value_active.cell((width - 1, body_y)).unwrap().fg, focus);
+        assert_eq!(value_active.cell((center_x, body_y)).unwrap().fg, focus);
+        assert!(
+            !value_active
+                .cell((width - 1, body_y))
+                .unwrap()
+                .modifier
+                .contains(Modifier::BOLD)
+        );
     }
 
     #[test]
@@ -796,16 +976,16 @@ mod tests {
         let rendered = render_to_string_with_size(&state, width, height);
         let lines = rendered.lines().collect::<Vec<_>>();
 
-        assert_eq!(lines[1].chars().next(), Some(' '));
-        assert!(lines[1].contains("key"));
-        assert!(lines[1].contains("type"));
-        assert_eq!(lines[2].chars().next(), Some(' '));
+        assert_eq!(lines[2].chars().next(), Some('│'));
+        assert!(lines[2].contains("key"));
+        assert!(lines[2].contains("type"));
+        assert_eq!(lines[3].chars().next(), Some('│'));
         assert_eq!(
-            lines[2].chars().nth(KEY_PANE_LEFT_PADDING as usize),
+            lines[3].chars().nth((1 + KEY_PANE_LEFT_PADDING) as usize),
             Some('─')
         );
-        assert!(!lines[2].contains("user:1"));
-        assert!(lines[3].contains("user:1"));
+        assert!(!lines[3].contains("user:1"));
+        assert!(lines[4].contains("user:1"));
     }
 
     #[test]
@@ -816,14 +996,14 @@ mod tests {
 
         let buffer = render_buffer_with_size(&state, 160, 12);
         let rendered = buffer_to_string(&buffer);
-        let header = rendered.lines().nth(1).unwrap_or_default();
-        let separator = rendered.lines().nth(2).unwrap_or_default();
+        let header = rendered.lines().nth(2).unwrap_or_default();
+        let separator = rendered.lines().nth(3).unwrap_or_default();
         let type_start = header.find("type").unwrap();
         let type_end = type_start + "type".len();
 
         assert_eq!(separator.chars().nth(type_start), Some('─'));
         for x in type_start..type_end {
-            let cell = buffer.cell((x as u16, 1)).unwrap();
+            let cell = buffer.cell((x as u16, 2)).unwrap();
             assert!(!cell.modifier.contains(Modifier::UNDERLINED));
         }
     }
@@ -1037,5 +1217,154 @@ mod tests {
         let rendered = render_to_string_with_size(&state, 220, 12);
 
         assert!(rendered.contains(&long_key));
+    }
+
+    #[test]
+    fn active_value_title_omits_active_label_and_footer_advertises_inline_edit_only() {
+        let mut state = AppState::new("redis://localhost");
+        state.value_state = ValueState::Loaded {
+            key: "profile".to_string(),
+            kind: crate::domain::RedisKind::Hash,
+            ttl: None,
+            value: RedisValue::Hash(vec![("name".to_string(), "Ada".to_string())]),
+        };
+        state.value_selection = Some(crate::app::ValueSelection { row: 0, column: 1 });
+
+        let rendered = render_to_string_with_size(&state, 160, 12);
+
+        assert!(rendered.contains("type hash | no expiry"));
+        assert!(!rendered.contains("no expiry | active"));
+        let footer = rendered.lines().last().unwrap_or_default();
+        assert!(footer.contains("Esc"));
+        assert!(footer.contains("h/l"));
+        assert!(footer.contains("copy"));
+        assert!(footer.contains("edit"));
+        assert!(!footer.contains("^E"));
+        assert!(!footer.contains("$EDITOR"));
+        assert!(!footer.contains("export"));
+    }
+
+    #[test]
+    fn selected_value_cell_uses_active_table_style() {
+        let mut state = AppState::new("redis://localhost");
+        state.value_state = ValueState::Loaded {
+            key: "profile".to_string(),
+            kind: crate::domain::RedisKind::Hash,
+            ttl: None,
+            value: RedisValue::Hash(vec![("name".to_string(), "Ada".to_string())]),
+        };
+        state.value_selection = Some(crate::app::ValueSelection { row: 0, column: 1 });
+
+        let buffer = render_buffer_with_size(&state, 160, 12);
+        let active_bg = DEFAULT_THEME.component.table.result_cell_active_bg;
+
+        let has_selected_cell = (0..buffer.area.height).any(|y| {
+            (0..buffer.area.width).any(|x| {
+                buffer
+                    .cell((x, y))
+                    .is_some_and(|cell| !cell.symbol().trim().is_empty() && cell.bg == active_bg)
+            })
+        });
+        assert!(has_selected_cell);
+    }
+
+    #[test]
+    fn selected_string_highlights_content_without_filling_value_area() {
+        let backend = TestBackend::new(12, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                render_value_string(frame, area, "selected", 0, true);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let active_bg = DEFAULT_THEME.component.table.result_cell_active_bg;
+
+        let content_cell = buffer.cell((0, 0)).unwrap();
+        assert_eq!(content_cell.symbol(), "s");
+        assert_eq!(content_cell.bg, active_bg);
+        assert_eq!(content_cell.fg, DEFAULT_THEME.semantic.text.primary);
+        assert!(content_cell.modifier.contains(Modifier::BOLD));
+
+        let trailing_cell = buffer.cell((8, 0)).unwrap();
+        assert_eq!(trailing_cell.symbol(), " ");
+        assert_ne!(trailing_cell.bg, active_bg);
+
+        let lower_cell = buffer.cell((0, 1)).unwrap();
+        assert_eq!(lower_cell.symbol(), " ");
+        assert_ne!(lower_cell.bg, active_bg);
+    }
+
+    #[test]
+    fn value_edit_modal_renders_input_and_editor_submit_cancel_hints() {
+        let mut state = AppState::new("redis://localhost");
+        state.value_state = ValueState::Loaded {
+            key: "item".to_string(),
+            kind: crate::domain::RedisKind::String,
+            ttl: None,
+            value: RedisValue::String("old value".to_string()),
+        };
+        state.value_selection = Some(crate::app::ValueSelection { row: 0, column: 0 });
+        crate::app::reduce(&mut state, crate::app::Action::OpenValueEditor);
+
+        let rendered = render_to_string_with_size(&state, 160, 12);
+
+        assert!(rendered.contains("Edit Redis Value"));
+        assert!(rendered.contains("old value"));
+        assert!(rendered.contains("Enter:update"));
+        assert!(rendered.contains("^E:$EDITOR"));
+        assert!(rendered.contains("Esc:cancel"));
+    }
+
+    #[test]
+    fn value_edit_modal_places_real_cursor_at_middle_without_highlighting_draft() {
+        let state = state_with_value_edit("abcd", 2);
+        let (buffer, cursor) = render_buffer_and_cursor_with_size(&state, 80, 12);
+        let draft_start = (0..buffer.area.width)
+            .find(|&x| buffer.cell((x, cursor.y)).unwrap().symbol() == "a")
+            .unwrap();
+
+        assert_eq!(cursor.x, draft_start + 2);
+        for (offset, symbol) in ["a", "b", "c", "d"].into_iter().enumerate() {
+            let cell = buffer
+                .cell((draft_start + offset as u16, cursor.y))
+                .unwrap();
+            assert_eq!(cell.symbol(), symbol);
+            assert_ne!(cell.bg, DEFAULT_THEME.semantic.cursor.bg);
+        }
+    }
+
+    #[test]
+    fn value_edit_modal_keeps_end_cursor_visible_after_horizontal_scroll() {
+        let input = "0123456789".repeat(8);
+        let state = state_with_value_edit(&input, input.chars().count());
+        let (buffer, cursor) = render_buffer_and_cursor_with_size(&state, 40, 12);
+
+        assert!(cursor.x < buffer.area.width);
+        assert_eq!(buffer.cell((cursor.x - 1, cursor.y)).unwrap().symbol(), "9");
+        assert_ne!(
+            buffer.cell((cursor.x - 1, cursor.y)).unwrap().bg,
+            DEFAULT_THEME.semantic.cursor.bg
+        );
+    }
+
+    #[test]
+    fn value_edit_modal_cursor_uses_unicode_display_width_and_character_index() {
+        let state = state_with_value_edit("a界b", 2);
+        let (buffer, cursor) = render_buffer_and_cursor_with_size(&state, 80, 12);
+        let draft_start = (0..buffer.area.width)
+            .find(|&x| buffer.cell((x, cursor.y)).unwrap().symbol() == "a")
+            .unwrap();
+
+        assert_eq!(
+            buffer.cell((draft_start + 1, cursor.y)).unwrap().symbol(),
+            "界"
+        );
+        assert_eq!(
+            buffer.cell((draft_start + 3, cursor.y)).unwrap().symbol(),
+            "b"
+        );
+        assert_eq!(cursor.x, draft_start + 3);
     }
 }
