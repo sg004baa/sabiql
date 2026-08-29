@@ -2854,6 +2854,7 @@ dependencies = [
 name = "sabiql-redis"
 version = "1.16.0"
 dependencies = [
+ "arboard",
  "async-trait",
  "clap",
  "color-eyre",
