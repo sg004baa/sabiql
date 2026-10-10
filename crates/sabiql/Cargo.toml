@@ -1,0 +1,42 @@
+[package]
+name = "sabiql"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Fast, safe-by-design, Vim-first DB TUI with ER diagrams"
+license.workspace = true
+repository.workspace = true
+homepage = "https://github.com/riii111/sabiql"
+readme = "../../README.md"
+keywords = ["postgresql", "mysql", "sqlite", "tui", "database"]
+categories = ["command-line-utilities", "database"]
+
+[dependencies]
+crossterm.workspace = true
+tokio.workspace = true
+color-eyre.workspace = true
+clap.workspace = true
+dotenvy.workspace = true
+self_update = { workspace = true, optional = true }
+sabiql-app.workspace = true
+sabiql-domain.workspace = true
+sabiql-infra.workspace = true
+sabiql-ui.workspace = true
+
+[features]
+default = []
+self-update = ["dep:self_update"]
+
+[dev-dependencies]
+sabiql-domain.workspace = true
+sabiql-app = { workspace = true, features = ["test-support"] }
+sabiql-infra = { workspace = true, features = ["test-support"] }
+sabiql-ui = { workspace = true, features = ["test-support"] }
+ratatui.workspace = true
+insta.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true
+

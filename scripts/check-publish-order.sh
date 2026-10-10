@@ -3,7 +3,7 @@
 set -euo pipefail
 
 repo_root="$(cd -- "$(dirname -- "$0")/.." && pwd)"
-publish_order=(src/domain src/app src/infra src/ui .)
+publish_order=(crates/domain crates/app crates/infra crates/ui .)
 metadata=$(cargo metadata --no-deps --format-version 1)
 
 listed_package_file=$(mktemp)
