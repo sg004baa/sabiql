@@ -2,18 +2,11 @@ use super::column::Column;
 use super::foreign_key::ForeignKey;
 use super::index::Index;
 use super::rls::RlsInfo;
+use super::table_kind::TableKindInfo;
 use super::trigger::Trigger;
 
 fn make_qualified_name(schema: &str, name: &str) -> String {
     format!("{schema}.{name}")
-}
-
-fn make_display_name(schema: &str, name: &str, omit_public: bool) -> String {
-    if omit_public && schema == "public" {
-        name.to_string()
-    } else {
-        make_qualified_name(schema, name)
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -29,6 +22,17 @@ pub struct Table {
     pub triggers: Vec<Trigger>,
     pub row_count_estimate: Option<i64>,
     pub comment: Option<String>,
+    pub source_ddl: Option<String>,
+    pub storage_attributes: TableStorageAttributes,
+    pub kind_info: TableKindInfo,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TableStorageAttributes {
+    pub engine: Option<String>,
+    pub row_format: Option<String>,
+    pub table_collation: Option<String>,
+    pub create_options: Option<String>,
 }
 
 impl Table {
@@ -36,8 +40,14 @@ impl Table {
         make_qualified_name(&self.schema, &self.name)
     }
 
-    pub fn display_name(&self, omit_public: bool) -> String {
-        make_display_name(&self.schema, &self.name, omit_public)
+    pub fn source_ddl(&self) -> Option<&str> {
+        self.source_ddl.as_deref()
+    }
+
+    pub fn has_primary_key(&self) -> bool {
+        self.primary_key
+            .as_ref()
+            .is_some_and(|columns| !columns.is_empty())
     }
 }
 
@@ -47,6 +57,7 @@ pub struct TableSummary {
     pub name: String,
     pub row_count_estimate: Option<i64>,
     pub has_rls: bool,
+    pub kind_info: TableKindInfo,
     // Pre-computed for efficient case-insensitive filtering
     qualified_name_lower: String,
 }
@@ -64,6 +75,12 @@ impl TableSignature {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct TableSignatureSnapshot {
+    pub signatures: Vec<TableSignature>,
+    pub prefetched_table_details: Vec<Table>,
+}
+
 impl TableSummary {
     pub fn new(
         schema: String,
@@ -77,8 +94,15 @@ impl TableSummary {
             name,
             row_count_estimate,
             has_rls,
+            kind_info: TableKindInfo::default(),
             qualified_name_lower,
         }
+    }
+
+    #[must_use]
+    pub fn with_kind_info(mut self, kind_info: TableKindInfo) -> Self {
+        self.kind_info = kind_info;
+        self
     }
 
     pub fn qualified_name(&self) -> String {
@@ -87,10 +111,6 @@ impl TableSummary {
 
     pub fn qualified_name_lower(&self) -> &str {
         &self.qualified_name_lower
-    }
-
-    pub fn display_name(&self, omit_public: bool) -> String {
-        make_display_name(&self.schema, &self.name, omit_public)
     }
 }
 
@@ -111,6 +131,9 @@ mod tests {
             triggers: Vec::new(),
             row_count_estimate: None,
             comment: None,
+            source_ddl: None,
+            storage_attributes: TableStorageAttributes::default(),
+            kind_info: TableKindInfo::default(),
         }
     }
 
@@ -129,40 +152,28 @@ mod tests {
         }
     }
 
-    mod display_name {
+    mod primary_key {
         use super::*;
 
         #[test]
-        fn omit_public_true_returns_name_only() {
-            let table = make_table("public", "users");
+        fn is_present_when_columns_are_defined() {
+            let mut table = make_table("public", "users");
+            table.primary_key = Some(vec!["id".to_string()]);
 
-            assert_eq!(table.display_name(true), "users");
+            assert!(table.has_primary_key());
         }
 
         #[test]
-        fn omit_public_false_returns_qualified() {
-            let table = make_table("public", "users");
+        fn is_absent_when_columns_are_empty() {
+            let mut table = make_table("public", "users");
+            table.primary_key = Some(Vec::new());
 
-            assert_eq!(table.display_name(false), "public.users");
+            assert!(!table.has_primary_key());
         }
     }
 
     mod summary {
         use super::*;
-
-        #[test]
-        fn display_name_omits_public() {
-            let summary = make_summary("public", "orders");
-
-            assert_eq!(summary.display_name(true), "orders");
-        }
-
-        #[test]
-        fn display_name_keeps_non_public_schema() {
-            let summary = make_summary("audit", "logs");
-
-            assert_eq!(summary.display_name(true), "audit.logs");
-        }
 
         #[test]
         fn qualified_name_lower_returns_lowercased() {

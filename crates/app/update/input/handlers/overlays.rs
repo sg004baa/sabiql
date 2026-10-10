@@ -1,20 +1,85 @@
-use crate::update::action::Action;
-use crate::update::input::keybindings::{self, KeyCombo};
+use crate::policy::FeaturePolicy;
+use crate::update::action::{Action, CursorMove, InputTarget};
+use crate::update::input::keybindings::{self, Key, KeyCombo, Modifiers};
 use crate::update::input::keymap;
 
-pub fn handle_help_keys(combo: KeyCombo) -> Action {
-    keybindings::HELP.resolve(&combo).unwrap_or(Action::None)
+use super::interaction::InputInteraction;
+
+pub(super) fn handle_help_keys_with_policy(
+    combo: KeyCombo,
+    interaction: InputInteraction,
+    feature_policy: &FeaturePolicy,
+) -> Action {
+    match interaction {
+        InputInteraction::Viewing => handle_help_viewing_keys(combo, feature_policy),
+        InputInteraction::FormEditing(InputTarget::HelpFilter) => {
+            handle_help_editing_keys(combo, feature_policy)
+        }
+        InputInteraction::FormEditing(_) | InputInteraction::VimEditing(_) => Action::None,
+    }
 }
 
-pub fn handle_confirm_dialog_keys(combo: KeyCombo) -> Action {
+fn handle_help_viewing_keys(combo: KeyCombo, feature_policy: &FeaturePolicy) -> Action {
+    keymap::resolve_mode_with_policy(&combo, keybindings::HELP_VIEWING_ROWS, feature_policy)
+        .unwrap_or(Action::None)
+}
+
+fn handle_help_editing_keys(combo: KeyCombo, feature_policy: &FeaturePolicy) -> Action {
+    if let Some(action) =
+        keymap::resolve_mode_with_policy(&combo, keybindings::HELP_EDITING_ROWS, feature_policy)
+    {
+        return action;
+    }
+
+    match (combo.key, combo.modifiers) {
+        (Key::Delete, Modifiers::NONE) => Action::TextDelete {
+            target: InputTarget::HelpFilter,
+        },
+        (Key::Left, Modifiers::NONE) => Action::TextMoveCursor {
+            target: InputTarget::HelpFilter,
+            direction: CursorMove::Left,
+        },
+        (Key::Right, Modifiers::NONE) => Action::TextMoveCursor {
+            target: InputTarget::HelpFilter,
+            direction: CursorMove::Right,
+        },
+        (Key::Home, Modifiers::NONE) => Action::TextMoveCursor {
+            target: InputTarget::HelpFilter,
+            direction: CursorMove::Home,
+        },
+        (Key::End, Modifiers::NONE) => Action::TextMoveCursor {
+            target: InputTarget::HelpFilter,
+            direction: CursorMove::End,
+        },
+        (Key::Char(ch), Modifiers::NONE | Modifiers::SHIFT) => Action::TextInput {
+            target: InputTarget::HelpFilter,
+            ch,
+        },
+        _ => Action::None,
+    }
+}
+
+pub(super) fn handle_confirm_dialog_keys(combo: KeyCombo) -> Action {
     keymap::resolve(&combo, keybindings::CONFIRM_DIALOG_KEYS).unwrap_or(Action::None)
+}
+
+pub(super) fn handle_sqlite_diagnostics_keys_with_policy(
+    combo: KeyCombo,
+    feature_policy: &FeaturePolicy,
+) -> Action {
+    keybindings::SQLITE_DIAGNOSTICS
+        .resolve_with_policy(&combo, feature_policy)
+        .unwrap_or(Action::None)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::shared::engine_feature_profile::EngineFeatureProfile;
     use crate::update::action::ModalKind;
-    use crate::update::action::{ScrollAmount, ScrollDirection, ScrollTarget};
+    use crate::update::action::{
+        CursorMove, InputTarget, ScrollAmount, ScrollDirection, ScrollTarget,
+    };
     use crate::update::input::keybindings::{Key, KeyCombo};
     use rstest::rstest;
 
@@ -24,6 +89,16 @@ mod tests {
 
     fn combo_ctrl(k: Key) -> KeyCombo {
         KeyCombo::ctrl(k)
+    }
+
+    fn handle_help_keys(combo: KeyCombo, interaction: InputInteraction) -> Action {
+        let feature_policy = FeaturePolicy::new(&EngineFeatureProfile::postgres_like());
+        handle_help_keys_with_policy(combo, interaction, &feature_policy)
+    }
+
+    fn handle_sqlite_diagnostics_keys(combo: KeyCombo) -> Action {
+        let feature_policy = FeaturePolicy::new(&EngineFeatureProfile::sqlite_like());
+        handle_sqlite_diagnostics_keys_with_policy(combo, &feature_policy)
     }
 
     mod help {
@@ -42,35 +117,203 @@ mod tests {
 
         #[test]
         fn esc_closes_help() {
-            let result = handle_help_keys(combo(Key::Esc));
+            let result = handle_help_keys(combo(Key::Esc), InputInteraction::Viewing);
 
             assert!(matches!(result, Action::CloseModal(ModalKind::Help)));
         }
 
         #[test]
         fn question_mark_closes_help() {
-            let result = handle_help_keys(combo(Key::Char('?')));
+            let result = handle_help_keys(combo(Key::Char('?')), InputInteraction::Viewing);
 
             assert!(matches!(result, Action::CloseModal(ModalKind::Help)));
         }
 
         #[test]
-        fn unknown_key_returns_none() {
-            let result = handle_help_keys(combo(Key::Char('a')));
+        fn question_mark_filters_help_while_editing() {
+            let result = handle_help_keys(
+                combo(Key::Char('?')),
+                InputInteraction::FormEditing(InputTarget::HelpFilter),
+            );
+
+            assert!(matches!(
+                result,
+                Action::TextInput {
+                    target: InputTarget::HelpFilter,
+                    ch: '?',
+                }
+            ));
+        }
+
+        #[test]
+        fn editing_filter_accepts_char_input() {
+            let result = handle_help_keys(
+                combo(Key::Char('a')),
+                InputInteraction::FormEditing(InputTarget::HelpFilter),
+            );
+
+            assert!(matches!(
+                result,
+                Action::TextInput {
+                    target: InputTarget::HelpFilter,
+                    ch: 'a'
+                }
+            ));
+        }
+
+        #[test]
+        fn slash_starts_filter_editing() {
+            let result = handle_help_keys(combo(Key::Char('/')), InputInteraction::Viewing);
+
+            assert!(matches!(result, Action::EnterHelpFilter));
+        }
+
+        #[test]
+        fn enter_does_not_start_filter_editing() {
+            let result = handle_help_keys(combo(Key::Enter), InputInteraction::Viewing);
+
+            assert!(matches!(result, Action::None));
+        }
+
+        #[test]
+        fn slash_filters_help_while_editing() {
+            let result = handle_help_keys(
+                combo(Key::Char('/')),
+                InputInteraction::FormEditing(InputTarget::HelpFilter),
+            );
+
+            assert!(matches!(
+                result,
+                Action::TextInput {
+                    target: InputTarget::HelpFilter,
+                    ch: '/',
+                }
+            ));
+        }
+
+        #[test]
+        fn esc_returns_to_viewing_while_editing() {
+            let result = handle_help_keys(
+                combo(Key::Esc),
+                InputInteraction::FormEditing(InputTarget::HelpFilter),
+            );
+
+            assert!(matches!(result, Action::ExitHelpFilter));
+        }
+
+        #[test]
+        fn tab_is_ignored_while_viewing() {
+            let result = handle_help_keys(combo(Key::Tab), InputInteraction::Viewing);
 
             assert!(matches!(result, Action::None));
         }
 
         #[rstest]
-        #[case(combo(Key::Char('j')), ScrollDirection::Down, ScrollAmount::Line)]
+        #[case(Key::Backspace)]
+        #[case(Key::Delete)]
+        #[case(Key::Left)]
+        #[case(Key::Right)]
+        #[case(Key::Home)]
+        #[case(Key::End)]
+        fn editing_filter_prioritizes_standard_text_keys(#[case] key: Key) {
+            let result = handle_help_keys(
+                combo(key),
+                InputInteraction::FormEditing(InputTarget::HelpFilter),
+            );
+
+            match key {
+                Key::Backspace => assert!(matches!(
+                    result,
+                    Action::TextBackspace {
+                        target: InputTarget::HelpFilter
+                    }
+                )),
+                Key::Delete => assert!(matches!(
+                    result,
+                    Action::TextDelete {
+                        target: InputTarget::HelpFilter
+                    }
+                )),
+                Key::Left | Key::Right | Key::Home | Key::End => {
+                    let direction = match key {
+                        Key::Left => CursorMove::Left,
+                        Key::Right => CursorMove::Right,
+                        Key::Home => CursorMove::Home,
+                        Key::End => CursorMove::End,
+                        _ => unreachable!(),
+                    };
+                    assert!(matches!(
+                        result,
+                        Action::TextMoveCursor {
+                            target: InputTarget::HelpFilter,
+                            direction: actual_direction,
+                        } if actual_direction == direction
+                    ));
+                }
+                _ => unreachable!(),
+            }
+        }
+
+        #[rstest]
+        #[case(Key::Backspace)]
+        #[case(Key::Delete)]
+        fn viewing_ignores_filter_edit_keys(#[case] key: Key) {
+            let result = handle_help_keys(combo(key), InputInteraction::Viewing);
+
+            assert!(matches!(result, Action::None));
+        }
+
+        #[rstest]
+        #[case(Key::Char('h'), ScrollDirection::Left, ScrollAmount::Line)]
+        #[case(Key::Left, ScrollDirection::Left, ScrollAmount::Line)]
+        #[case(Key::Char('l'), ScrollDirection::Right, ScrollAmount::Line)]
+        #[case(Key::Right, ScrollDirection::Right, ScrollAmount::Line)]
+        #[case(Key::Home, ScrollDirection::Up, ScrollAmount::ToStart)]
+        #[case(Key::End, ScrollDirection::Down, ScrollAmount::ToEnd)]
+        fn viewing_resolves_navigation_keys_as_scroll(
+            #[case] key: Key,
+            #[case] direction: ScrollDirection,
+            #[case] amount: ScrollAmount,
+        ) {
+            assert_help_scroll(
+                handle_help_keys(combo(key), InputInteraction::Viewing),
+                direction,
+                amount,
+            );
+        }
+
+        #[rstest]
+        #[case(Key::Up)]
+        #[case(Key::Down)]
+        #[case(Key::PageUp)]
+        #[case(Key::PageDown)]
+        fn editing_filter_does_not_scroll(#[case] key: Key) {
+            let result = handle_help_keys(
+                combo(key),
+                InputInteraction::FormEditing(InputTarget::HelpFilter),
+            );
+
+            assert!(matches!(result, Action::None));
+        }
+
+        #[rstest]
+        #[case(KeyCombo::ctrl(Key::Char('a')))]
+        #[case(KeyCombo::alt(Key::Char('a')))]
+        #[case(KeyCombo::ctrl_alt(Key::Char('a')))]
+        fn modified_chars_do_not_filter_help(#[case] combo: KeyCombo) {
+            let result = handle_help_keys(combo, InputInteraction::Viewing);
+
+            assert!(matches!(result, Action::None));
+        }
+
+        #[rstest]
         #[case(combo(Key::Down), ScrollDirection::Down, ScrollAmount::Line)]
+        #[case(combo(Key::Char('j')), ScrollDirection::Down, ScrollAmount::Line)]
         #[case(combo_ctrl(Key::Char('n')), ScrollDirection::Down, ScrollAmount::Line)]
-        #[case(combo(Key::Char('k')), ScrollDirection::Up, ScrollAmount::Line)]
         #[case(combo(Key::Up), ScrollDirection::Up, ScrollAmount::Line)]
+        #[case(combo(Key::Char('k')), ScrollDirection::Up, ScrollAmount::Line)]
         #[case(combo_ctrl(Key::Char('p')), ScrollDirection::Up, ScrollAmount::Line)]
-        #[case(combo(Key::Char('g')), ScrollDirection::Up, ScrollAmount::ToStart)]
         #[case(combo(Key::Home), ScrollDirection::Up, ScrollAmount::ToStart)]
-        #[case(combo(Key::Char('G')), ScrollDirection::Down, ScrollAmount::ToEnd)]
         #[case(combo(Key::End), ScrollDirection::Down, ScrollAmount::ToEnd)]
         #[case(
             combo_ctrl(Key::Char('d')),
@@ -103,7 +346,7 @@ mod tests {
             #[case] direction: ScrollDirection,
             #[case] amount: ScrollAmount,
         ) {
-            let result = handle_help_keys(combo);
+            let result = handle_help_keys(combo, InputInteraction::Viewing);
 
             assert_help_scroll(result, direction, amount);
         }
@@ -113,10 +356,25 @@ mod tests {
         #[case(Key::Char('M'))]
         #[case(Key::Char('L'))]
         #[case(Key::Char('z'))]
-        fn issue_non_goals_remain_unbound_in_help_mode(#[case] code: Key) {
-            let result = handle_help_keys(combo(code));
+        #[case(Key::Char('j'))]
+        #[case(Key::Char('k'))]
+        #[case(Key::Char('g'))]
+        #[case(Key::Char('G'))]
+        #[case(Key::Char('h'))]
+        #[case(Key::Char('l'))]
+        fn non_scroll_chars_filter_help(#[case] code: Key) {
+            let result = handle_help_keys(
+                combo(code),
+                InputInteraction::FormEditing(InputTarget::HelpFilter),
+            );
 
-            assert!(matches!(result, Action::None));
+            assert!(matches!(
+                result,
+                Action::TextInput {
+                    target: InputTarget::HelpFilter,
+                    ..
+                }
+            ));
         }
     }
 
@@ -161,6 +419,24 @@ mod tests {
             let result = handle_confirm_dialog_keys(combo(code));
 
             assert!(matches!(result, Action::None));
+        }
+    }
+
+    mod sqlite_diagnostics_keys {
+        use super::*;
+
+        #[test]
+        fn question_mark_toggles_help() {
+            let result = handle_sqlite_diagnostics_keys(combo(Key::Char('?')));
+
+            assert!(matches!(result, Action::ToggleModal(ModalKind::Help)));
+        }
+
+        #[test]
+        fn r_runs_quick_check() {
+            let result = handle_sqlite_diagnostics_keys(combo(Key::Char('r')));
+
+            assert!(matches!(result, Action::RunSqliteDiagnosticsQuickCheck));
         }
     }
 }

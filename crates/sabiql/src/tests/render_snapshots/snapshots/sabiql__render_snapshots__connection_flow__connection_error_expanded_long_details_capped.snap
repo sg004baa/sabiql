@@ -2,7 +2,7 @@
 source: src/tests/render_snapshots/connection_flow.rs
 expression: output
 ---
-test_project | - | - | no dsn | localhost:5432/test                                                                                                                  
+test_project ▸ - ▸ -                                                                                                                 not loaded | localhost:5432/test
 ┌ [1] Explorer ─────────────────────────┐[Info] [Cols] [Idx] [FK] [RLS] [Trig] [DDL]                                                                                 
 │ Press 'r' to load metadata            │┌ [2] Inspector ───────────────────────────────────────────────────────────────────────────────────────────────────────────┐
 │                                       ││(select a table)                                                                                                          │
@@ -41,8 +41,8 @@ test_project | - | - | no dsn | localhost:5432/test
 │                        │ERROR line 20: something went wrong in module_20                                                                 │                        │
 │                        │ERROR line 21: something went wrong in module_21                                                                 │                        │
 │                        │                                                                                                                 │                        │
-│                        │Actions:  e  Re-enter   s  Switch   d  Details   y  Copy                                                         │                        │
-│                        ╰ Esc/q to close ─────────────────────────────────────────────────────────────────────────────────────────────────╯                        │
+│                        │Actions:  e  Edit   s  Switch   d  Details   y  Copy                                                             │                        │
+│                        ╰ Esc: Close ─────────────────────────────────────────────────────────────────────────────────────────────────────╯                        │
 │                                       ││                                                                                                                          │
 │                                       ││                                                                                                                          │
 │                                       ││                                                                                                                          │
@@ -51,4 +51,4 @@ test_project | - | - | no dsn | localhost:5432/test
 │                                       ││                                                                                                                          │
 │                                       ││                                                                                                                          │
 └───────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-e:Edit  s:Switch  d:Details  y:Copy  Esc/q:Close
+e:Edit  s:Switch  d:Details  y:Copy

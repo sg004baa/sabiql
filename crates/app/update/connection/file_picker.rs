@@ -8,20 +8,20 @@ use crate::update::action::{Action, InputTarget, ListMotion, ListTarget, ModalKi
 
 /// Reduce file-picker actions. Returns `None` for unrelated actions so the
 /// parent reducer can fall through.
-pub fn reduce(state: &mut AppState, action: &Action) -> Option<Vec<Effect>> {
+pub(in crate::update) fn reduce(state: &mut AppState, action: &Action) -> Option<Vec<Effect>> {
     match action {
         // Open only for SQLite while the File field is focused. Scanning starts
         // eagerly here so the candidate list is already populating when the
         // picker appears.
         Action::OpenFilePicker => {
             if state.connection_setup.database_type != DatabaseType::SQLite
-                || state.connection_setup.focused_field != ConnectionField::Database
+                || state.connection_setup.focused_field != ConnectionField::SqlitePath
             {
                 return Some(vec![]);
             }
             state.file_picker.open();
             state.modal.push_mode(InputMode::FilePicker);
-            let field = state.connection_setup.database.content().to_string();
+            let field = state.connection_setup.sqlite_path.content().to_string();
             let generation = state.file_picker.generation();
             Some(vec![Effect::StartFilePickerWalk {
                 field,
@@ -109,20 +109,19 @@ pub fn reduce(state: &mut AppState, action: &Action) -> Option<Vec<Effect>> {
 fn set_database_field(state: &mut AppState, value: &str) {
     use crate::model::shared::text_input::TextInputState;
     let len = value.chars().count();
-    state.connection_setup.database = TextInputState::new(value, len);
+    state.connection_setup.sqlite_path = TextInputState::new(value, len);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::connection::setup::ConnectionField;
     use crate::model::shared::text_input::TextInputState;
     use std::path::PathBuf;
 
     fn sqlite_setup_state() -> AppState {
         let mut state = AppState::new("test".to_string());
         state.connection_setup.database_type = DatabaseType::SQLite;
-        state.connection_setup.focused_field = ConnectionField::Database;
+        state.connection_setup.focused_field = ConnectionField::SqlitePath;
         state.modal.set_mode(InputMode::ConnectionSetup);
         state
     }
@@ -252,36 +251,39 @@ mod tests {
                 paths: vec![PathBuf::from("/home/me/app.db")],
             },
         );
-        state.file_picker.picker_mut().pane_height = 10;
+        state.file_picker.picker_mut().set_pane_height(10);
 
         dispatch(&mut state, &Action::FilePickerConfirmSelection);
 
-        assert_eq!(state.connection_setup.database.content(), "/home/me/app.db");
+        assert_eq!(
+            state.connection_setup.sqlite_path.content(),
+            "/home/me/app.db"
+        );
         assert_eq!(state.modal.active_mode(), InputMode::ConnectionSetup);
     }
 
     #[test]
     fn confirm_with_no_results_just_returns() {
         let mut state = sqlite_setup_state();
-        state.connection_setup.database = TextInputState::new("orig", 4);
+        state.connection_setup.sqlite_path = TextInputState::new("orig", 4);
         dispatch(&mut state, &Action::OpenFilePicker);
 
         dispatch(&mut state, &Action::FilePickerConfirmSelection);
 
-        assert_eq!(state.connection_setup.database.content(), "orig");
+        assert_eq!(state.connection_setup.sqlite_path.content(), "orig");
         assert_eq!(state.modal.active_mode(), InputMode::ConnectionSetup);
     }
 
     #[test]
     fn close_returns_to_setup_without_changing_field() {
         let mut state = sqlite_setup_state();
-        state.connection_setup.database = TextInputState::new("orig", 4);
+        state.connection_setup.sqlite_path = TextInputState::new("orig", 4);
         dispatch(&mut state, &Action::OpenFilePicker);
         let g = state.file_picker.generation();
 
         dispatch(&mut state, &Action::CloseModal(ModalKind::FilePicker));
 
-        assert_eq!(state.connection_setup.database.content(), "orig");
+        assert_eq!(state.connection_setup.sqlite_path.content(), "orig");
         assert_eq!(state.modal.active_mode(), InputMode::ConnectionSetup);
         // generation bumped so any in-flight chunks are now stale
         assert_ne!(state.file_picker.generation(), g);
@@ -303,7 +305,7 @@ mod tests {
                 ],
             },
         );
-        state.file_picker.picker_mut().pane_height = 10;
+        state.file_picker.picker_mut().set_pane_height(10);
 
         dispatch(
             &mut state,

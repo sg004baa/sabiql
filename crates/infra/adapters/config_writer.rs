@@ -1,19 +1,17 @@
 use std::path::PathBuf;
 
 use crate::app::ports::outbound::{ConfigWriter, ConfigWriterError};
-use crate::config::cache::{CacheDirError, get_cache_dir};
+use crate::config::{CacheDirError, get_cache_dir};
 
 pub struct FileConfigWriter;
 
 impl FileConfigWriter {
+    #[allow(
+        clippy::new_without_default,
+        reason = "new() is the only default construction API"
+    )]
     pub fn new() -> Self {
         Self
-    }
-}
-
-impl Default for FileConfigWriter {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

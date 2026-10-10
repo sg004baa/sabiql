@@ -1,39 +1,26 @@
 use ratatui::prelude::*;
-use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::app::model::app_state::AppState;
 use crate::app::model::shared::confirm_dialog::ConfirmIntent;
+use crate::app::model::shared::render_output::ConfirmPreviewLayout;
 use crate::app::policy::json::json_diff::JsonDiffLine;
 use crate::app::policy::write::write_guardrails::{RiskLevel, WriteOperation};
 use crate::app::policy::write::write_update::escape_preview_value;
-use crate::primitives::molecules::{render_modal, render_modal_with_border_color};
+use crate::domain::{DatabaseType, QueryValue};
+use crate::primitives::molecules::{FooterHintBar, render_modal, render_modal_with_border_color};
 use crate::primitives::utils::text_utils::wrapped_line_count;
 use crate::sql_highlight::highlight_sql;
 use crate::theme::ThemePalette;
 
 pub struct ConfirmDialog;
 
-pub struct ConfirmPreviewMetrics {
-    pub viewport_height: Option<u16>,
-    pub content_height: Option<u16>,
-    pub scroll: u16,
-}
-
-fn risk_color(theme: &ThemePalette, level: RiskLevel) -> Color {
-    match level {
-        RiskLevel::Low => theme.semantic.status.warning,
-        RiskLevel::Medium => theme.semantic.status.medium_risk,
-        RiskLevel::High => theme.semantic.status.error,
-    }
-}
-
 impl ConfirmDialog {
     pub fn render(
         frame: &mut Frame,
         state: &AppState,
         theme: &ThemePalette,
-    ) -> ConfirmPreviewMetrics {
+    ) -> ConfirmPreviewLayout {
         if state.result_interaction.pending_write_preview().is_some() {
             Self::render_write_preview(frame, state, theme)
         } else {
@@ -53,9 +40,9 @@ impl ConfirmDialog {
         frame: &mut Frame,
         state: &AppState,
         theme: &ThemePalette,
-    ) -> ConfirmPreviewMetrics {
+    ) -> ConfirmPreviewLayout {
         let dialog = &state.confirm_dialog;
-        let hint = " Enter: Confirm │ Esc/q: Cancel ";
+        let hint = FooterHintBar::new([("Enter", "Confirm"), ("Esc", "Cancel")]);
 
         let full_area = frame.area();
         let max_modal_width = full_area.width.saturating_sub(2).max(20);
@@ -65,7 +52,7 @@ impl ConfirmDialog {
             .map(|line| line.chars().count() as u16)
             .max()
             .unwrap_or(0);
-        let hint_width = hint.chars().count() as u16;
+        let hint_width = hint.width();
         let title_width = dialog.title().chars().count() as u16;
         let content_width = message_max_line.max(hint_width).max(title_width);
         let preferred_width = content_width.saturating_add(6).max(40);
@@ -105,7 +92,7 @@ impl ConfirmDialog {
             .alignment(Alignment::Left)
             .wrap(Wrap { trim: false });
         frame.render_widget(message_para, inner);
-        ConfirmPreviewMetrics {
+        ConfirmPreviewLayout {
             viewport_height: None,
             content_height: None,
             scroll: 0,
@@ -116,7 +103,7 @@ impl ConfirmDialog {
         frame: &mut Frame,
         state: &AppState,
         theme: &ThemePalette,
-    ) -> ConfirmPreviewMetrics {
+    ) -> ConfirmPreviewLayout {
         let preview = state
             .result_interaction
             .pending_write_preview()
@@ -128,21 +115,17 @@ impl ConfirmDialog {
 
         let mut content_lines: Vec<Line> = Vec::new();
 
-        let risk_reason = |fallback: &str| {
-            preview
-                .guardrail
-                .reason
-                .as_deref()
-                .unwrap_or(fallback)
-                .to_string()
-        };
         let risk_label = match preview.guardrail.risk_level {
             RiskLevel::Low => "✓ LOW RISK".to_string(),
-            RiskLevel::Medium => format!(
-                "⚠ MEDIUM RISK: {}",
-                risk_reason("Multiple rows may be affected")
+            RiskLevel::Medium => "⚠ MEDIUM RISK: Multiple rows may be affected".to_string(),
+            RiskLevel::High => format!(
+                "⚠ HIGH RISK: {}",
+                preview
+                    .guardrail
+                    .reason
+                    .as_deref()
+                    .unwrap_or("Execution is blocked")
             ),
-            RiskLevel::High => format!("⚠ HIGH RISK: {}", risk_reason("Execution is blocked")),
         };
         content_lines.push(Line::from(Span::styled(
             risk_label,
@@ -185,18 +168,10 @@ impl ConfirmDialog {
                     "Target",
                     Style::default().fg(theme.semantic.text.secondary),
                 )]));
-                for (key, value) in &preview.target_summary.key_values {
-                    content_lines.push(Line::from(vec![
-                        Span::styled(
-                            format!("  {key}: "),
-                            Style::default().fg(theme.semantic.text.secondary),
-                        ),
-                        Span::styled(
-                            format!("\"{}\"", escape_preview_value(value)),
-                            Style::default().fg(theme.semantic.text.primary),
-                        ),
-                    ]));
-                }
+                content_lines.extend(Self::render_key_value_lines(
+                    &preview.target_summary.key_values,
+                    theme,
+                ));
             }
         }
 
@@ -206,9 +181,10 @@ impl ConfirmDialog {
             "SQL Preview",
             Style::default().fg(theme.semantic.text.secondary),
         )]));
+        let database_type = state.session.active_database_type_or_default();
         for sql_line in preview.sql.lines() {
             let indented = format!("  {sql_line}");
-            content_lines.push(Self::highlight_sql_line(&indented, theme));
+            content_lines.push(Self::highlight_sql_line(&indented, database_type, theme));
         }
 
         content_lines.push(Line::from(""));
@@ -249,12 +225,10 @@ impl ConfirmDialog {
         // +4 = border top/bottom (2) + vertical padding (2)
         let modal_height = (wrapped_height + 4).clamp(min_modal_height, max_modal_height);
 
-        // Build hint string
-        // Hint order: Actions → Close/Cancel
-        let hint: &str = if blocked {
-            " Esc/q: Cancel "
+        let hint = if blocked {
+            FooterHintBar::new([("Esc", "Cancel")])
         } else {
-            " Enter: Confirm │ Esc/q: Cancel "
+            FooterHintBar::new([("Enter", "Confirm"), ("Esc", "Cancel")])
         };
 
         let (_, modal_inner) = render_modal_with_border_color(
@@ -271,7 +245,7 @@ impl ConfirmDialog {
 
         let scroll = state
             .confirm_dialog
-            .preview_scroll
+            .preview_scroll()
             .min(wrapped_height.saturating_sub(inner.height));
 
         let para = Paragraph::new(content_lines)
@@ -279,11 +253,32 @@ impl ConfirmDialog {
             .wrap(Wrap { trim: false })
             .scroll((scroll, 0));
         frame.render_widget(para, inner);
-        ConfirmPreviewMetrics {
+        ConfirmPreviewLayout {
             viewport_height: Some(inner.height),
             content_height: Some(wrapped_height),
             scroll,
         }
+    }
+
+    fn render_key_value_lines(
+        key_values: &[(String, QueryValue)],
+        theme: &ThemePalette,
+    ) -> Vec<Line<'static>> {
+        key_values
+            .iter()
+            .map(|(key, value)| {
+                Line::from(vec![
+                    Span::styled(
+                        format!("  {key}: "),
+                        Style::default().fg(theme.semantic.text.secondary),
+                    ),
+                    Span::styled(
+                        format!("\"{}\"", escape_preview_value(&value.display_value())),
+                        Style::default().fg(theme.semantic.text.primary),
+                    ),
+                ])
+            })
+            .collect()
     }
 
     fn render_json_diff_lines(
@@ -321,10 +316,22 @@ impl ConfirmDialog {
         }
     }
 
-    fn highlight_sql_line(line: &str, theme: &ThemePalette) -> Line<'static> {
-        highlight_sql(line, theme)
+    fn highlight_sql_line(
+        line: &str,
+        database_type: DatabaseType,
+        theme: &ThemePalette,
+    ) -> Line<'static> {
+        highlight_sql(line, database_type, theme)
             .into_iter()
             .next()
             .unwrap_or_else(|| Line::from(""))
+    }
+}
+
+fn risk_color(theme: &ThemePalette, level: RiskLevel) -> Color {
+    match level {
+        RiskLevel::Low => theme.semantic.status.warning,
+        RiskLevel::Medium => theme.semantic.status.medium_risk,
+        RiskLevel::High => theme.semantic.status.error,
     }
 }

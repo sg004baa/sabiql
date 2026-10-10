@@ -1,24 +1,26 @@
 pub mod action;
-pub mod browse;
-pub mod connection;
-pub mod er;
-pub mod explain;
-pub mod helpers;
+pub(in crate::update) mod browse;
+pub(in crate::update) mod connection;
+pub(crate) mod dispatch_result;
+pub(in crate::update) mod er;
+pub(in crate::update) mod explain;
+pub(in crate::update) mod helpers;
 pub mod input;
-pub mod modal;
+pub(in crate::update) mod modal;
+mod query_context;
 pub mod reducer;
-pub mod sql_editor;
-
-// Facade: re-export sub-reducer entry points for update/reducer.rs dispatch
-pub use browse::metadata::reduce_metadata;
-pub use browse::navigation::reduce_navigation;
-pub use browse::query::reduce_query;
-pub use browse::result::reduce_result;
-pub use connection::reduce_connection;
-pub use er::reduce_er;
+pub(in crate::update) mod sql_editor;
 #[cfg(test)]
-pub use explain::reduce_explain;
-pub use explain::reduce_explain_with_services;
-pub use helpers::{char_to_byte_index, validate_all, validate_field};
-pub use modal::reduce_modal;
-pub use sql_editor::reduce_sql_modal;
+pub(crate) mod test_fixtures;
+// Facade: re-export sub-reducer entry points for update/reducer.rs dispatch
+pub(crate) use browse::metadata::dispatch_metadata;
+pub(in crate::update) use browse::navigation::dispatch_navigation;
+pub(in crate::update) use browse::query::dispatch_query;
+pub use browse::result::dispatch_result;
+pub(in crate::update) use connection::dispatch_connection;
+pub(in crate::update) use er::dispatch_er;
+pub(in crate::update) use explain::dispatch_explain;
+pub(in crate::update) use modal::dispatch_modal;
+pub(in crate::update) use sql_editor::dispatch_sql_modal;
+
+mod fork_features;

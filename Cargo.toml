@@ -1,27 +1,30 @@
 [workspace]
 members = [
     "crates/sabiql",
-    "crates/domain",
-    "crates/app",
-    "crates/infra",
     "crates/tui-kit",
-    "crates/ui",
     "crates/sabiql-redis",
+    "crates/app",
+    "crates/domain",
+    "crates/infra",
+    "crates/ui",
 ]
-resolver = "2"
+resolver = "3"
 
 [workspace.package]
-version = "1.16.1"
+version = "3.0.1"
 edition = "2024"
+rust-version = "1.98"
 license = "MIT"
 repository = "https://github.com/sg004baa/sabiql"
 
 [workspace.dependencies]
-sabiql-domain = { path = "crates/domain", version = "1.12.0" }
-sabiql-app = { path = "crates/app", version = "1.12.0" }
-sabiql-infra = { path = "crates/infra", version = "1.12.0" }
-sabiql-tui-kit = { path = "crates/tui-kit", version = "1.12.0" }
-sabiql-ui = { path = "crates/ui", version = "1.12.0" }
+sabiql-tui-kit = { path = "crates/tui-kit", version = "3.0.1" }
+# When adding third-party dependencies, update `absolute-paths-allowed-crates` in clippy.toml.
+sabiql-domain = { path = "crates/domain", version = "3.0.1" }
+sabiql-app = { path = "crates/app", version = "3.0.1" }
+sabiql-infra = { path = "crates/infra", version = "3.0.1" }
+sabiql-ui = { path = "crates/ui", version = "3.0.1" }
+walkdir = "2"
 arboard = "3"
 async-trait = "0.1"
 clap = { version = "4", features = ["derive"] }
@@ -32,31 +35,89 @@ dirs = "5"
 dotenvy = "0.15"
 futures = "0.3"
 insta = "1"
-lru = "0.16"
+lru = "0.18"
+libc = "0.2"
 mockall = "0.13"
 nucleo-matcher = "0.3"
-walkdir = "2"
+quick-xml = { version = "0.38", features = ["async-tokio"] }
 ratatui = "0.30"
 rstest = "0.19"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-self_update = { version = "1.0.0-rc.1", default-features = false, features = ["reqwest", "rustls", "archive-tar", "archive-zip", "compression-flate2", "compression-zip-deflate", "checksums"] }
+self_update = { version = "0.44", default-features = false, features = ["archive-tar", "archive-zip", "compression-flate2", "ureq", "rustls"] }
 tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["sync", "time", "io-util", "process", "rt-multi-thread", "macros", "fs"] }
 tokio-util = "0.7"
 toml = "0.8"
 unicode-casefold = "0.2"
+unicode-segmentation = "1"
 unicode-width = "0.2"
-url = "2"
 urlencoding = "2"
-uuid = { version = "1", features = ["v4"] }
+url = "2"
+uuid = { version = "1", features = ["v4", "v5"] }
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Threading",
+] }
 
 [profile.release]
 lto = true
 codegen-units = 1
 
-# The profile that 'dist' will build with
-[profile.dist]
-inherits = "release"
-lto = "thin"
+[workspace.lints.rust]
+redundant_imports = "deny"
+unreachable_pub = "deny"
+
+[workspace.lints.clippy]
+# Groups
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+
+# Pedantic suppressions
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+module_name_repetitions = "allow"
+doc_markdown = "allow"
+similar_names = "allow"
+too_many_lines = "allow"
+cast_possible_truncation = "allow"
+cast_possible_wrap = "allow"
+cast_sign_loss = "allow"
+cast_precision_loss = "allow"
+cast_lossless = "allow"
+items_after_statements = "allow"
+needless_pass_by_value = "allow"  # Action/Command/PathBuf by-value in core APIs; refactor is out of scope
+unused_self = "allow"
+implicit_hasher = "allow"
+match_wildcard_for_single_variants = "allow"
+struct_field_names = "allow"
+
+# Nursery suppressions
+missing_const_for_fn = "allow"
+significant_drop_tightening = "allow"
+option_if_let_else = "allow"
+future_not_send = "allow"
+branches_sharing_code = "allow"
+iter_with_drain = "allow"  # drain(..) inside loops where Vec is reused between iterations
+collection_is_never_read = "allow"  # false positive: Vec used for sorting + hashing, not element-wise reads
+used_underscore_binding = "allow"  # rstest #[case] doc params use _prefix convention; macro uses bindings internally
+
+# Pedantic suppressions (continued)
+naive_bytecount = "allow"  # bytecount crate would be an unnecessary dependency
+
+# Restriction lints (opt-in)
+absolute_paths = "warn"
+dbg_macro = "deny"
+exit = "deny"
+get_unwrap = "deny"
+mem_forget = "deny"
+todo = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+allow_attributes_without_reason = "deny"

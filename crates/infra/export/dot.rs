@@ -2,10 +2,9 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::app::ports::outbound::{
-    ErDiagramExporter, ErExportResult, GraphvizError, GraphvizRunner, ViewerError, ViewerLauncher,
-};
+use crate::app::ports::outbound::{ErDiagramExporter, ErExportResult};
 use crate::domain::ErTableInfo;
+use crate::export::graphviz::{GraphvizError, GraphvizRunner, ViewerError, ViewerLauncher};
 
 pub struct SystemGraphvizRunner;
 
@@ -35,77 +34,228 @@ impl GraphvizRunner for SystemGraphvizRunner {
 pub struct SystemViewerLauncher;
 
 impl ViewerLauncher for SystemViewerLauncher {
-    fn open_file(&self, path: &Path) -> Result<(), ViewerError> {
-        if let Ok(browser) = std::env::var("SABIQL_BROWSER") {
-            #[cfg(target_os = "macos")]
-            {
-                Command::new("open")
-                    .arg("-a")
-                    .arg(&browser)
-                    .arg(path)
-                    .spawn()?;
-            }
-            #[cfg(not(target_os = "macos"))]
-            {
-                Command::new(&browser).arg(path).spawn()?;
-            }
-            return Ok(());
+    fn open_file(&self, path: &Path, browser: Option<&str>) -> Result<(), ViewerError> {
+        match requested_browser(browser) {
+            Some(browser) => open_with_browser(path, browser),
+            None => open_with_default_viewer(path),
         }
-
-        #[cfg(target_os = "macos")]
-        {
-            Command::new("open").arg(path).spawn()?;
-        }
-        #[cfg(any(target_os = "freebsd", target_os = "linux"))]
-        {
-            Command::new("xdg-open").arg(path).spawn()?;
-        }
-        #[cfg(target_os = "windows")]
-        {
-            Command::new("cmd")
-                .args(["/C", "start"])
-                .arg(path)
-                .spawn()?;
-        }
-        Ok(())
     }
 }
 
-pub struct DotExporter<G = SystemGraphvizRunner, V = SystemViewerLauncher> {
-    graphviz: G,
-    viewer: V,
+fn requested_browser(browser: Option<&str>) -> Option<&str> {
+    browser.map(str::trim).filter(|value| !value.is_empty())
 }
 
-impl Default for DotExporter<SystemGraphvizRunner, SystemViewerLauncher> {
+#[cfg(target_os = "macos")]
+fn open_with_default_viewer(path: &Path) -> Result<(), ViewerError> {
+    open_with_default_browser(path)
+}
+
+#[cfg(any(target_os = "freebsd", target_os = "linux"))]
+fn open_with_default_viewer(path: &Path) -> Result<(), ViewerError> {
+    spawn_viewer("xdg-open", &[], path)
+}
+
+#[cfg(target_os = "windows")]
+fn open_with_default_viewer(path: &Path) -> Result<(), ViewerError> {
+    spawn_viewer("cmd", &["/C", "start", ""], path)
+}
+
+#[cfg(not(any(
+    target_os = "freebsd",
+    target_os = "macos",
+    target_os = "linux",
+    target_os = "windows"
+)))]
+fn open_with_default_viewer(_path: &Path) -> Result<(), ViewerError> {
+    Err(ViewerError::UnsupportedPlatform {
+        operation: "Opening ER diagrams".to_string(),
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn open_with_default_browser(path: &Path) -> Result<(), ViewerError> {
+    if let Some(bundle_id) = default_web_browser_bundle_id() {
+        return spawn_viewer("open", &["-b", &bundle_id], path);
+    }
+    spawn_viewer("open", &[], path)
+}
+
+#[cfg(target_os = "macos")]
+fn default_web_browser_bundle_id() -> Option<String> {
+    let home = std::env::var_os("HOME")?;
+    let launch_services = PathBuf::from(home)
+        .join("Library/Preferences/com.apple.LaunchServices/com.apple.launchservices.secure.plist");
+    let output = Command::new("plutil")
+        .args(["-extract", "LSHandlers", "json", "-o", "-"])
+        .arg(launch_services)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let json = String::from_utf8(output.stdout).ok()?;
+    default_web_browser_bundle_id_from_ls_handlers_json(&json)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn default_web_browser_bundle_id_from_ls_handlers_json(json: &str) -> Option<String> {
+    let handlers: serde_json::Value = serde_json::from_str(json).ok()?;
+    let handlers = handlers.as_array()?;
+    ["https", "http"]
+        .into_iter()
+        .find_map(|scheme| {
+            handlers
+                .iter()
+                .find(|handler| {
+                    handler
+                        .get("LSHandlerURLScheme")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(scheme)
+                })
+                .and_then(handler_bundle_id)
+        })
+        .or_else(|| {
+            handlers
+                .iter()
+                .find(|handler| {
+                    handler
+                        .get("LSHandlerContentType")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("com.apple.default-app.web-browser")
+                })
+                .and_then(handler_bundle_id)
+        })
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn handler_bundle_id(handler: &serde_json::Value) -> Option<String> {
+    handler
+        .get("LSHandlerRoleAll")
+        .or_else(|| handler.get("LSHandlerRoleViewer"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+}
+
+#[cfg(target_os = "macos")]
+fn open_with_browser(path: &Path, browser: &str) -> Result<(), ViewerError> {
+    spawn_viewer(
+        "open",
+        &["-a", macos_browser_application_name(browser)],
+        path,
+    )
+}
+
+#[cfg(any(target_os = "freebsd", target_os = "linux"))]
+fn open_with_browser(path: &Path, browser: &str) -> Result<(), ViewerError> {
+    open_with_browser_candidates(path, browser, &browser_command_candidates(browser))
+}
+
+#[cfg(target_os = "windows")]
+fn open_with_browser(path: &Path, browser: &str) -> Result<(), ViewerError> {
+    spawn_viewer("cmd", &["/C", "start", "", browser], path)
+}
+
+#[cfg(not(any(
+    target_os = "freebsd",
+    target_os = "macos",
+    target_os = "linux",
+    target_os = "windows"
+)))]
+fn open_with_browser(_path: &Path, browser: &str) -> Result<(), ViewerError> {
+    Err(ViewerError::UnsupportedPlatform {
+        operation: format!("Opening ER diagrams with {browser}"),
+    })
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_browser_application_name(browser: &str) -> &str {
+    match browser.trim().to_ascii_lowercase().as_str() {
+        "brave" | "brave-browser" => "Brave Browser",
+        _ => browser,
+    }
+}
+
+#[cfg(any(target_os = "freebsd", target_os = "linux", test))]
+fn browser_command_candidates(browser: &str) -> Vec<&str> {
+    match browser.trim().to_ascii_lowercase().as_str() {
+        "google chrome" | "google-chrome" | "google-chrome-stable" => vec![
+            "google-chrome",
+            "google-chrome-stable",
+            "chromium",
+            "chromium-browser",
+            "chrome",
+        ],
+        "firefox" => vec!["firefox"],
+        "safari" => vec![],
+        "microsoft edge" | "microsoft-edge" | "microsoft-edge-stable" => {
+            vec!["microsoft-edge", "microsoft-edge-stable"]
+        }
+        "brave" | "brave-browser" => vec!["brave-browser", "brave"],
+        // Arc stays under "Other"; this only helps typed values find likely launchers.
+        "arc" => vec!["arc", "Arc"],
+        _ => vec![browser],
+    }
+}
+
+#[cfg(any(target_os = "freebsd", target_os = "linux"))]
+fn open_with_browser_candidates(
+    path: &Path,
+    browser: &str,
+    candidates: &[&str],
+) -> Result<(), ViewerError> {
+    if candidates.is_empty() {
+        return Err(ViewerError::UnsupportedBrowser {
+            browser: browser.to_string(),
+        });
+    }
+
+    for command in candidates {
+        match Command::new(command).arg(path).spawn() {
+            Ok(_) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err(ViewerError::BrowserCommandNotFound {
+        browser: browser.to_string(),
+        candidates: candidates.join(", "),
+    })
+}
+
+fn spawn_viewer(program: &str, args: &[&str], path: &Path) -> Result<(), ViewerError> {
+    Command::new(program).args(args).arg(path).spawn()?;
+    Ok(())
+}
+
+pub struct DotExporter {
+    graphviz: Box<dyn GraphvizRunner>,
+    viewer: Box<dyn ViewerLauncher>,
+}
+
+impl Default for DotExporter {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl DotExporter<SystemGraphvizRunner, SystemViewerLauncher> {
+impl DotExporter {
     pub fn new() -> Self {
         Self {
-            graphviz: SystemGraphvizRunner,
-            viewer: SystemViewerLauncher,
+            graphviz: Box::new(SystemGraphvizRunner),
+            viewer: Box::new(SystemViewerLauncher),
         }
     }
 }
 
-#[cfg(test)]
-impl<G: GraphvizRunner, V: ViewerLauncher> DotExporter<G, V> {
-    pub fn with_dependencies(graphviz: G, viewer: V) -> Self {
-        Self { graphviz, viewer }
-    }
-}
-
-impl<G, V> DotExporter<G, V> {
+impl DotExporter {
     fn escape_dot_string(s: &str) -> String {
         s.replace('\\', "\\\\")
             .replace('"', "\\\"")
             .replace('\n', "\\n")
     }
 
-    pub fn generate_full_dot(tables: &[ErTableInfo]) -> String {
+    fn generate_full_dot(tables: &[ErTableInfo]) -> String {
         let mut dot = String::new();
         dot.push_str("digraph full_er {\n");
         dot.push_str("    rankdir=LR;\n");
@@ -159,19 +309,20 @@ impl<G, V> DotExporter<G, V> {
     }
 }
 
-impl<G: GraphvizRunner, V: ViewerLauncher> DotExporter<G, V> {
-    pub fn export(
+impl DotExporter {
+    fn export(
         &self,
         dot_content: &str,
         filename: &str,
         cache_dir: &Path,
+        browser: Option<&str>,
     ) -> ErExportResult<PathBuf> {
         let dot_path = cache_dir.join(filename);
         std::fs::write(&dot_path, dot_content)?;
 
         let svg_path = dot_path.with_extension("svg");
         self.graphviz.convert_dot_to_svg(&dot_path, &svg_path)?;
-        self.viewer.open_file(&svg_path)?;
+        self.viewer.open_file(&svg_path, browser)?;
 
         Self::cleanup_er_files(cache_dir, &[&dot_path, &svg_path]);
 
@@ -199,17 +350,16 @@ impl<G: GraphvizRunner, V: ViewerLauncher> DotExporter<G, V> {
     }
 }
 
-impl<G: GraphvizRunner + 'static, V: ViewerLauncher + 'static> ErDiagramExporter
-    for DotExporter<G, V>
-{
+impl ErDiagramExporter for DotExporter {
     fn generate_and_export(
         &self,
         tables: &[ErTableInfo],
         filename: &str,
         cache_dir: &Path,
+        browser: Option<&str>,
     ) -> ErExportResult<PathBuf> {
         let dot_content = Self::generate_full_dot(tables);
-        self.export(&dot_content, filename, cache_dir)
+        self.export(&dot_content, filename, cache_dir, browser)
     }
 }
 
@@ -217,6 +367,18 @@ impl<G: GraphvizRunner + 'static, V: ViewerLauncher + 'static> ErDiagramExporter
 mod tests {
     use super::*;
     use crate::domain::er::ErFkInfo;
+
+    impl DotExporter {
+        fn with_dependencies<G: GraphvizRunner + 'static, V: ViewerLauncher + 'static>(
+            graphviz: G,
+            viewer: V,
+        ) -> Self {
+            Self {
+                graphviz: Box::new(graphviz),
+                viewer: Box::new(viewer),
+            }
+        }
+    }
 
     fn make_test_tables() -> Vec<ErTableInfo> {
         vec![
@@ -246,9 +408,7 @@ mod tests {
         fn tables_appear_as_nodes() {
             let tables = make_test_tables();
 
-            let dot = DotExporter::<SystemGraphvizRunner, SystemViewerLauncher>::generate_full_dot(
-                &tables,
-            );
+            let dot = DotExporter::generate_full_dot(&tables);
 
             assert!(dot.contains("\"public.users\""));
             assert!(dot.contains("\"public.orders\""));
@@ -258,9 +418,7 @@ mod tests {
         fn foreign_keys_appear_as_edges() {
             let tables = make_test_tables();
 
-            let dot = DotExporter::<SystemGraphvizRunner, SystemViewerLauncher>::generate_full_dot(
-                &tables,
-            );
+            let dot = DotExporter::generate_full_dot(&tables);
 
             assert!(dot.contains("\"public.orders\" -> \"public.users\""));
             assert!(dot.contains("label=\"fk_user\""));
@@ -283,9 +441,7 @@ mod tests {
                 },
             ];
 
-            let dot = DotExporter::<SystemGraphvizRunner, SystemViewerLauncher>::generate_full_dot(
-                &tables,
-            );
+            let dot = DotExporter::generate_full_dot(&tables);
 
             let first_pos = dot.find("\"a.first\"").unwrap();
             let last_pos = dot.find("\"z.last\"").unwrap();
@@ -295,7 +451,10 @@ mod tests {
 
     mod export {
         use super::*;
-        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, Ordering},
+        };
 
         enum GraphvizFailure {
             None,
@@ -304,28 +463,28 @@ mod tests {
         }
 
         struct MockGraphviz {
-            called: AtomicBool,
+            called: Arc<AtomicBool>,
             failure: GraphvizFailure,
         }
 
         impl MockGraphviz {
             fn new() -> Self {
                 Self {
-                    called: AtomicBool::new(false),
+                    called: Arc::new(AtomicBool::new(false)),
                     failure: GraphvizFailure::None,
                 }
             }
 
             fn not_installed() -> Self {
                 Self {
-                    called: AtomicBool::new(false),
+                    called: Arc::new(AtomicBool::new(false)),
                     failure: GraphvizFailure::NotInstalled,
                 }
             }
 
             fn command_failed(exit_code: i32) -> Self {
                 Self {
-                    called: AtomicBool::new(false),
+                    called: Arc::new(AtomicBool::new(false)),
                     failure: GraphvizFailure::CommandFailed(exit_code),
                 }
             }
@@ -349,29 +508,33 @@ mod tests {
         }
 
         struct MockViewer {
-            called: AtomicBool,
+            called: Arc<AtomicBool>,
             should_fail: bool,
+            browser: Arc<Mutex<Option<String>>>,
         }
 
         impl MockViewer {
             fn new() -> Self {
                 Self {
-                    called: AtomicBool::new(false),
+                    called: Arc::new(AtomicBool::new(false)),
                     should_fail: false,
+                    browser: Arc::new(Mutex::new(None)),
                 }
             }
 
             fn failing() -> Self {
                 Self {
-                    called: AtomicBool::new(false),
+                    called: Arc::new(AtomicBool::new(false)),
                     should_fail: true,
+                    browser: Arc::new(Mutex::new(None)),
                 }
             }
         }
 
         impl ViewerLauncher for MockViewer {
-            fn open_file(&self, _path: &Path) -> Result<(), ViewerError> {
+            fn open_file(&self, _path: &Path, browser: Option<&str>) -> Result<(), ViewerError> {
                 self.called.store(true, Ordering::SeqCst);
+                *self.browser.lock().unwrap() = browser.map(str::to_string);
                 if self.should_fail {
                     Err(ViewerError::LaunchFailed(std::io::Error::other(
                         "mock failure",
@@ -386,60 +549,165 @@ mod tests {
         fn calls_graphviz_and_viewer() {
             let graphviz = MockGraphviz::new();
             let viewer = MockViewer::new();
+            let graphviz_called = Arc::clone(&graphviz.called);
+            let viewer_called = Arc::clone(&viewer.called);
             let exporter = DotExporter::with_dependencies(graphviz, viewer);
             let temp_dir = tempfile::tempdir().unwrap();
 
-            let result = exporter.export("digraph {}", "test.dot", temp_dir.path());
+            let result = exporter.export("digraph {}", "test.dot", temp_dir.path(), None);
 
             assert!(result.is_ok());
-            assert!(exporter.graphviz.called.load(Ordering::SeqCst));
-            assert!(exporter.viewer.called.load(Ordering::SeqCst));
+            assert!(graphviz_called.load(Ordering::SeqCst));
+            assert!(viewer_called.load(Ordering::SeqCst));
+        }
+
+        #[test]
+        fn passes_browser_to_viewer() {
+            let graphviz = MockGraphviz::new();
+            let viewer = MockViewer::new();
+            let viewer_browser = Arc::clone(&viewer.browser);
+            let exporter = DotExporter::with_dependencies(graphviz, viewer);
+            let temp_dir = tempfile::tempdir().unwrap();
+
+            let result =
+                exporter.export("digraph {}", "test.dot", temp_dir.path(), Some("Firefox"));
+
+            assert!(result.is_ok());
+            assert_eq!(viewer_browser.lock().unwrap().as_deref(), Some("Firefox"));
+        }
+
+        #[test]
+        fn requested_browser_ignores_whitespace_only_values() {
+            assert_eq!(requested_browser(Some("   ")), None);
+        }
+
+        #[test]
+        fn requested_browser_trims_browser_name() {
+            assert_eq!(requested_browser(Some("  Firefox  ")), Some("Firefox"));
+        }
+
+        #[test]
+        fn browser_command_candidates_include_common_presets() {
+            assert_eq!(
+                browser_command_candidates("microsoft edge"),
+                vec!["microsoft-edge", "microsoft-edge-stable"]
+            );
+            assert_eq!(
+                browser_command_candidates("BRAVE"),
+                vec!["brave-browser", "brave"]
+            );
+            assert_eq!(browser_command_candidates("arc"), vec!["arc", "Arc"]);
+            assert_eq!(
+                browser_command_candidates("CustomBrowser"),
+                vec!["CustomBrowser"]
+            );
+        }
+
+        #[test]
+        fn macos_browser_application_name_resolves_brave() {
+            assert_eq!(macos_browser_application_name("Brave"), "Brave Browser");
+            assert_eq!(
+                macos_browser_application_name("Brave Browser"),
+                "Brave Browser"
+            );
+        }
+
+        #[cfg(any(target_os = "freebsd", target_os = "linux"))]
+        #[test]
+        fn empty_browser_candidates_return_unsupported_browser() {
+            let result = open_with_browser_candidates(Path::new("/tmp/er.svg"), "Safari", &[]);
+
+            assert!(matches!(
+                result,
+                Err(ViewerError::UnsupportedBrowser { browser }) if browser == "Safari"
+            ));
+        }
+
+        #[test]
+        fn default_browser_bundle_prefers_https_handler() {
+            let json = r#"[
+                {
+                    "LSHandlerContentType": "com.apple.default-app.web-browser",
+                    "LSHandlerRoleAll": "com.example.contenttype"
+                },
+                {
+                    "LSHandlerURLScheme": "http",
+                    "LSHandlerRoleAll": "com.example.http"
+                },
+                {
+                    "LSHandlerURLScheme": "https",
+                    "LSHandlerRoleAll": "company.thebrowser.browser"
+                }
+            ]"#;
+
+            assert_eq!(
+                default_web_browser_bundle_id_from_ls_handlers_json(json).as_deref(),
+                Some("company.thebrowser.browser")
+            );
+        }
+
+        #[test]
+        fn default_browser_bundle_falls_back_to_default_browser_content_type() {
+            let json = r#"[
+                {
+                    "LSHandlerContentType": "com.apple.default-app.web-browser",
+                    "LSHandlerRoleAll": "company.thebrowser.browser"
+                }
+            ]"#;
+
+            assert_eq!(
+                default_web_browser_bundle_id_from_ls_handlers_json(json).as_deref(),
+                Some("company.thebrowser.browser")
+            );
         }
 
         #[test]
         fn graphviz_not_installed_returns_error() {
             let graphviz = MockGraphviz::not_installed();
             let viewer = MockViewer::new();
+            let viewer_called = Arc::clone(&viewer.called);
             let exporter = DotExporter::with_dependencies(graphviz, viewer);
             let temp_dir = tempfile::tempdir().unwrap();
 
-            let result = exporter.export("digraph {}", "test.dot", temp_dir.path());
+            let result = exporter.export("digraph {}", "test.dot", temp_dir.path(), None);
 
             assert!(result.is_err());
             let err_msg = result.unwrap_err().to_string();
             assert!(err_msg.contains("Graphviz"));
-            assert!(!exporter.viewer.called.load(Ordering::SeqCst));
+            assert!(!viewer_called.load(Ordering::SeqCst));
         }
 
         #[test]
         fn graphviz_command_failed_includes_exit_code() {
             let graphviz = MockGraphviz::command_failed(1);
             let viewer = MockViewer::new();
+            let viewer_called = Arc::clone(&viewer.called);
             let exporter = DotExporter::with_dependencies(graphviz, viewer);
             let temp_dir = tempfile::tempdir().unwrap();
 
-            let result = exporter.export("digraph {}", "test.dot", temp_dir.path());
+            let result = exporter.export("digraph {}", "test.dot", temp_dir.path(), None);
 
             assert!(result.is_err());
             let err_msg = result.unwrap_err().to_string();
             assert!(err_msg.contains("Graphviz failed"));
             assert!(err_msg.contains("exit code"));
-            assert!(!exporter.viewer.called.load(Ordering::SeqCst));
+            assert!(!viewer_called.load(Ordering::SeqCst));
         }
 
         #[test]
         fn viewer_failure_returns_error() {
             let graphviz = MockGraphviz::new();
             let viewer = MockViewer::failing();
+            let graphviz_called = Arc::clone(&graphviz.called);
             let exporter = DotExporter::with_dependencies(graphviz, viewer);
             let temp_dir = tempfile::tempdir().unwrap();
 
-            let result = exporter.export("digraph {}", "test.dot", temp_dir.path());
+            let result = exporter.export("digraph {}", "test.dot", temp_dir.path(), None);
 
             assert!(result.is_err());
             let err_msg = result.unwrap_err().to_string();
             assert!(err_msg.contains("mock failure"));
-            assert!(exporter.graphviz.called.load(Ordering::SeqCst));
+            assert!(graphviz_called.load(Ordering::SeqCst));
         }
 
         #[test]
@@ -452,7 +720,7 @@ mod tests {
 
             let exporter = DotExporter::with_dependencies(MockGraphviz::new(), MockViewer::new());
             exporter
-                .export("digraph {}", "er_new.dot", temp_dir.path())
+                .export("digraph {}", "er_new.dot", temp_dir.path(), None)
                 .unwrap();
 
             assert!(!old_dot.exists());
@@ -470,7 +738,7 @@ mod tests {
 
             let exporter = DotExporter::with_dependencies(MockGraphviz::new(), MockViewer::new());
             exporter
-                .export("digraph {}", "er_new.dot", temp_dir.path())
+                .export("digraph {}", "er_new.dot", temp_dir.path(), None)
                 .unwrap();
 
             assert!(log_file.exists());
@@ -487,7 +755,7 @@ mod tests {
 
             let exporter =
                 DotExporter::with_dependencies(MockGraphviz::not_installed(), MockViewer::new());
-            let result = exporter.export("digraph {}", "er_new.dot", temp_dir.path());
+            let result = exporter.export("digraph {}", "er_new.dot", temp_dir.path(), None);
 
             assert!(result.is_err());
             assert!(old_dot.exists());
@@ -504,7 +772,7 @@ mod tests {
 
             let exporter =
                 DotExporter::with_dependencies(MockGraphviz::new(), MockViewer::failing());
-            let result = exporter.export("digraph {}", "er_new.dot", temp_dir.path());
+            let result = exporter.export("digraph {}", "er_new.dot", temp_dir.path(), None);
 
             assert!(result.is_err());
             assert!(temp_dir.path().join("er_new.dot").exists());

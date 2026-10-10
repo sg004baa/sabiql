@@ -1,8 +1,9 @@
 ---
-source: src/tests/render_snapshots/overlays.rs
+source: crates/sabiql/src/tests/render_snapshots/overlays.rs
+assertion_line: 543
 expression: output
 ---
-test_project | test_db | - | no dsn | localhost:5432/test                                                                                                            
+test_project ▸ test_db ▸ -                                                                                                            connected | localhost:5432/test
 ┌ [1] Explorer ─────────────────────────┐[Info] [Cols] [Idx] [FK] [RLS] [Trig] [DDL]                                                                                 
 │> public.users                         │┌ [2] Inspector ───────────────────────────────────────────────────────────────────────────────────────────────────────────┐
 │  public.posts                         ││(select a table)                                                                                                          │
@@ -18,8 +19,8 @@ test_project | test_db | - | no dsn | localhost:5432/test
 │                                       │╭ Command Palette ────────────────────────────────────────────────────────────────╮                                        │
 │                                       ││  q                  Quit application                                            │                                        │
 │                                       ││  ?                  Toggle help                                                 │                                        │
-│                                       ││  /, Ctrl+P          Open Table Picker                                           │                                        │
-│                                       ││  Ctrl+K             Open Settings                                               │                                        │
+│                                       ││  Ctrl+P             Open Table Picker                                           │                                        │
+│                                       ││  ,                  Open Settings                                               │                                        │
 │                                       ││  f                  Toggle Focus mode                                           │                                        │
 │                                       ││  r                  Reload metadata                                             │                                        │
 │                                       ││  s                  Open SQL Editor                                             │                                        │
@@ -39,7 +40,7 @@ test_project | test_db | - | no dsn | localhost:5432/test
 │                                       ││                                                                                 │                                        │
 │                                       ││                                                                                 │                                        │
 │                                       ││                                                                                 │                                        │
-│                                       │╰ Enter Select │ Esc/q Close ─────────────────────────────────────────────────────╯                                        │
+│                                       │╰ Enter: Execute │ Esc/q: Close ──────────────────────────────────────────────────╯                                        │
 │                                       ││                                                                                                                          │
 │                                       ││                                                                                                                          │
 │                                       ││                                                                                                                          │
@@ -51,4 +52,3 @@ test_project | test_db | - | no dsn | localhost:5432/test
 │                                       ││                                                                                                                          │
 │                                       ││                                                                                                                          │
 └───────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-Enter:Execute  Esc/q:Close

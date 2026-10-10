@@ -1,16 +1,21 @@
 use std::sync::Arc;
 
+use crate::model::shared::settings::KeymapPreset;
 use crate::model::shared::theme_id::ThemeId;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppSettings {
     pub theme_id: ThemeId,
+    pub keymap_preset: KeymapPreset,
+    pub er_browser: Option<String>,
 }
 
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
             theme_id: ThemeId::Default,
+            keymap_preset: KeymapPreset::Default,
+            er_browser: None,
         }
     }
 }
@@ -25,8 +30,6 @@ pub enum SettingsStoreError {
     TomlDeserialize(#[source] Arc<toml::de::Error>),
     #[error("Config version mismatch: found {found}, expected {expected}")]
     VersionMismatch { found: u32, expected: u32 },
-    #[error("Unknown theme `{0}` (expected one of: dark, light)")]
-    UnknownTheme(String),
 }
 
 impl From<std::io::Error> for SettingsStoreError {
@@ -48,6 +51,5 @@ impl From<toml::de::Error> for SettingsStoreError {
 }
 
 pub trait SettingsStore: Send + Sync {
-    fn load(&self) -> Result<AppSettings, SettingsStoreError>;
     fn save(&self, settings: AppSettings) -> Result<(), SettingsStoreError>;
 }

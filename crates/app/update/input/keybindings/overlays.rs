@@ -1,81 +1,101 @@
-use super::{ExecBinding, KeyBinding, ModeRow};
-use super::{Key, KeyCombo};
-use crate::update::action::{
-    Action, CursorMove, ExternalEditorTarget, InputTarget, ListMotion, ListTarget, ModalKind,
-    ScrollAmount, ScrollDirection, ScrollTarget,
-};
+use super::{KeyBinding, ModeRow};
+use crate::model::shared::settings::KeymapPreset;
 
 // =============================================================================
 // Overlays (common display hints)
 // =============================================================================
 
-pub const OVERLAY_KEYS: &[KeyBinding] = &[
-    KeyBinding {
+pub mod overlay {
+    use crate::update::action::Action;
+    use crate::update::input::keybindings::KeyBinding;
+
+    pub const ESC_CANCEL: KeyBinding = KeyBinding {
         key_short: "Esc",
         key: "Esc",
         desc_short: "Cancel",
         description: "Close overlay / Cancel",
         action: Action::None,
         combos: &[],
-    },
-    KeyBinding {
+    };
+
+    pub const ESC_CLOSE: KeyBinding = KeyBinding {
         key_short: "Esc",
         key: "Esc",
         desc_short: "Close",
         description: "Close overlay",
         action: Action::None,
         combos: &[],
-    },
-    KeyBinding {
+    };
+
+    pub const ENTER_EXECUTE: KeyBinding = KeyBinding {
         key_short: "Enter",
         key: "Enter",
         desc_short: "Execute",
         description: "Execute command",
         action: Action::None,
         combos: &[],
-    },
-    KeyBinding {
+    };
+
+    pub const ENTER_SELECT: KeyBinding = KeyBinding {
         key_short: "Enter",
         key: "Enter",
         desc_short: "Select",
         description: "Confirm selection",
         action: Action::None,
         combos: &[],
-    },
-    KeyBinding {
+    };
+
+    pub const NAVIGATE_JK: KeyBinding = KeyBinding {
         key_short: "^N/^P/j/k/↑↓",
         key: "j / k / Ctrl+N / Ctrl+P / ↑ / ↓",
         desc_short: "Navigate",
         description: "Navigate items",
         action: Action::None,
         combos: &[],
-    },
-    KeyBinding {
+    };
+
+    pub const TYPE_FILTER: KeyBinding = KeyBinding {
         key_short: "type",
         key: "type",
         desc_short: "Filter",
         description: "Type to filter",
         action: Action::None,
         combos: &[],
-    },
-    KeyBinding {
+    };
+
+    pub const ERROR_OPEN: KeyBinding = KeyBinding {
         key_short: "Enter",
         key: "Enter",
         desc_short: "Error",
         description: "View error details",
         action: Action::None,
         combos: &[],
-    },
+    };
+}
+
+pub const OVERLAY_KEYS: &[KeyBinding] = &[
+    overlay::ESC_CANCEL,
+    overlay::ESC_CLOSE,
+    overlay::ENTER_EXECUTE,
+    overlay::ENTER_SELECT,
+    overlay::NAVIGATE_JK,
+    overlay::TYPE_FILTER,
+    overlay::ERROR_OPEN,
 ];
 
 // =============================================================================
 // Help
 // =============================================================================
 
-pub const HELP_ROWS: &[ModeRow] = &[
-    ModeRow {
-        key_short: "^N/^P/j/k/↑↓",
-        key: "j / k / Ctrl+N / Ctrl+P / ↑ / ↓",
+pub mod help {
+    use crate::update::action::{
+        Action, InputTarget, ModalKind, ScrollAmount, ScrollDirection, ScrollTarget,
+    };
+    use crate::update::input::keybindings::{ExecBinding, Key, KeyCombo, ModeRow};
+
+    pub const SCROLL: ModeRow = ModeRow {
+        key_short: "^N/^P/jk/↑↓",
+        key: "Ctrl+N / Ctrl+P / j / k / ↑ / ↓",
         desc_short: "Scroll",
         description: "Scroll down / up",
         bindings: &[
@@ -86,8 +106,8 @@ pub const HELP_ROWS: &[ModeRow] = &[
                     amount: ScrollAmount::Line,
                 },
                 combos: &[
-                    KeyCombo::plain(Key::Char('j')),
                     KeyCombo::plain(Key::Down),
+                    KeyCombo::plain(Key::Char('j')),
                     KeyCombo::ctrl(Key::Char('n')),
                 ],
             },
@@ -98,16 +118,17 @@ pub const HELP_ROWS: &[ModeRow] = &[
                     amount: ScrollAmount::Line,
                 },
                 combos: &[
-                    KeyCombo::plain(Key::Char('k')),
                     KeyCombo::plain(Key::Up),
+                    KeyCombo::plain(Key::Char('k')),
                     KeyCombo::ctrl(Key::Char('p')),
                 ],
             },
         ],
-    },
-    ModeRow {
-        key_short: "g/G/Home/End",
-        key: "g / Home / G / End",
+    };
+
+    pub const TOP_BOTTOM: ModeRow = ModeRow {
+        key_short: "Home/End",
+        key: "Home / End",
         desc_short: "Top/Btm",
         description: "Jump to top / bottom",
         bindings: &[
@@ -117,7 +138,7 @@ pub const HELP_ROWS: &[ModeRow] = &[
                     direction: ScrollDirection::Up,
                     amount: ScrollAmount::ToStart,
                 },
-                combos: &[KeyCombo::plain(Key::Char('g')), KeyCombo::plain(Key::Home)],
+                combos: &[KeyCombo::plain(Key::Home)],
             },
             ExecBinding {
                 action: Action::Scroll {
@@ -125,11 +146,12 @@ pub const HELP_ROWS: &[ModeRow] = &[
                     direction: ScrollDirection::Down,
                     amount: ScrollAmount::ToEnd,
                 },
-                combos: &[KeyCombo::plain(Key::Char('G')), KeyCombo::plain(Key::End)],
+                combos: &[KeyCombo::plain(Key::End)],
             },
         ],
-    },
-    ModeRow {
+    };
+
+    pub const HALF_PAGE: ModeRow = ModeRow {
         key_short: "^D/^U",
         key: "Ctrl+D / Ctrl+U",
         desc_short: "Half Page",
@@ -152,8 +174,9 @@ pub const HELP_ROWS: &[ModeRow] = &[
                 combos: &[KeyCombo::ctrl(Key::Char('u'))],
             },
         ],
-    },
-    ModeRow {
+    };
+
+    pub const FULL_PAGE: ModeRow = ModeRow {
         key_short: "^F/^B/PgDn/Up",
         key: "Ctrl+F / Ctrl+B / PageDown / PageUp",
         desc_short: "Full Page",
@@ -179,9 +202,10 @@ pub const HELP_ROWS: &[ModeRow] = &[
                 combos: &[KeyCombo::ctrl(Key::Char('b')), KeyCombo::plain(Key::PageUp)],
             },
         ],
-    },
-    ModeRow {
-        key_short: "h/l / ←→",
+    };
+
+    pub const H_SCROLL: ModeRow = ModeRow {
+        key_short: "h/l/←/→",
         key: "h / l / ← / →",
         desc_short: "H-Scroll",
         description: "Scroll left / right",
@@ -203,29 +227,112 @@ pub const HELP_ROWS: &[ModeRow] = &[
                 combos: &[KeyCombo::plain(Key::Char('l')), KeyCombo::plain(Key::Right)],
             },
         ],
-    },
-    ModeRow {
-        key_short: "?/Esc/q",
-        key: "? / Esc / q",
+    };
+
+    pub const TYPE_FILTER: ModeRow = ModeRow {
+        key_short: "type",
+        key: "type",
+        desc_short: "Filter",
+        description: "Filter help",
+        bindings: &[],
+    };
+
+    pub const START_FILTER: ModeRow = ModeRow {
+        key_short: "/",
+        key: "/",
+        desc_short: "Filter",
+        description: "Edit filter",
+        bindings: &[ExecBinding {
+            action: Action::EnterHelpFilter,
+            combos: &[KeyCombo::plain(Key::Char('/'))],
+        }],
+    };
+
+    pub const ESC_VIEWING: ModeRow = ModeRow {
+        key_short: "Esc",
+        key: "Esc",
+        desc_short: "Browse",
+        description: "Return to help browsing",
+        bindings: &[ExecBinding {
+            action: Action::ExitHelpFilter,
+            combos: &[KeyCombo::plain(Key::Esc)],
+        }],
+    };
+
+    pub const EDIT_FILTER: ModeRow = ModeRow {
+        key_short: "Backspace",
+        key: "Backspace",
+        desc_short: "Edit",
+        description: "Edit filter",
+        bindings: &[ExecBinding {
+            action: Action::TextBackspace {
+                target: InputTarget::HelpFilter,
+            },
+            combos: &[KeyCombo::plain(Key::Backspace)],
+        }],
+    };
+
+    pub const ESC_CLOSE: ModeRow = ModeRow {
+        key_short: "Esc",
+        key: "Esc",
+        desc_short: "Close",
+        description: "Close help",
+        bindings: &[ExecBinding {
+            action: Action::CloseModal(ModalKind::Help),
+            combos: &[KeyCombo::plain(Key::Esc)],
+        }],
+    };
+
+    pub const CLOSE: ModeRow = ModeRow {
+        key_short: "?/q",
+        key: "? / q",
         desc_short: "Close",
         description: "Close help",
         bindings: &[ExecBinding {
             action: Action::CloseModal(ModalKind::Help),
             combos: &[
                 KeyCombo::plain(Key::Char('?')),
-                KeyCombo::plain(Key::Esc),
                 KeyCombo::plain(Key::Char('q')),
             ],
         }],
-    },
+    };
+}
+
+pub const HELP_ROWS: &[ModeRow] = &[
+    help::SCROLL,
+    help::TOP_BOTTOM,
+    help::HALF_PAGE,
+    help::FULL_PAGE,
+    help::H_SCROLL,
+    help::START_FILTER,
+    help::ESC_CLOSE,
+    help::CLOSE,
 ];
+
+pub const HELP_VIEWING_ROWS: &[ModeRow] = &[
+    help::SCROLL,
+    help::TOP_BOTTOM,
+    help::HALF_PAGE,
+    help::FULL_PAGE,
+    help::H_SCROLL,
+    help::START_FILTER,
+    help::ESC_CLOSE,
+    help::CLOSE,
+];
+
+pub const HELP_EDITING_ROWS: &[ModeRow] = &[help::ESC_VIEWING, help::EDIT_FILTER];
 
 // =============================================================================
 // Table Picker
 // =============================================================================
 
-pub const TABLE_PICKER_ROWS: &[ModeRow] = &[
-    ModeRow {
+pub mod table_picker {
+    use crate::update::action::{
+        Action, CursorMove, InputTarget, ListMotion, ListTarget, ModalKind,
+    };
+    use crate::update::input::keybindings::{ExecBinding, Key, KeyCombo, ModeRow};
+
+    pub const ENTER_SELECT: ModeRow = ModeRow {
         key_short: "Enter",
         key: "Enter",
         desc_short: "Select",
@@ -234,8 +341,9 @@ pub const TABLE_PICKER_ROWS: &[ModeRow] = &[
             action: Action::ConfirmSelection,
             combos: &[KeyCombo::plain(Key::Enter)],
         }],
-    },
-    ModeRow {
+    };
+
+    pub const NAVIGATE: ModeRow = ModeRow {
         key_short: "^N/^P/↑↓",
         key: "Ctrl+N / Ctrl+P / ↑ / ↓",
         desc_short: "Navigate",
@@ -256,8 +364,9 @@ pub const TABLE_PICKER_ROWS: &[ModeRow] = &[
                 combos: &[KeyCombo::plain(Key::Up), KeyCombo::ctrl(Key::Char('p'))],
             },
         ],
-    },
-    ModeRow {
+    };
+
+    pub const TYPE_FILTER: ModeRow = ModeRow {
         key_short: "type",
         key: "type",
         desc_short: "Filter",
@@ -298,8 +407,9 @@ pub const TABLE_PICKER_ROWS: &[ModeRow] = &[
                 combos: &[KeyCombo::plain(Key::End)],
             },
         ],
-    },
-    ModeRow {
+    };
+
+    pub const ESC_CLOSE: ModeRow = ModeRow {
         key_short: "Esc",
         key: "Esc",
         desc_short: "Close",
@@ -308,15 +418,27 @@ pub const TABLE_PICKER_ROWS: &[ModeRow] = &[
             action: Action::CloseModal(ModalKind::TablePicker),
             combos: &[KeyCombo::plain(Key::Esc)],
         }],
-    },
+    };
+}
+
+pub const TABLE_PICKER_ROWS: &[ModeRow] = &[
+    table_picker::ENTER_SELECT,
+    table_picker::NAVIGATE,
+    table_picker::TYPE_FILTER,
+    table_picker::ESC_CLOSE,
 ];
 
 // =============================================================================
 // ER Table Picker
 // =============================================================================
 
-pub const ER_PICKER_ROWS: &[ModeRow] = &[
-    ModeRow {
+pub mod er_picker {
+    use crate::update::action::{
+        Action, CursorMove, InputTarget, ListMotion, ListTarget, ModalKind,
+    };
+    use crate::update::input::keybindings::{ExecBinding, Key, KeyCombo, ModeRow};
+
+    pub const ENTER_GENERATE: ModeRow = ModeRow {
         key_short: "Enter",
         key: "Enter",
         desc_short: "Generate",
@@ -325,8 +447,9 @@ pub const ER_PICKER_ROWS: &[ModeRow] = &[
             action: Action::ErConfirmSelection,
             combos: &[KeyCombo::plain(Key::Enter)],
         }],
-    },
-    ModeRow {
+    };
+
+    pub const SELECT: ModeRow = ModeRow {
         key_short: "Space",
         key: "Space",
         desc_short: "Select",
@@ -335,18 +458,31 @@ pub const ER_PICKER_ROWS: &[ModeRow] = &[
             action: Action::ErToggleSelection,
             combos: &[KeyCombo::plain(Key::Char(' '))],
         }],
-    },
-    ModeRow {
-        key_short: "^A",
-        key: "Ctrl+A",
+    };
+
+    pub const SELECT_ALL: ModeRow = ModeRow {
+        key_short: "⌥A",
+        key: "Alt+A",
         desc_short: "All",
         description: "Select/deselect all tables",
         bindings: &[ExecBinding {
             action: Action::ErSelectAll,
-            combos: &[KeyCombo::ctrl(Key::Char('a'))],
+            combos: &[KeyCombo::alt(Key::Char('a'))],
         }],
-    },
-    ModeRow {
+    };
+
+    pub const SELECT_ALL_IDE: ModeRow = ModeRow {
+        key_short: "⌥A",
+        key: "Alt+A",
+        desc_short: "All",
+        description: "Select/deselect all tables",
+        bindings: &[ExecBinding {
+            action: Action::ErSelectAll,
+            combos: &[KeyCombo::alt(Key::Char('a'))],
+        }],
+    };
+
+    pub const NAVIGATE: ModeRow = ModeRow {
         key_short: "^N/^P/↑↓",
         key: "Ctrl+N / Ctrl+P / ↑ / ↓",
         desc_short: "Nav",
@@ -367,8 +503,9 @@ pub const ER_PICKER_ROWS: &[ModeRow] = &[
                 combos: &[KeyCombo::plain(Key::Up), KeyCombo::ctrl(Key::Char('p'))],
             },
         ],
-    },
-    ModeRow {
+    };
+
+    pub const TYPE_FILTER: ModeRow = ModeRow {
         key_short: "type",
         key: "type",
         desc_short: "Filter",
@@ -409,8 +546,9 @@ pub const ER_PICKER_ROWS: &[ModeRow] = &[
                 combos: &[KeyCombo::plain(Key::End)],
             },
         ],
-    },
-    ModeRow {
+    };
+
+    pub const ESC_CLOSE: ModeRow = ModeRow {
         key_short: "Esc",
         key: "Esc",
         desc_short: "Close",
@@ -419,15 +557,52 @@ pub const ER_PICKER_ROWS: &[ModeRow] = &[
             action: Action::CloseModal(ModalKind::ErTablePicker),
             combos: &[KeyCombo::plain(Key::Esc)],
         }],
-    },
+    };
+}
+
+pub const ER_PICKER_ROWS: &[ModeRow] = &[
+    er_picker::ENTER_GENERATE,
+    er_picker::SELECT,
+    er_picker::SELECT_ALL,
+    er_picker::NAVIGATE,
+    er_picker::TYPE_FILTER,
+    er_picker::ESC_CLOSE,
 ];
+
+pub const ER_PICKER_ROWS_IDE: &[ModeRow] = &[
+    er_picker::ENTER_GENERATE,
+    er_picker::SELECT,
+    er_picker::SELECT_ALL_IDE,
+    er_picker::NAVIGATE,
+    er_picker::TYPE_FILTER,
+    er_picker::ESC_CLOSE,
+];
+
+pub fn er_picker_rows(preset: KeymapPreset) -> &'static [ModeRow] {
+    match preset {
+        KeymapPreset::Default => ER_PICKER_ROWS,
+        KeymapPreset::Ide => ER_PICKER_ROWS_IDE,
+    }
+}
+
+pub fn er_picker_select_all(preset: KeymapPreset) -> &'static ModeRow {
+    match preset {
+        KeymapPreset::Default => &er_picker::SELECT_ALL,
+        KeymapPreset::Ide => &er_picker::SELECT_ALL_IDE,
+    }
+}
 
 // =============================================================================
 // Query History Picker
 // =============================================================================
 
-pub const QUERY_HISTORY_PICKER_ROWS: &[ModeRow] = &[
-    ModeRow {
+pub mod query_history_picker {
+    use crate::update::action::{
+        Action, CursorMove, InputTarget, ListMotion, ListTarget, ModalKind,
+    };
+    use crate::update::input::keybindings::{ExecBinding, Key, KeyCombo, ModeRow};
+
+    pub const ENTER_SELECT: ModeRow = ModeRow {
         key_short: "Enter",
         key: "Enter",
         desc_short: "Select",
@@ -436,8 +611,9 @@ pub const QUERY_HISTORY_PICKER_ROWS: &[ModeRow] = &[
             action: Action::QueryHistoryConfirmSelection,
             combos: &[KeyCombo::plain(Key::Enter)],
         }],
-    },
-    ModeRow {
+    };
+
+    pub const NAVIGATE: ModeRow = ModeRow {
         key_short: "^N/^P/↑↓",
         key: "Ctrl+N / Ctrl+P / ↑ / ↓",
         desc_short: "Navigate",
@@ -458,8 +634,9 @@ pub const QUERY_HISTORY_PICKER_ROWS: &[ModeRow] = &[
                 combos: &[KeyCombo::plain(Key::Up), KeyCombo::ctrl(Key::Char('p'))],
             },
         ],
-    },
-    ModeRow {
+    };
+
+    pub const TYPE_FILTER: ModeRow = ModeRow {
         key_short: "type",
         key: "type",
         desc_short: "Filter",
@@ -500,8 +677,9 @@ pub const QUERY_HISTORY_PICKER_ROWS: &[ModeRow] = &[
                 combos: &[KeyCombo::plain(Key::End)],
             },
         ],
-    },
-    ModeRow {
+    };
+
+    pub const ESC_CLOSE: ModeRow = ModeRow {
         key_short: "Esc",
         key: "Esc",
         desc_short: "Close",
@@ -510,102 +688,25 @@ pub const QUERY_HISTORY_PICKER_ROWS: &[ModeRow] = &[
             action: Action::CloseModal(ModalKind::QueryHistoryPicker),
             combos: &[KeyCombo::plain(Key::Esc)],
         }],
-    },
-];
+    };
+}
 
-pub const FILE_PICKER_ROWS: &[ModeRow] = &[
-    ModeRow {
-        key_short: "Enter",
-        key: "Enter",
-        desc_short: "Select",
-        description: "Select file",
-        bindings: &[ExecBinding {
-            action: Action::FilePickerConfirmSelection,
-            combos: &[KeyCombo::plain(Key::Enter)],
-        }],
-    },
-    ModeRow {
-        key_short: "^N/^P/↑↓",
-        key: "Ctrl+N / Ctrl+P / ↑ / ↓",
-        desc_short: "Navigate",
-        description: "Navigate",
-        bindings: &[
-            ExecBinding {
-                action: Action::ListSelect {
-                    target: ListTarget::FilePicker,
-                    motion: ListMotion::Next,
-                },
-                combos: &[KeyCombo::plain(Key::Down), KeyCombo::ctrl(Key::Char('n'))],
-            },
-            ExecBinding {
-                action: Action::ListSelect {
-                    target: ListTarget::FilePicker,
-                    motion: ListMotion::Previous,
-                },
-                combos: &[KeyCombo::plain(Key::Up), KeyCombo::ctrl(Key::Char('p'))],
-            },
-        ],
-    },
-    ModeRow {
-        key_short: "type",
-        key: "type",
-        desc_short: "Filter",
-        description: "Type to filter",
-        bindings: &[
-            ExecBinding {
-                action: Action::TextBackspace {
-                    target: InputTarget::FilePickerFilter,
-                },
-                combos: &[KeyCombo::plain(Key::Backspace)],
-            },
-            ExecBinding {
-                action: Action::TextMoveCursor {
-                    target: InputTarget::FilePickerFilter,
-                    direction: CursorMove::Left,
-                },
-                combos: &[KeyCombo::plain(Key::Left)],
-            },
-            ExecBinding {
-                action: Action::TextMoveCursor {
-                    target: InputTarget::FilePickerFilter,
-                    direction: CursorMove::Right,
-                },
-                combos: &[KeyCombo::plain(Key::Right)],
-            },
-            ExecBinding {
-                action: Action::TextMoveCursor {
-                    target: InputTarget::FilePickerFilter,
-                    direction: CursorMove::Home,
-                },
-                combos: &[KeyCombo::plain(Key::Home)],
-            },
-            ExecBinding {
-                action: Action::TextMoveCursor {
-                    target: InputTarget::FilePickerFilter,
-                    direction: CursorMove::End,
-                },
-                combos: &[KeyCombo::plain(Key::End)],
-            },
-        ],
-    },
-    ModeRow {
-        key_short: "Esc",
-        key: "Esc",
-        desc_short: "Close",
-        description: "Close",
-        bindings: &[ExecBinding {
-            action: Action::CloseModal(ModalKind::FilePicker),
-            combos: &[KeyCombo::plain(Key::Esc)],
-        }],
-    },
+pub const QUERY_HISTORY_PICKER_ROWS: &[ModeRow] = &[
+    query_history_picker::ENTER_SELECT,
+    query_history_picker::NAVIGATE,
+    query_history_picker::TYPE_FILTER,
+    query_history_picker::ESC_CLOSE,
 ];
 
 // =============================================================================
 // Command Palette
 // =============================================================================
 
-pub const COMMAND_PALETTE_ROWS: &[ModeRow] = &[
-    ModeRow {
+pub mod command_palette {
+    use crate::update::action::{Action, ListMotion, ListTarget, ModalKind};
+    use crate::update::input::keybindings::{ExecBinding, Key, KeyCombo, ModeRow};
+
+    pub const ENTER_EXECUTE: ModeRow = ModeRow {
         key_short: "Enter",
         key: "Enter",
         desc_short: "Execute",
@@ -614,8 +715,9 @@ pub const COMMAND_PALETTE_ROWS: &[ModeRow] = &[
             action: Action::ConfirmSelection,
             combos: &[KeyCombo::plain(Key::Enter)],
         }],
-    },
-    ModeRow {
+    };
+
+    pub const NAVIGATE_JK: ModeRow = ModeRow {
         key_short: "^N/^P/j/k/↑↓",
         key: "j / k / Ctrl+N / Ctrl+P / ↑ / ↓",
         desc_short: "Navigate",
@@ -644,8 +746,9 @@ pub const COMMAND_PALETTE_ROWS: &[ModeRow] = &[
                 ],
             },
         ],
-    },
-    ModeRow {
+    };
+
+    pub const ESC_CLOSE: ModeRow = ModeRow {
         key_short: "Esc/q",
         key: "Esc / q",
         desc_short: "Close",
@@ -654,64 +757,24 @@ pub const COMMAND_PALETTE_ROWS: &[ModeRow] = &[
             action: Action::CloseModal(ModalKind::CommandPalette),
             combos: &[KeyCombo::plain(Key::Esc), KeyCombo::plain(Key::Char('q'))],
         }],
-    },
-];
+    };
+}
 
-// =============================================================================
-// Generate SQL Menu
-// =============================================================================
-
-pub const GENERATE_SQL_MENU_ROWS: &[ModeRow] = &[
-    ModeRow {
-        key_short: "Enter",
-        key: "Enter",
-        desc_short: "Select",
-        description: "Select statement kind",
-        bindings: &[ExecBinding {
-            action: Action::ConfirmSelection,
-            combos: &[KeyCombo::plain(Key::Enter)],
-        }],
-    },
-    ModeRow {
-        key_short: "j/k/↑↓",
-        key: "j / k / ↑ / ↓",
-        desc_short: "Navigate",
-        description: "Navigate",
-        bindings: &[
-            ExecBinding {
-                action: Action::ListSelect {
-                    target: ListTarget::GenerateSqlMenu,
-                    motion: ListMotion::Next,
-                },
-                combos: &[KeyCombo::plain(Key::Char('j')), KeyCombo::plain(Key::Down)],
-            },
-            ExecBinding {
-                action: Action::ListSelect {
-                    target: ListTarget::GenerateSqlMenu,
-                    motion: ListMotion::Previous,
-                },
-                combos: &[KeyCombo::plain(Key::Char('k')), KeyCombo::plain(Key::Up)],
-            },
-        ],
-    },
-    ModeRow {
-        key_short: "Esc/q",
-        key: "Esc / q",
-        desc_short: "Close",
-        description: "Close",
-        bindings: &[ExecBinding {
-            action: Action::CloseModal(ModalKind::GenerateSqlMenu),
-            combos: &[KeyCombo::plain(Key::Esc), KeyCombo::plain(Key::Char('q'))],
-        }],
-    },
+pub const COMMAND_PALETTE_ROWS: &[ModeRow] = &[
+    command_palette::ENTER_EXECUTE,
+    command_palette::NAVIGATE_JK,
+    command_palette::ESC_CLOSE,
 ];
 
 // =============================================================================
 // Settings
 // =============================================================================
 
-pub const SETTINGS_ROWS: &[ModeRow] = &[
-    ModeRow {
+pub mod settings {
+    use crate::update::action::Action;
+    use crate::update::input::keybindings::{ExecBinding, Key, KeyCombo, ModeRow};
+
+    pub const APPLY: ModeRow = ModeRow {
         key_short: "Enter",
         key: "Enter",
         desc_short: "Apply",
@@ -720,24 +783,54 @@ pub const SETTINGS_ROWS: &[ModeRow] = &[
             action: Action::SettingsApply,
             combos: &[KeyCombo::plain(Key::Enter)],
         }],
-    },
-    ModeRow {
+    };
+
+    pub const SELECT: ModeRow = ModeRow {
         key_short: "j/k/↑↓",
         key: "j / k / ↑ / ↓",
         desc_short: "Select",
         description: "Select setting",
         bindings: &[
             ExecBinding {
-                action: Action::SettingsSelectNextTheme,
-                combos: &[KeyCombo::plain(Key::Char('j')), KeyCombo::plain(Key::Down)],
+                action: Action::SettingsSelectNext,
+                combos: &[KeyCombo::plain(Key::Down), KeyCombo::plain(Key::Char('j'))],
             },
             ExecBinding {
-                action: Action::SettingsSelectPreviousTheme,
-                combos: &[KeyCombo::plain(Key::Char('k')), KeyCombo::plain(Key::Up)],
+                action: Action::SettingsSelectPrevious,
+                combos: &[KeyCombo::plain(Key::Up), KeyCombo::plain(Key::Char('k'))],
             },
         ],
-    },
-    ModeRow {
+    };
+
+    pub const EDIT: ModeRow = ModeRow {
+        key_short: "i",
+        key: "i",
+        desc_short: "Edit",
+        description: "Edit custom browser",
+        bindings: &[ExecBinding {
+            action: Action::SettingsStartCustomBrowserEdit,
+            combos: &[KeyCombo::plain(Key::Char('i'))],
+        }],
+    };
+
+    pub const SECTION: ModeRow = ModeRow {
+        key_short: "Tab/⇧Tab",
+        key: "Tab / Shift+Tab",
+        desc_short: "Section",
+        description: "Switch settings section",
+        bindings: &[
+            ExecBinding {
+                action: Action::SettingsNextSection,
+                combos: &[KeyCombo::plain(Key::Tab)],
+            },
+            ExecBinding {
+                action: Action::SettingsPreviousSection,
+                combos: &[KeyCombo::shift(Key::BackTab)],
+            },
+        ],
+    };
+
+    pub const CANCEL: ModeRow = ModeRow {
         key_short: "Esc",
         key: "Esc",
         desc_short: "Cancel",
@@ -746,23 +839,35 @@ pub const SETTINGS_ROWS: &[ModeRow] = &[
             action: Action::SettingsCancel,
             combos: &[KeyCombo::plain(Key::Esc)],
         }],
-    },
+    };
+}
+
+pub const SETTINGS_ROWS: &[ModeRow] = &[
+    settings::APPLY,
+    settings::SELECT,
+    settings::EDIT,
+    settings::SECTION,
+    settings::CANCEL,
 ];
 
 // =============================================================================
 // Confirm Dialog
 // =============================================================================
 
-pub const CONFIRM_DIALOG_KEYS: &[KeyBinding] = &[
-    KeyBinding {
+pub mod confirm {
+    use crate::update::action::{Action, ScrollAmount, ScrollDirection, ScrollTarget};
+    use crate::update::input::keybindings::{Key, KeyBinding, KeyCombo};
+
+    pub const YES: KeyBinding = KeyBinding {
         key_short: "Enter",
         key: "Enter",
         desc_short: "Confirm",
         description: "Confirm",
         action: Action::ConfirmDialogConfirm,
         combos: &[KeyCombo::plain(Key::Enter)],
-    },
-    KeyBinding {
+    };
+
+    pub const SCROLL_DOWN: KeyBinding = KeyBinding {
         key_short: "^N/j/↓",
         key: "Ctrl+N / j / ↓",
         desc_short: "Down",
@@ -777,8 +882,9 @@ pub const CONFIRM_DIALOG_KEYS: &[KeyBinding] = &[
             KeyCombo::plain(Key::Down),
             KeyCombo::ctrl(Key::Char('n')),
         ],
-    },
-    KeyBinding {
+    };
+
+    pub const SCROLL_UP: KeyBinding = KeyBinding {
         key_short: "^P/k/↑",
         key: "Ctrl+P / k / ↑",
         desc_short: "Up",
@@ -793,75 +899,90 @@ pub const CONFIRM_DIALOG_KEYS: &[KeyBinding] = &[
             KeyCombo::plain(Key::Up),
             KeyCombo::ctrl(Key::Char('p')),
         ],
-    },
-    KeyBinding {
+    };
+
+    pub const NO: KeyBinding = KeyBinding {
         key_short: "Esc/q",
         key: "Esc / q",
         desc_short: "Cancel",
         description: "Cancel",
         action: Action::ConfirmDialogCancel,
         combos: &[KeyCombo::plain(Key::Esc), KeyCombo::plain(Key::Char('q'))],
-    },
+    };
+}
+
+pub const CONFIRM_DIALOG_KEYS: &[KeyBinding] = &[
+    confirm::YES,
+    confirm::SCROLL_DOWN,
+    confirm::SCROLL_UP,
+    confirm::NO,
 ];
 
 // =============================================================================
-// JSONB Detail (Viewing)
+// JSON Detail (Viewing)
 // =============================================================================
 
-pub const JSONB_DETAIL_ROWS: &[ModeRow] = &[
-    ModeRow {
+pub mod json_detail {
+    use crate::update::action::{Action, CursorMove, InputTarget, ModalKind};
+    use crate::update::input::keybindings::{ExecBinding, Key, KeyCombo, ModeRow};
+
+    pub const YANK: ModeRow = ModeRow {
         key_short: "y",
         key: "y",
         desc_short: "Copy",
         description: "Copy full JSON",
         bindings: &[ExecBinding {
-            action: Action::JsonbYankAll,
+            action: Action::JsonYankAll,
             combos: &[KeyCombo::plain(Key::Char('y'))],
         }],
-    },
-    ModeRow {
+    };
+
+    pub const INSERT: ModeRow = ModeRow {
         key_short: "i",
         key: "i / A",
         desc_short: "Insert",
         description: "Enter Insert mode / append at line end",
         bindings: &[
             ExecBinding {
-                action: Action::JsonbEnterEdit,
+                action: Action::JsonEnterEdit,
                 combos: &[KeyCombo::plain(Key::Char('i'))],
             },
             ExecBinding {
-                action: Action::JsonbAppendInsert,
+                action: Action::JsonAppendInsert,
                 combos: &[KeyCombo::plain(Key::Char('A'))],
             },
         ],
-    },
-    ModeRow {
+    };
+
+    pub const SEARCH: ModeRow = ModeRow {
         key_short: "/",
         key: "/",
         desc_short: "Search",
         description: "Search JSON text",
         bindings: &[ExecBinding {
-            action: Action::JsonbEnterSearch,
+            action: Action::JsonEnterSearch,
             combos: &[KeyCombo::plain(Key::Char('/'))],
         }],
-    },
-    ModeRow {
+    };
+
+    pub const NEXT_PREV: ModeRow = ModeRow {
         key_short: "n/N",
         key: "n / N",
         desc_short: "Next/Prev",
         description: "Jump to next / previous search result",
         bindings: &[
             ExecBinding {
-                action: Action::JsonbSearchNext,
+                action: Action::JsonSearchNext,
                 combos: &[KeyCombo::plain(Key::Char('n'))],
             },
             ExecBinding {
-                action: Action::JsonbSearchPrev,
+                action: Action::JsonSearchPrev,
                 combos: &[KeyCombo::plain(Key::Char('N'))],
             },
         ],
-    },
-    ModeRow {
+    };
+
+    pub const MOVE: ModeRow = ModeRow {
         key_short: "hjkl/↑↓←→",
         key: "h / j / k / l / ↑↓←→",
         desc_short: "Move",
@@ -869,21 +990,21 @@ pub const JSONB_DETAIL_ROWS: &[ModeRow] = &[
         bindings: &[
             ExecBinding {
                 action: Action::TextMoveCursor {
-                    target: InputTarget::JsonbEdit,
+                    target: InputTarget::JsonEdit,
                     direction: CursorMove::Left,
                 },
                 combos: &[KeyCombo::plain(Key::Char('h')), KeyCombo::plain(Key::Left)],
             },
             ExecBinding {
                 action: Action::TextMoveCursor {
-                    target: InputTarget::JsonbEdit,
+                    target: InputTarget::JsonEdit,
                     direction: CursorMove::Right,
                 },
                 combos: &[KeyCombo::plain(Key::Char('l')), KeyCombo::plain(Key::Right)],
             },
             ExecBinding {
                 action: Action::TextMoveCursor {
-                    target: InputTarget::JsonbEdit,
+                    target: InputTarget::JsonEdit,
                     direction: CursorMove::Down,
                 },
                 combos: &[
@@ -894,7 +1015,7 @@ pub const JSONB_DETAIL_ROWS: &[ModeRow] = &[
             },
             ExecBinding {
                 action: Action::TextMoveCursor {
-                    target: InputTarget::JsonbEdit,
+                    target: InputTarget::JsonEdit,
                     direction: CursorMove::Up,
                 },
                 combos: &[
@@ -904,8 +1025,9 @@ pub const JSONB_DETAIL_ROWS: &[ModeRow] = &[
                 ],
             },
         ],
-    },
-    ModeRow {
+    };
+
+    pub const JUMP: ModeRow = ModeRow {
         key_short: "0$wb",
         key: "0 / $ / w / b / Home / End",
         desc_short: "Jump",
@@ -913,35 +1035,36 @@ pub const JSONB_DETAIL_ROWS: &[ModeRow] = &[
         bindings: &[
             ExecBinding {
                 action: Action::TextMoveCursor {
-                    target: InputTarget::JsonbEdit,
+                    target: InputTarget::JsonEdit,
                     direction: CursorMove::LineStart,
                 },
                 combos: &[KeyCombo::plain(Key::Char('0'))],
             },
             ExecBinding {
                 action: Action::TextMoveCursor {
-                    target: InputTarget::JsonbEdit,
+                    target: InputTarget::JsonEdit,
                     direction: CursorMove::LineEnd,
                 },
                 combos: &[KeyCombo::plain(Key::Char('$'))],
             },
             ExecBinding {
                 action: Action::TextMoveCursor {
-                    target: InputTarget::JsonbEdit,
+                    target: InputTarget::JsonEdit,
                     direction: CursorMove::WordForward,
                 },
                 combos: &[KeyCombo::plain(Key::Char('w'))],
             },
             ExecBinding {
                 action: Action::TextMoveCursor {
-                    target: InputTarget::JsonbEdit,
+                    target: InputTarget::JsonEdit,
                     direction: CursorMove::WordBackward,
                 },
                 combos: &[KeyCombo::plain(Key::Char('b'))],
             },
         ],
-    },
-    ModeRow {
+    };
+
+    pub const VIEW: ModeRow = ModeRow {
         key_short: "ggGHML",
         key: "gg / G / H / M / L",
         desc_short: "View",
@@ -949,93 +1072,500 @@ pub const JSONB_DETAIL_ROWS: &[ModeRow] = &[
         bindings: &[
             ExecBinding {
                 action: Action::TextMoveCursor {
-                    target: InputTarget::JsonbEdit,
+                    target: InputTarget::JsonEdit,
                     direction: CursorMove::LastLine,
                 },
                 combos: &[KeyCombo::plain(Key::Char('G'))],
             },
             ExecBinding {
                 action: Action::TextMoveCursor {
-                    target: InputTarget::JsonbEdit,
+                    target: InputTarget::JsonEdit,
                     direction: CursorMove::ViewportTop,
                 },
                 combos: &[KeyCombo::plain(Key::Char('H'))],
             },
             ExecBinding {
                 action: Action::TextMoveCursor {
-                    target: InputTarget::JsonbEdit,
+                    target: InputTarget::JsonEdit,
                     direction: CursorMove::ViewportMiddle,
                 },
                 combos: &[KeyCombo::plain(Key::Char('M'))],
             },
             ExecBinding {
                 action: Action::TextMoveCursor {
-                    target: InputTarget::JsonbEdit,
+                    target: InputTarget::JsonEdit,
                     direction: CursorMove::ViewportBottom,
                 },
                 combos: &[KeyCombo::plain(Key::Char('L'))],
             },
         ],
-    },
-    ModeRow {
-        key_short: "Esc/q",
+    };
+
+    pub const CLOSE: ModeRow = ModeRow {
+        key_short: "Esc",
         key: "Esc / q",
         desc_short: "Close",
-        description: "Close JSONB detail",
+        description: "Close JSON detail",
         bindings: &[ExecBinding {
-            action: Action::CloseModal(ModalKind::JsonbDetail),
+            action: Action::CloseModal(ModalKind::JsonDetail),
             combos: &[KeyCombo::plain(Key::Esc), KeyCombo::plain(Key::Char('q'))],
         }],
-    },
+    };
+}
+
+pub const JSON_DETAIL_ROWS: &[ModeRow] = &[
+    json_detail::YANK,
+    json_detail::INSERT,
+    json_detail::SEARCH,
+    json_detail::NEXT_PREV,
+    json_detail::MOVE,
+    json_detail::JUMP,
+    json_detail::VIEW,
+    json_detail::CLOSE,
 ];
 
 // =============================================================================
-// JSONB Search (active search input)
+// Cell Detail
 // =============================================================================
 
-pub const JSONB_SEARCH_KEYS: &[KeyBinding] = &[
-    KeyBinding {
+pub mod cell_detail {
+    use crate::update::action::{Action, ModalKind, ScrollAmount, ScrollDirection, ScrollTarget};
+    use crate::update::input::keybindings::{ExecBinding, Key, KeyCombo, ModeRow};
+
+    pub const YANK: ModeRow = ModeRow {
+        key_short: "y",
+        key: "y",
+        desc_short: "Copy",
+        description: "Copy full cell text",
+        bindings: &[ExecBinding {
+            action: Action::CellDetailYankAll,
+            combos: &[KeyCombo::plain(Key::Char('y'))],
+        }],
+    };
+
+    pub const SEARCH: ModeRow = ModeRow {
+        key_short: "/",
+        key: "/",
+        desc_short: "Search",
+        description: "Search cell text",
+        bindings: &[ExecBinding {
+            action: Action::CellDetailEnterSearch,
+            combos: &[KeyCombo::plain(Key::Char('/'))],
+        }],
+    };
+
+    pub const NEXT_PREV: ModeRow = ModeRow {
+        key_short: "n/N",
+        key: "n / N",
+        desc_short: "Next/Prev",
+        description: "Jump to next / previous search result",
+        bindings: &[
+            ExecBinding {
+                action: Action::CellDetailSearchNext,
+                combos: &[KeyCombo::plain(Key::Char('n'))],
+            },
+            ExecBinding {
+                action: Action::CellDetailSearchPrev,
+                combos: &[KeyCombo::plain(Key::Char('N'))],
+            },
+        ],
+    };
+
+    pub const SCROLL: ModeRow = ModeRow {
+        key_short: "j/k/↑↓",
+        key: "j / k / Ctrl+N / Ctrl+P / ↑ / ↓",
+        desc_short: "Scroll",
+        description: "Scroll text down / up",
+        bindings: &[
+            ExecBinding {
+                action: Action::Scroll {
+                    target: ScrollTarget::CellDetail,
+                    direction: ScrollDirection::Down,
+                    amount: ScrollAmount::Line,
+                },
+                combos: &[
+                    KeyCombo::plain(Key::Char('j')),
+                    KeyCombo::ctrl(Key::Char('n')),
+                    KeyCombo::plain(Key::Down),
+                ],
+            },
+            ExecBinding {
+                action: Action::Scroll {
+                    target: ScrollTarget::CellDetail,
+                    direction: ScrollDirection::Up,
+                    amount: ScrollAmount::Line,
+                },
+                combos: &[
+                    KeyCombo::plain(Key::Char('k')),
+                    KeyCombo::ctrl(Key::Char('p')),
+                    KeyCombo::plain(Key::Up),
+                ],
+            },
+        ],
+    };
+
+    pub const PAGE: ModeRow = ModeRow {
+        key_short: "^D/^U Pg",
+        key: "Ctrl+D / Ctrl+U / PageDown / PageUp",
+        desc_short: "Page",
+        description: "Scroll by page",
+        bindings: &[
+            ExecBinding {
+                action: Action::Scroll {
+                    target: ScrollTarget::CellDetail,
+                    direction: ScrollDirection::Down,
+                    amount: ScrollAmount::HalfPage,
+                },
+                combos: &[KeyCombo::ctrl(Key::Char('d'))],
+            },
+            ExecBinding {
+                action: Action::Scroll {
+                    target: ScrollTarget::CellDetail,
+                    direction: ScrollDirection::Up,
+                    amount: ScrollAmount::HalfPage,
+                },
+                combos: &[KeyCombo::ctrl(Key::Char('u'))],
+            },
+            ExecBinding {
+                action: Action::Scroll {
+                    target: ScrollTarget::CellDetail,
+                    direction: ScrollDirection::Down,
+                    amount: ScrollAmount::FullPage,
+                },
+                combos: &[KeyCombo::plain(Key::PageDown)],
+            },
+            ExecBinding {
+                action: Action::Scroll {
+                    target: ScrollTarget::CellDetail,
+                    direction: ScrollDirection::Up,
+                    amount: ScrollAmount::FullPage,
+                },
+                combos: &[KeyCombo::plain(Key::PageUp)],
+            },
+        ],
+    };
+
+    pub const TOP_BOTTOM: ModeRow = ModeRow {
+        key_short: "Home/End",
+        key: "Home / End",
+        desc_short: "Top/Btm",
+        description: "Jump to top / bottom",
+        bindings: &[
+            ExecBinding {
+                action: Action::Scroll {
+                    target: ScrollTarget::CellDetail,
+                    direction: ScrollDirection::Up,
+                    amount: ScrollAmount::ToStart,
+                },
+                combos: &[KeyCombo::plain(Key::Home)],
+            },
+            ExecBinding {
+                action: Action::Scroll {
+                    target: ScrollTarget::CellDetail,
+                    direction: ScrollDirection::Down,
+                    amount: ScrollAmount::ToEnd,
+                },
+                combos: &[KeyCombo::plain(Key::End)],
+            },
+        ],
+    };
+
+    pub const CLOSE: ModeRow = ModeRow {
+        key_short: "Esc",
+        key: "Esc / q",
+        desc_short: "Close",
+        description: "Close cell detail",
+        bindings: &[ExecBinding {
+            action: Action::CloseModal(ModalKind::CellDetail),
+            combos: &[KeyCombo::plain(Key::Esc), KeyCombo::plain(Key::Char('q'))],
+        }],
+    };
+}
+
+pub const CELL_DETAIL_ROWS: &[ModeRow] = &[
+    cell_detail::YANK,
+    cell_detail::SEARCH,
+    cell_detail::NEXT_PREV,
+    cell_detail::SCROLL,
+    cell_detail::PAGE,
+    cell_detail::TOP_BOTTOM,
+    cell_detail::CLOSE,
+];
+
+// =============================================================================
+// Row Detail
+// =============================================================================
+
+pub mod row_detail {
+    use crate::update::action::{Action, ModalKind, ScrollAmount, ScrollDirection, ScrollTarget};
+    use crate::update::input::keybindings::{ExecBinding, Key, KeyCombo, ModeRow};
+
+    pub const YANK: ModeRow = ModeRow {
+        key_short: "y",
+        key: "y",
+        desc_short: "Copy",
+        description: "Copy displayed text to clipboard",
+        bindings: &[ExecBinding {
+            action: Action::RowDetailYank,
+            combos: &[KeyCombo::plain(Key::Char('y'))],
+        }],
+    };
+
+    pub const YANK_JSON: ModeRow = ModeRow {
+        key_short: "Y",
+        key: "Y",
+        desc_short: "Copy JSON",
+        description: "Copy row as JSON to clipboard",
+        bindings: &[ExecBinding {
+            action: Action::RowDetailYankJson,
+            combos: &[KeyCombo::plain(Key::Char('Y'))],
+        }],
+    };
+
+    pub const SCROLL: ModeRow = ModeRow {
+        key_short: "j/k/⇟/⇞/\u{2303}F/\u{2303}B",
+        key: "j / k / PageDown / PageUp / Ctrl+F / Ctrl+B",
+        desc_short: "Scroll",
+        description: "Scroll by line or page",
+        bindings: &[
+            ExecBinding {
+                action: Action::Scroll {
+                    target: ScrollTarget::RowDetail,
+                    direction: ScrollDirection::Down,
+                    amount: ScrollAmount::Line,
+                },
+                combos: &[KeyCombo::plain(Key::Char('j')), KeyCombo::plain(Key::Down)],
+            },
+            ExecBinding {
+                action: Action::Scroll {
+                    target: ScrollTarget::RowDetail,
+                    direction: ScrollDirection::Up,
+                    amount: ScrollAmount::Line,
+                },
+                combos: &[KeyCombo::plain(Key::Char('k')), KeyCombo::plain(Key::Up)],
+            },
+            ExecBinding {
+                action: Action::Scroll {
+                    target: ScrollTarget::RowDetail,
+                    direction: ScrollDirection::Down,
+                    amount: ScrollAmount::FullPage,
+                },
+                combos: &[
+                    KeyCombo::plain(Key::PageDown),
+                    KeyCombo::ctrl(Key::Char('f')),
+                ],
+            },
+            ExecBinding {
+                action: Action::Scroll {
+                    target: ScrollTarget::RowDetail,
+                    direction: ScrollDirection::Up,
+                    amount: ScrollAmount::FullPage,
+                },
+                combos: &[KeyCombo::plain(Key::PageUp), KeyCombo::ctrl(Key::Char('b'))],
+            },
+        ],
+    };
+
+    pub const H_SCROLL: ModeRow = ModeRow {
+        key_short: "h/l/←/→",
+        key: "h / l / ← / →",
+        desc_short: "H-Scroll",
+        description: "Scroll left / right",
+        bindings: &[
+            ExecBinding {
+                action: Action::Scroll {
+                    target: ScrollTarget::RowDetail,
+                    direction: ScrollDirection::Left,
+                    amount: ScrollAmount::Line,
+                },
+                combos: &[KeyCombo::plain(Key::Char('h')), KeyCombo::plain(Key::Left)],
+            },
+            ExecBinding {
+                action: Action::Scroll {
+                    target: ScrollTarget::RowDetail,
+                    direction: ScrollDirection::Right,
+                    amount: ScrollAmount::Line,
+                },
+                combos: &[KeyCombo::plain(Key::Char('l')), KeyCombo::plain(Key::Right)],
+            },
+        ],
+    };
+
+    pub const HALF_PAGE: ModeRow = ModeRow {
+        key_short: "\u{2303}D/\u{2303}U",
+        key: "Ctrl+D / Ctrl+U",
+        desc_short: "Half Page",
+        description: "Scroll half page down / up",
+        bindings: &[
+            ExecBinding {
+                action: Action::Scroll {
+                    target: ScrollTarget::RowDetail,
+                    direction: ScrollDirection::Down,
+                    amount: ScrollAmount::HalfPage,
+                },
+                combos: &[KeyCombo::ctrl(Key::Char('d'))],
+            },
+            ExecBinding {
+                action: Action::Scroll {
+                    target: ScrollTarget::RowDetail,
+                    direction: ScrollDirection::Up,
+                    amount: ScrollAmount::HalfPage,
+                },
+                combos: &[KeyCombo::ctrl(Key::Char('u'))],
+            },
+        ],
+    };
+
+    pub const JUMP: ModeRow = ModeRow {
+        key_short: "g/G",
+        key: "g / G / Home / End",
+        desc_short: "Top/Btm",
+        description: "Jump to top / bottom",
+        bindings: &[
+            ExecBinding {
+                action: Action::Scroll {
+                    target: ScrollTarget::RowDetail,
+                    direction: ScrollDirection::Up,
+                    amount: ScrollAmount::ToStart,
+                },
+                combos: &[KeyCombo::plain(Key::Char('g')), KeyCombo::plain(Key::Home)],
+            },
+            ExecBinding {
+                action: Action::Scroll {
+                    target: ScrollTarget::RowDetail,
+                    direction: ScrollDirection::Down,
+                    amount: ScrollAmount::ToEnd,
+                },
+                combos: &[KeyCombo::plain(Key::Char('G')), KeyCombo::plain(Key::End)],
+            },
+        ],
+    };
+
+    pub const CLOSE: ModeRow = ModeRow {
+        key_short: "Esc",
+        key: "Esc",
+        desc_short: "Close",
+        description: "Close Row Detail modal",
+        bindings: &[ExecBinding {
+            action: Action::CloseModal(ModalKind::RowDetail),
+            combos: &[KeyCombo::plain(Key::Esc)],
+        }],
+    };
+}
+
+pub const ROW_DETAIL_ROWS: &[ModeRow] = &[
+    row_detail::YANK,
+    row_detail::YANK_JSON,
+    row_detail::SCROLL,
+    row_detail::H_SCROLL,
+    row_detail::HALF_PAGE,
+    row_detail::JUMP,
+    row_detail::CLOSE,
+];
+
+pub const ROW_DETAIL_FOOTER_ROWS: &[ModeRow] =
+    &[row_detail::YANK, row_detail::YANK_JSON, row_detail::CLOSE];
+
+// =============================================================================
+// JSON Search (active search input)
+// =============================================================================
+
+pub mod json_search {
+    use crate::update::action::Action;
+    use crate::update::input::keybindings::{Key, KeyBinding, KeyCombo};
+
+    pub const TYPE_SEARCH: KeyBinding = KeyBinding {
         key_short: "type",
         key: "type",
         desc_short: "Search",
         description: "Type to search",
         action: Action::None,
         combos: &[],
-    },
-    KeyBinding {
+    };
+
+    pub const CONFIRM: KeyBinding = KeyBinding {
         key_short: "Enter",
         key: "Enter",
         desc_short: "Confirm",
         description: "Confirm search",
-        action: Action::JsonbSearchSubmit,
+        action: Action::JsonSearchSubmit,
         combos: &[KeyCombo::plain(Key::Enter)],
-    },
-    KeyBinding {
+    };
+
+    pub const CANCEL: KeyBinding = KeyBinding {
         key_short: "Esc",
         key: "Esc",
         desc_short: "Cancel",
         description: "Cancel search",
-        action: Action::JsonbExitSearch,
+        action: Action::JsonExitSearch,
         combos: &[KeyCombo::plain(Key::Esc)],
-    },
+    };
+}
+
+pub const JSON_SEARCH_KEYS: &[KeyBinding] = &[
+    json_search::TYPE_SEARCH,
+    json_search::CONFIRM,
+    json_search::CANCEL,
+];
+
+pub mod cell_detail_search {
+    use crate::update::action::Action;
+    use crate::update::input::keybindings::{Key, KeyBinding, KeyCombo};
+
+    pub const TYPE_SEARCH: KeyBinding = KeyBinding {
+        key_short: "type",
+        key: "type",
+        desc_short: "Search",
+        description: "Type to search",
+        action: Action::None,
+        combos: &[],
+    };
+
+    pub const CONFIRM: KeyBinding = KeyBinding {
+        key_short: "Enter",
+        key: "Enter",
+        desc_short: "Confirm",
+        description: "Confirm search",
+        action: Action::CellDetailSearchSubmit,
+        combos: &[KeyCombo::plain(Key::Enter)],
+    };
+
+    pub const CANCEL: KeyBinding = KeyBinding {
+        key_short: "Esc",
+        key: "Esc",
+        desc_short: "Cancel",
+        description: "Cancel search",
+        action: Action::CellDetailExitSearch,
+        combos: &[KeyCombo::plain(Key::Esc)],
+    };
+}
+
+pub const CELL_DETAIL_SEARCH_KEYS: &[KeyBinding] = &[
+    cell_detail_search::TYPE_SEARCH,
+    cell_detail_search::CONFIRM,
+    cell_detail_search::CANCEL,
 ];
 
 // =============================================================================
-// JSONB Edit
+// JSON Edit
 // =============================================================================
 
-pub const JSONB_EDIT_ROWS: &[ModeRow] = &[
-    ModeRow {
+pub mod json_edit {
+    use crate::update::action::{Action, CursorMove, ExternalEditorTarget, InputTarget};
+    use crate::update::input::keybindings::{ExecBinding, Key, KeyCombo, ModeRow};
+
+    pub const ESC_NORMAL: ModeRow = ModeRow {
         key_short: "Esc",
         key: "Esc",
         desc_short: "Normal",
         description: "Return to Normal mode",
         bindings: &[ExecBinding {
-            action: Action::JsonbExitEdit,
+            action: Action::JsonExitEdit,
             combos: &[KeyCombo::plain(Key::Esc)],
         }],
-    },
-    ModeRow {
+    };
+
+    pub const MOVE: ModeRow = ModeRow {
         key_short: "↑↓←→",
         key: "↑↓←→",
         desc_short: "Move",
@@ -1043,35 +1573,36 @@ pub const JSONB_EDIT_ROWS: &[ModeRow] = &[
         bindings: &[
             ExecBinding {
                 action: Action::TextMoveCursor {
-                    target: InputTarget::JsonbEdit,
+                    target: InputTarget::JsonEdit,
                     direction: CursorMove::Left,
                 },
                 combos: &[KeyCombo::plain(Key::Left)],
             },
             ExecBinding {
                 action: Action::TextMoveCursor {
-                    target: InputTarget::JsonbEdit,
+                    target: InputTarget::JsonEdit,
                     direction: CursorMove::Right,
                 },
                 combos: &[KeyCombo::plain(Key::Right)],
             },
             ExecBinding {
                 action: Action::TextMoveCursor {
-                    target: InputTarget::JsonbEdit,
+                    target: InputTarget::JsonEdit,
                     direction: CursorMove::Up,
                 },
                 combos: &[KeyCombo::plain(Key::Up)],
             },
             ExecBinding {
                 action: Action::TextMoveCursor {
-                    target: InputTarget::JsonbEdit,
+                    target: InputTarget::JsonEdit,
                     direction: CursorMove::Down,
                 },
                 combos: &[KeyCombo::plain(Key::Down)],
             },
         ],
-    },
-    ModeRow {
+    };
+
+    pub const HOME_END: ModeRow = ModeRow {
         key_short: "Home/End",
         key: "Home / End",
         desc_short: "Line",
@@ -1079,28 +1610,104 @@ pub const JSONB_EDIT_ROWS: &[ModeRow] = &[
         bindings: &[
             ExecBinding {
                 action: Action::TextMoveCursor {
-                    target: InputTarget::JsonbEdit,
+                    target: InputTarget::JsonEdit,
                     direction: CursorMove::Home,
                 },
                 combos: &[KeyCombo::plain(Key::Home)],
             },
             ExecBinding {
                 action: Action::TextMoveCursor {
-                    target: InputTarget::JsonbEdit,
+                    target: InputTarget::JsonEdit,
                     direction: CursorMove::End,
                 },
                 combos: &[KeyCombo::plain(Key::End)],
             },
         ],
-    },
-    ModeRow {
+    };
+    pub const EXTERNAL_EDITOR: ModeRow = ModeRow {
         key_short: "^E",
         key: "Ctrl+E",
         desc_short: "Editor",
-        description: "Edit in $EDITOR",
+        description: "Edit JSON in $EDITOR",
         bindings: &[ExecBinding {
             action: Action::OpenExternalEditor(ExternalEditorTarget::JsonbEditor),
             combos: &[KeyCombo::ctrl(Key::Char('e'))],
         }],
-    },
+    };
+}
+
+pub const JSON_EDIT_ROWS: &[ModeRow] = &[
+    json_edit::ESC_NORMAL,
+    json_edit::MOVE,
+    json_edit::HOME_END,
+    json_edit::EXTERNAL_EDITOR,
+];
+
+pub mod sqlite_diagnostics {
+    use crate::update::action::{Action, ModalKind, ScrollAmount, ScrollDirection, ScrollTarget};
+    use crate::update::input::keybindings::{ExecBinding, Key, KeyCombo, ModeRow};
+
+    pub const ESC_CLOSE: ModeRow = ModeRow {
+        key_short: "Esc",
+        key: "Esc",
+        desc_short: "Close",
+        description: "Close",
+        bindings: &[ExecBinding {
+            action: Action::CloseModal(ModalKind::SqliteDiagnostics),
+            combos: &[KeyCombo::plain(Key::Esc)],
+        }],
+    };
+
+    pub const SCROLL: ModeRow = ModeRow {
+        key_short: "↑↓",
+        key: "↑ / ↓",
+        desc_short: "Scroll",
+        description: "Scroll diagnostics",
+        bindings: &[
+            ExecBinding {
+                action: Action::Scroll {
+                    target: ScrollTarget::SqliteDiagnostics,
+                    direction: ScrollDirection::Up,
+                    amount: ScrollAmount::Line,
+                },
+                combos: &[KeyCombo::plain(Key::Up)],
+            },
+            ExecBinding {
+                action: Action::Scroll {
+                    target: ScrollTarget::SqliteDiagnostics,
+                    direction: ScrollDirection::Down,
+                    amount: ScrollAmount::Line,
+                },
+                combos: &[KeyCombo::plain(Key::Down)],
+            },
+        ],
+    };
+    pub const HELP: ModeRow = ModeRow {
+        key_short: "?",
+        key: "?",
+        desc_short: "Help",
+        description: "Toggle help",
+        bindings: &[ExecBinding {
+            action: Action::ToggleModal(ModalKind::Help),
+            combos: &[KeyCombo::plain(Key::Char('?'))],
+        }],
+    };
+
+    pub const RUN_QUICK_CHECK: ModeRow = ModeRow {
+        key_short: "r",
+        key: "r",
+        desc_short: "Run check",
+        description: "Run quick check",
+        bindings: &[ExecBinding {
+            action: Action::RunSqliteDiagnosticsQuickCheck,
+            combos: &[KeyCombo::plain(Key::Char('r'))],
+        }],
+    };
+}
+
+pub const SQLITE_DIAGNOSTICS_ROWS: &[ModeRow] = &[
+    sqlite_diagnostics::SCROLL,
+    sqlite_diagnostics::RUN_QUICK_CHECK,
+    sqlite_diagnostics::HELP,
+    sqlite_diagnostics::ESC_CLOSE,
 ];

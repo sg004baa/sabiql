@@ -173,7 +173,7 @@ impl AppState {
 
     pub fn with_read_only(dsn: impl Into<String>, read_only: bool) -> Self {
         let dsn = dsn.into();
-        let current_db = RedisDsn::parse(&dsn).map(|parsed| parsed.db).unwrap_or(0);
+        let current_db = RedisDsn::parse(&dsn).map_or(0, |parsed| parsed.db);
         Self {
             dsn,
             read_only,
@@ -1227,7 +1227,7 @@ fn submit_connection_form(state: &mut AppState) -> Vec<Effect> {
     let read_only = form.read_only;
     state.dsn.clone_from(&dsn);
     state.read_only = read_only;
-    state.current_db = RedisDsn::parse(&dsn).map(|parsed| parsed.db).unwrap_or(0);
+    state.current_db = RedisDsn::parse(&dsn).map_or(0, |parsed| parsed.db);
     reset_for_connect(state);
     vec![Effect::Connect { dsn, read_only }]
 }

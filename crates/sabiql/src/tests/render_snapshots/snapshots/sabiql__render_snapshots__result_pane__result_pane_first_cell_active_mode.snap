@@ -1,8 +1,9 @@
 ---
-source: src/tests/render_snapshots/result_pane.rs
+source: crates/sabiql/src/tests/render_snapshots/result_pane.rs
+assertion_line: 347
 expression: output
 ---
-test_project | test_db | - | no dsn | localhost:5432/test                                                                                                            
+test_project ▸ test_db ▸ -                                                                                                            connected | localhost:5432/test
 ┌ [1] Explorer ─────────────────────────┐[Info] [Cols] [Idx] [FK] [RLS] [Trig] [DDL]                                                                                 
 │> public.users                         │┌ [2] Inspector ───────────────────────────────────────────────────────────────────────────────────────────────────────────┐
 │  public.posts                         ││Owner:   postgres                                                                                                         │
@@ -51,4 +52,4 @@ test_project | test_db | - | no dsn | localhost:5432/test
 │                                       ││                                                                                                                          │
 │                                       ││                                                                                                                          │
 └───────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-i:Edit  Y:Yank Cell  yy:Yank Row  Space:Mark Row  S:Gen SQL  dd:Stage Del  ?:Help  Esc:Back  q:Quit
+Enter:Detail  i:Edit  Y:Yank Cell  yy:Yank Row  K:Row Detail  Space:Mark  S:SQL  dd:Stage Del  c:Connections  ?:Help  Esc:Back  q:Quit

@@ -1,51 +1,66 @@
+use sabiql_infra::adapters::SystemExternalEditor;
+use sabiql_infra::file_walker::WalkdirFileWalker;
 use std::cell::RefCell;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use clap::Parser;
 use color_eyre::eyre::Result;
 use tokio::sync::mpsc;
 use tokio::time::sleep_until;
 
-mod error;
-
-#[cfg(test)]
-mod tests;
-
-#[cfg(test)]
-#[path = "tests/render_snapshots/mod.rs"]
-mod render_snapshots;
-
-use sabiql_app::cmd::cache::TtlCache;
+use sabiql_app::cmd::cli_sqlite::{
+    CliSqliteTarget, activate_cli_sqlite_connection, resolve_cli_sqlite_target,
+};
 use sabiql_app::cmd::completion_engine::CompletionEngine;
 use sabiql_app::cmd::effect::Effect;
 use sabiql_app::cmd::render_schedule::next_animation_deadline;
-use sabiql_app::cmd::runner::EffectRunner;
+use sabiql_app::cmd::runner::{ConnectionDeps, EffectRunner, ErDeps, QueryDeps, UtilityDeps};
 use sabiql_app::model::app_state::AppState;
-use sabiql_app::model::shared::db_capabilities::DbCapabilities;
 use sabiql_app::model::shared::input_mode::InputMode;
 use sabiql_app::ports::outbound::{
-    ConnectionStore, ConnectionStoreError, DatabaseCapabilityProvider, PgServiceEntryReader,
-    ServiceFileError, SettingsStore,
+    AppSettings, ConnectionStore, ConnectionStoreError, MySqlConnectionProbe, PgServiceEntryReader,
+    ServiceFileError, SqliteDiagnosticsProvider,
 };
 use sabiql_app::services::AppServices;
 use sabiql_app::update::action::Action;
 use sabiql_app::update::input::handle_event;
 use sabiql_app::update::reducer::reduce;
+use sabiql_infra::adapters::mysql::MySqlAdapter;
 use sabiql_infra::adapters::{
-    ArboardClipboard, DispatchAdapter, FileConfigWriter, FileQueryHistoryStore, FsErLogWriter,
-    NativeFolderOpener, PgServiceFileReader, SystemExternalEditor, TomlConnectionStore,
-    TomlSettingsStore,
+    ArboardClipboard, CsvCachedResultExporter, DbAdapterRegistry, FileConfigWriter,
+    FileQueryHistoryStore, FsErLogWriter, FsSqlitePathValidator, NativeFolderOpener,
+    PgServiceFileReader, SqliteAdapter, TomlConnectionStore, TomlSettingsStore,
 };
 use sabiql_infra::config::project_root::{find_project_root, get_project_name};
 use sabiql_infra::export::DotExporter;
-use sabiql_infra::file_walker::WalkdirFileWalker;
 use sabiql_ui::adapters::TuiAdapter;
 use sabiql_ui::tui::TuiRunner;
+
+mod panic_hooks;
+
+#[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    unreachable_pub,
+    reason = "test support constructs timestamps and shares helpers across test modules"
+)]
+mod tests;
+
+#[cfg(test)]
+#[path = "tests/render_snapshots/mod.rs"]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "snapshot tests construct timestamps with the real clock"
+)]
+mod render_snapshots;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
+    /// SQLite database file path or sqlite:// DSN
+    database: Option<String>,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -53,7 +68,7 @@ struct Args {
 #[derive(clap::Subcommand, Debug)]
 enum Command {
     #[cfg(feature = "self-update")]
-    /// Update sabiql to the latest compatible version
+    /// Update sabiql to the latest stable version
     Update,
     #[cfg(not(feature = "self-update"))]
     /// Self-update is disabled in this build
@@ -61,18 +76,17 @@ enum Command {
     Update,
 }
 
+#[tokio::main]
 #[allow(
     clippy::print_stderr,
     reason = "CLI error output before TUI initialization"
 )]
-fn main() -> Result<()> {
+async fn main() -> Result<()> {
     dotenvy::dotenv().ok();
-    error::install_hooks()?;
+    panic_hooks::install_hooks()?;
 
     let args = Args::parse();
     if matches!(args.command, Some(Command::Update)) {
-        // Runs before the tokio runtime starts: self_update uses a blocking HTTP
-        // client that must not be dropped inside an async context.
         #[cfg(feature = "self-update")]
         {
             return run_update();
@@ -84,417 +98,106 @@ fn main() -> Result<()> {
         }
     }
 
-    run_tui()
-}
-
-#[tokio::main]
-#[allow(
-    clippy::print_stderr,
-    reason = "CLI error output before TUI initialization"
-)]
-async fn run_tui() -> Result<()> {
+    let cli_sqlite = resolve_cli_database(args.database)?;
     let project_root = find_project_root()?;
     let project_name = get_project_name(&project_root);
+    let infrastructure = build_infrastructure()?;
+    let app_settings = infrastructure.settings_store.load().unwrap_or_default();
+    let state = initialize_state(
+        project_name,
+        app_settings,
+        cli_sqlite.as_ref(),
+        &infrastructure,
+    )?;
+    let runtime = Runtime::new(state, infrastructure)?;
+    Box::pin(runtime.run()).await
+}
 
-    let (action_tx, mut action_rx) = mpsc::channel::<Action>(256);
+fn resolve_cli_database(database: Option<String>) -> Result<Option<CliSqliteTarget>> {
+    Ok(database
+        .map(|database| resolve_cli_sqlite_target(&database, &FsSqlitePathValidator))
+        .transpose()?)
+}
 
-    let adapter = Arc::new(DispatchAdapter::new());
-    let metadata_cache = TtlCache::new(300);
-    let completion_engine = RefCell::new(CompletionEngine::new());
-    let connection_store = TomlConnectionStore::new()?;
-    let settings_store = TomlSettingsStore::new()?;
-    let all_profiles = connection_store.load_all();
-    let connection_store = Arc::new(connection_store);
-    let settings_store = Arc::new(settings_store);
+struct Infrastructure {
+    adapter_registry: Arc<DbAdapterRegistry>,
+    connection_store: Arc<TomlConnectionStore>,
+    settings_store: Arc<TomlSettingsStore>,
+    pg_service_entry_reader: Arc<dyn PgServiceEntryReader>,
+}
 
-    let db_capabilities: DbCapabilities = adapter.capabilities().into();
-    let pg_service_entry_reader: Arc<dyn PgServiceEntryReader> =
-        Arc::new(PgServiceFileReader::new());
+fn build_infrastructure() -> Result<Infrastructure> {
+    Ok(Infrastructure {
+        adapter_registry: Arc::new(DbAdapterRegistry::new()),
+        connection_store: Arc::new(TomlConnectionStore::new()?),
+        settings_store: Arc::new(TomlSettingsStore::new()?),
+        pg_service_entry_reader: Arc::new(PgServiceFileReader::new()),
+    })
+}
 
-    let adapter_for_callback = Arc::clone(&adapter);
-    let effect_runner = EffectRunner::builder()
-        .metadata_provider(Arc::clone(&adapter) as _)
-        .query_executor(Arc::clone(&adapter) as _)
-        .dsn_builder(Arc::clone(&adapter) as _)
-        .er_exporter(Arc::new(DotExporter::new()))
-        .config_writer(Arc::new(FileConfigWriter::new()))
-        .er_log_writer(Arc::new(FsErLogWriter))
-        .connection_store(Arc::clone(&connection_store) as _)
-        .pg_service_entry_reader(Arc::clone(&pg_service_entry_reader))
-        .clipboard(Arc::new(ArboardClipboard))
-        .folder_opener(Arc::new(NativeFolderOpener))
-        .external_editor(Arc::new(SystemExternalEditor))
-        .file_system_walker(Arc::new(WalkdirFileWalker::new()))
-        .query_history_store(Arc::new(FileQueryHistoryStore::new()))
-        .settings_store(Arc::clone(&settings_store) as _)
-        .metadata_cache(metadata_cache.clone())
-        .action_tx(action_tx.clone())
-        .on_database_type_change(Box::new(move |db_type| {
-            adapter_for_callback.set_active_type(db_type);
-        }))
-        .build();
-
-    let services = AppServices {
-        ddl_generator: Arc::clone(&adapter) as _,
-        sql_dialect: Arc::clone(&adapter) as _,
-        db_capabilities,
-    };
-
+#[allow(
+    clippy::exit,
+    clippy::print_stderr,
+    reason = "configuration errors are reported before TUI initialization"
+)]
+fn initialize_state(
+    project_name: String,
+    app_settings: AppSettings,
+    cli_sqlite: Option<&CliSqliteTarget>,
+    infrastructure: &Infrastructure,
+) -> Result<AppState> {
     let mut state = AppState::new(project_name);
+    apply_app_settings(&mut state, app_settings);
 
-    match all_profiles {
-        Ok(profiles) if profiles.is_empty() => {
-            load_service_entries(&mut state, Some(&*pg_service_entry_reader));
-            if state.service_entries().is_empty() {
-                state.connection_setup.is_first_run = true;
-                state.modal.set_mode(InputMode::ConnectionSetup);
-            } else {
-                state.modal.set_mode(InputMode::ConnectionSelector);
-                state.ui.set_connection_list_selection(Some(0));
-            }
-        }
+    match infrastructure.connection_store.load_all() {
         Ok(mut profiles) => {
+            let has_saved_profiles = !profiles.is_empty();
             profiles.sort_by(|a, b| {
                 a.display_name()
                     .to_lowercase()
                     .cmp(&b.display_name().to_lowercase())
             });
             state.set_connections(profiles);
-            load_service_entries(&mut state, Some(&*pg_service_entry_reader));
-
-            state.modal.set_mode(InputMode::ConnectionSelector);
-            state.ui.set_connection_list_selection(Some(0));
+            load_service_entries(&mut state, infrastructure.pg_service_entry_reader.as_ref());
+            configure_initial_connection_view(&mut state, cli_sqlite.is_some(), has_saved_profiles);
         }
-        Err(ConnectionStoreError::VersionMismatch { found, expected }) => {
+        Err(ConnectionStoreError::VersionMismatch { found, expected }) if cli_sqlite.is_none() => {
             eprintln!(
                 "Error: Configuration file version mismatch (found v{}, expected v{}).\n\
                  Please delete {} and reconfigure.",
                 found,
                 expected,
-                connection_store.storage_path().display()
+                infrastructure.connection_store.storage_path().display()
             );
             std::process::exit(1);
         }
-        Err(err) => {
-            eprintln!(
-                "Error: Failed to load connection profiles from {}: {err}\n\
-                 The file may be corrupted. Back it up, then fix or remove it and restart.",
-                connection_store.storage_path().display()
-            );
-            std::process::exit(1);
+        Err(_) if cli_sqlite.is_none() => {
+            state.connection_setup.set_first_run(true);
+            state.modal.set_mode(InputMode::ConnectionSetup);
         }
+        Err(_) => {}
     }
 
-    let app_settings = match settings_store.load() {
-        Ok(settings) => settings,
-        Err(err) => {
-            eprintln!(
-                "Error: Failed to load settings from {}: {err}\n\
-                 The file may be corrupted. Back it up, then fix or remove it and restart.",
-                connection_store.storage_path().display()
-            );
-            std::process::exit(1);
-        }
-    };
+    if let Some(target) = cli_sqlite {
+        activate_cli_sqlite_connection(&mut state, target, &FsSqlitePathValidator)?;
+    }
+
+    Ok(state)
+}
+
+fn apply_app_settings(state: &mut AppState, app_settings: AppSettings) {
     state.ui.set_theme(app_settings.theme_id);
-
-    let mut tui = TuiRunner::new()?;
-    tui.enter()?;
-
-    let initial_size = tui.terminal().size()?;
-    state.ui.terminal_width = initial_size.width;
-    state.ui.terminal_height = initial_size.height;
-
-    if state.session.dsn.is_some() && state.input_mode() == InputMode::Normal {
-        process_action(
-            Action::TryConnect,
-            &mut state,
-            &mut tui,
-            &effect_runner,
-            &completion_engine,
-            &services,
-        )
-        .await?;
-    }
-
-    let cache_cleanup_interval = Duration::from_secs(150);
-    let mut last_cache_cleanup = Instant::now();
-
-    loop {
-        let now = Instant::now();
-        let deadline = next_animation_deadline(&state, now);
-
-        tokio::select! {
-            Some(event) = tui.next_event() => {
-                let action = handle_event(event, &state, &services);
-                if !action.is_none() {
-                    drain_and_process_terminal_events(action, &mut state, &mut tui, &effect_runner, &completion_engine, &services).await?;
-                }
-            }
-            Some(action) = action_rx.recv() => {
-                process_action(action, &mut state, &mut tui, &effect_runner, &completion_engine, &services).await?;
-            }
-            // Animation deadline reached (spinner, cursor blink, message timeout)
-            () = async {
-                match deadline {
-                    Some(d) => sleep_until(d.into()).await,
-                    None => std::future::pending::<()>().await,
-                }
-            } => {
-                process_action(Action::Render, &mut state, &mut tui, &effect_runner, &completion_engine, &services).await?;
-            }
-        }
-
-        if let Some(debounce_until) = state.sql_modal.completion_debounce()
-            && Instant::now() >= debounce_until
-        {
-            state.sql_modal.consume_completion_debounce();
-            process_action(
-                Action::CompletionTrigger,
-                &mut state,
-                &mut tui,
-                &effect_runner,
-                &completion_engine,
-                &services,
-            )
-            .await?;
-        }
-
-        if last_cache_cleanup.elapsed() >= cache_cleanup_interval {
-            metadata_cache.cleanup_expired().await;
-            last_cache_cleanup = Instant::now();
-        }
-
-        if state.should_quit {
-            break;
-        }
-    }
-
-    tui.exit()?;
-    Ok(())
+    state
+        .settings
+        .load_keymap_preset(app_settings.keymap_preset);
+    state.settings.load_er_browser(app_settings.er_browser);
 }
 
-async fn process_action(
-    action: Action,
-    state: &mut AppState,
-    tui: &mut TuiRunner,
-    effect_runner: &EffectRunner,
-    completion_engine: &RefCell<CompletionEngine>,
-    services: &AppServices,
-) -> Result<()> {
-    let now = Instant::now();
-    let is_animation_tick = matches!(action, Action::Render);
-    if is_animation_tick {
-        state.clear_expired_timers(now);
-    }
-    let mut effects = reduce(state, action, now, services);
-    if state.render_dirty {
-        if !is_animation_tick {
-            state.clear_expired_timers(now);
-        }
-        effects.push(Effect::Render);
-    }
-    flush_effects(
-        effects,
-        state,
-        tui,
-        effect_runner,
-        completion_engine,
-        services,
-    )
-    .await
-}
-
-#[allow(
-    clippy::print_stderr,
-    reason = "last-resort fallback when effect dispatch exceeds recursion limit"
-)]
-async fn flush_effects(
-    effects: Vec<Effect>,
-    state: &mut AppState,
-    tui: &mut TuiRunner,
-    effect_runner: &EffectRunner,
-    completion_engine: &RefCell<CompletionEngine>,
-    services: &AppServices,
-) -> Result<()> {
-    let mut tui_adapter = TuiAdapter::new(tui);
-    let mut pending = effect_runner
-        .run(
-            effects,
-            &mut tui_adapter,
-            state,
-            completion_engine,
-            services,
-        )
-        .await?;
-    state.clear_dirty();
-
-    const MAX_DEPTH: usize = 16;
-    let mut depth = 0;
-    while !pending.is_empty() && depth < MAX_DEPTH {
-        depth += 1;
-        let mut next = Vec::new();
-        for action in pending {
-            let now = Instant::now();
-            let mut effects = reduce(state, action, now, services);
-            if state.render_dirty {
-                state.clear_expired_timers(now);
-                effects.push(Effect::Render);
-            }
-            let mut tui_adapter = TuiAdapter::new(tui);
-            next.extend(
-                effect_runner
-                    .run(
-                        effects,
-                        &mut tui_adapter,
-                        state,
-                        completion_engine,
-                        services,
-                    )
-                    .await?,
-            );
-            state.clear_dirty();
-        }
-        pending = next;
-    }
-    if depth >= MAX_DEPTH && !pending.is_empty() {
-        eprintln!(
-            "DispatchActions recursion depth exceeded ({MAX_DEPTH}), \
-             falling back to channel for {} remaining actions",
-            pending.len()
-        );
-        for action in pending {
-            if let Err(e) = effect_runner.action_tx().try_send(action) {
-                eprintln!("DispatchActions fallback: channel full, dropping action: {e}");
-            }
-        }
-    }
-    Ok(())
-}
-
-const MAX_DRAIN: usize = 32;
-
-async fn drain_and_process_terminal_events(
-    first_action: Action,
-    state: &mut AppState,
-    tui: &mut TuiRunner,
-    effect_runner: &EffectRunner,
-    completion_engine: &RefCell<CompletionEngine>,
-    services: &AppServices,
-) -> Result<()> {
-    if !first_action.is_scroll() {
-        return process_action(
-            first_action,
-            state,
-            tui,
-            effect_runner,
-            completion_engine,
-            services,
-        )
-        .await;
-    }
-
-    let now = Instant::now();
-    let mut effects = reduce(state, first_action, now, services);
-    if !effects.is_empty() {
-        if state.render_dirty {
-            state.clear_expired_timers(now);
-            effects.push(Effect::Render);
-        }
-        return flush_effects(
-            effects,
-            state,
-            tui,
-            effect_runner,
-            completion_engine,
-            services,
-        )
-        .await;
-    }
-
-    let mut drained = 0;
-    while drained < MAX_DRAIN {
-        let Some(event) = tui.try_next_event() else {
-            break;
-        };
-        drained += 1;
-        let action = handle_event(event, state, services);
-        if action.is_none() {
-            continue;
-        }
-
-        if action.is_scroll() {
-            let now = Instant::now();
-            let mut effects = reduce(state, action, now, services);
-            if !effects.is_empty() {
-                if state.render_dirty {
-                    state.clear_expired_timers(now);
-                    effects.push(Effect::Render);
-                }
-                flush_effects(
-                    effects,
-                    state,
-                    tui,
-                    effect_runner,
-                    completion_engine,
-                    services,
-                )
-                .await?;
-                break;
-            }
-        } else {
-            if state.render_dirty {
-                state.clear_dirty();
-                process_action(
-                    Action::Render,
-                    state,
-                    tui,
-                    effect_runner,
-                    completion_engine,
-                    services,
-                )
-                .await?;
-            }
-            process_action(
-                action,
-                state,
-                tui,
-                effect_runner,
-                completion_engine,
-                services,
-            )
-            .await?;
-            if state.should_quit {
-                return Ok(());
-            }
-        }
-    }
-
-    if state.render_dirty {
-        state.clear_dirty();
-        process_action(
-            Action::Render,
-            state,
-            tui,
-            effect_runner,
-            completion_engine,
-            services,
-        )
-        .await?;
-    }
-
-    Ok(())
-}
-
-fn load_service_entries(state: &mut AppState, reader: Option<&dyn PgServiceEntryReader>) {
-    let Some(reader) = reader else {
-        return;
-    };
-
+fn load_service_entries(state: &mut AppState, reader: &dyn PgServiceEntryReader) {
     match reader.read_services() {
         Ok((services, path)) if !services.is_empty() => {
             state.set_service_entries(services);
-            state.runtime.service_file_path = Some(path);
+            state.set_service_file_path(Some(path));
         }
         Ok(_) | Err(ServiceFileError::NotFound(_)) => {}
         Err(e) => {
@@ -503,70 +206,55 @@ fn load_service_entries(state: &mut AppState, reader: Option<&dyn PgServiceEntry
     }
 }
 
+fn configure_initial_connection_view(
+    state: &mut AppState,
+    has_cli_database: bool,
+    has_saved_profiles: bool,
+) {
+    if has_cli_database {
+        return;
+    }
+
+    if !has_saved_profiles && state.service_entries().is_empty() {
+        state.connection_setup.set_first_run(true);
+        state.modal.set_mode(InputMode::ConnectionSetup);
+    } else {
+        state.modal.set_mode(InputMode::ConnectionSelector);
+        state.ui.set_connection_list_selection(Some(0));
+    }
+}
+
 #[cfg(feature = "self-update")]
 #[allow(clippy::print_stdout, reason = "CLI subcommand output, TUI not active")]
 fn run_update() -> Result<()> {
-    use color_eyre::eyre::eyre;
-
-    const REPO_OWNER: &str = "riii111";
-    const REPO_NAME: &str = "sabiql";
-
     let current = env!("CARGO_PKG_VERSION");
     println!("Current version: v{current}");
     println!("Checking for updates...");
 
-    let releases = self_update::backends::github::Update::configure()
-        .repo_owner(REPO_OWNER)
-        .repo_name(REPO_NAME)
-        .bin_name("sabiql")
-        .current_version(current)
+    let releases = self_update::backends::github::ReleaseList::configure()
+        .repo_owner("sg004baa")
+        .repo_name("sabiql")
         .build()?
-        .get_latest_releases()?;
-
-    if !releases.is_update_available()? {
+        .fetch()?;
+    let Some(latest) = latest_stable_release(current, &releases) else {
         println!("Already up to date (v{current}).");
         return Ok(());
-    }
+    };
+    let target_version = format!("v{}", latest.version);
 
-    // Mirror the crate's selection: newest semver-compatible release, else newest.
-    let releases = releases.into_vec();
-    let release = releases
-        .iter()
-        .find(|release| {
-            self_update::version::bump_is_compatible(current, &release.version).unwrap_or(false)
-        })
-        .or_else(|| releases.first())
-        .ok_or_else(|| eyre!("No newer release found"))?;
-
-    let archive_name = release_archive_name();
-    let expected_sha256 = fetch_expected_sha256(release, &archive_name)?;
-
-    // Pin the update to the exact release the checksum was fetched for, so a release
-    // published mid-update cannot be installed against the wrong digest.
-    let release_tag = format!("v{}", release.version);
     let status = self_update::backends::github::Update::configure()
-        .repo_owner(REPO_OWNER)
-        .repo_name(REPO_NAME)
+        .repo_owner("sg004baa")
+        .repo_name("sabiql")
         .bin_name("sabiql")
         .show_download_progress(true)
+        .no_confirm(true)
         .current_version(current)
-        .release_tag(release_tag)
-        .asset_matcher(move |assets: &[self_update::ReleaseAsset]| {
-            assets
-                .iter()
-                .find(|asset| asset.name == archive_name)
-                .cloned()
-        })
-        .verify_checksum(self_update::Checksum::Sha256(expected_sha256))
+        .target_version_tag(&target_version)
         .build()?
         .update()?;
 
-    if status.is_updated() {
-        println!(
-            "Updated successfully: v{} -> v{}",
-            current,
-            status.version()
-        );
+    if status.updated() {
+        println!("Updated successfully: v{} -> {}", current, status.version());
     } else {
         println!("Already up to date (v{current}).");
     }
@@ -574,65 +262,27 @@ fn run_update() -> Result<()> {
     Ok(())
 }
 
-/// cargo-dist release archive name for the running platform, e.g.
-/// `sabiql-x86_64-unknown-linux-gnu.tar.gz`.
 #[cfg(feature = "self-update")]
-fn release_archive_name() -> String {
-    let target = self_update::get_target();
-    let extension = if cfg!(target_os = "windows") {
-        "zip"
-    } else {
-        "tar.gz"
-    };
-    format!("sabiql-{target}.{extension}")
-}
-
-/// Download the cargo-dist `<archive>.sha256` release asset and return the expected
-/// hex digest. Fails if the asset is missing or its content is not a SHA-256 digest.
-#[cfg(feature = "self-update")]
-fn fetch_expected_sha256(
-    release: &self_update::update::Release,
-    archive_name: &str,
-) -> Result<String> {
-    use color_eyre::eyre::eyre;
-
-    let checksum_name = format!("{archive_name}.sha256");
-    let asset = release
-        .assets
+fn latest_stable_release<'a>(
+    current_version: &str,
+    releases: &'a [self_update::update::Release],
+) -> Option<&'a self_update::update::Release> {
+    releases
         .iter()
-        .find(|asset| asset.name == checksum_name)
-        .ok_or_else(|| {
-            eyre!(
-                "Checksum asset `{checksum_name}` not found in release v{}; refusing to update without verification",
-                release.version
-            )
-        })?;
-
-    let mut raw = Vec::new();
-    let mut download = self_update::Download::from_url(&asset.download_url);
-    download.header("Accept", "application/octet-stream")?;
-    download.download_to(&mut raw)?;
-
-    let content = String::from_utf8(raw)
-        .map_err(|_| eyre!("Checksum asset `{checksum_name}` is not valid UTF-8"))?;
-    parse_sha256_digest(&content, &checksum_name)
-}
-
-/// Parse a cargo-dist checksum asset: `sha256sum`-style content, `<hex digest>  <file name>`.
-#[cfg(feature = "self-update")]
-fn parse_sha256_digest(content: &str, checksum_name: &str) -> Result<String> {
-    use color_eyre::eyre::eyre;
-
-    let digest = content
-        .split_whitespace()
-        .next()
-        .ok_or_else(|| eyre!("Checksum asset `{checksum_name}` is empty"))?;
-    if digest.len() != 64 || !digest.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(eyre!(
-            "Checksum asset `{checksum_name}` does not contain a SHA-256 digest: `{digest}`"
-        ));
-    }
-    Ok(digest.to_lowercase())
+        .filter(|release| !release.version.contains('-'))
+        .filter(|release| {
+            self_update::version::bump_is_greater(current_version, &release.version)
+                .unwrap_or(false)
+        })
+        .reduce(|latest, release| {
+            if self_update::version::bump_is_greater(&latest.version, &release.version)
+                .unwrap_or(false)
+            {
+                release
+            } else {
+                latest
+            }
+        })
 }
 
 #[cfg(not(feature = "self-update"))]
@@ -643,4 +293,273 @@ fn self_update_disabled_message() -> String {
          If installed via cargo:    cargo install sabiql",
         env!("CARGO_PKG_VERSION")
     )
+}
+
+const MAX_DEPTH: usize = 16;
+const MAX_DRAIN: usize = 32;
+
+struct Runtime {
+    state: AppState,
+    tui: TuiRunner,
+    action_rx: mpsc::Receiver<Action>,
+    effect_runner: EffectRunner,
+    completion_engine: RefCell<CompletionEngine>,
+    services: AppServices,
+}
+
+#[expect(
+    clippy::disallowed_methods,
+    reason = "Runtime is the event-loop boundary that reads the clock and injects `now` into reducers"
+)]
+impl Runtime {
+    fn new(state: AppState, infrastructure: Infrastructure) -> Result<Self> {
+        let (action_tx, action_rx) = mpsc::channel::<Action>(256);
+        let adapter_registry = infrastructure.adapter_registry;
+        let mysql_connection_probe: Arc<dyn MySqlConnectionProbe> = Arc::new(MySqlAdapter::new());
+        let sqlite_diagnostics: Arc<dyn SqliteDiagnosticsProvider> = Arc::new(SqliteAdapter::new());
+        let completion_engine = RefCell::new(CompletionEngine::new());
+        let effect_runner = EffectRunner::new(
+            Arc::clone(&adapter_registry) as _,
+            ConnectionDeps {
+                dsn_builder: Arc::clone(&adapter_registry) as _,
+                mysql_connection_probe,
+                connection_store: Arc::clone(&infrastructure.connection_store) as _,
+                pg_service_entry_reader: Arc::clone(&infrastructure.pg_service_entry_reader),
+                sqlite_path_validator: Arc::new(FsSqlitePathValidator),
+            },
+            QueryDeps {
+                query_executor: Arc::clone(&adapter_registry) as _,
+                query_history_store: Arc::new(FileQueryHistoryStore::new()),
+                sqlite_diagnostics,
+                cached_result_exporter: Arc::new(CsvCachedResultExporter),
+            },
+            ErDeps {
+                er_exporter: Arc::new(DotExporter::new()),
+                config_writer: Arc::new(FileConfigWriter::new()),
+                er_log_writer: Arc::new(FsErLogWriter),
+            },
+            UtilityDeps {
+                external_editor: Arc::new(SystemExternalEditor),
+                file_walker: Arc::new(WalkdirFileWalker::new()),
+                clipboard: Arc::new(ArboardClipboard),
+                folder_opener: Arc::new(NativeFolderOpener),
+            },
+            Arc::clone(&infrastructure.settings_store) as _,
+            action_tx,
+        );
+        let services = AppServices {
+            ddl_generator: Arc::clone(&adapter_registry) as _,
+            dsn_builder: Arc::clone(&adapter_registry) as _,
+        };
+
+        Ok(Self {
+            state,
+            tui: TuiRunner::new()?,
+            action_rx,
+            effect_runner,
+            completion_engine,
+            services,
+        })
+    }
+
+    async fn run(mut self) -> Result<()> {
+        self.tui.enter()?;
+
+        let initial_size = self.tui.terminal().size()?;
+        self.state.ui.set_terminal_width(initial_size.width);
+        self.state.ui.set_terminal_height(initial_size.height);
+
+        if self.state.session.dsn().is_some() && self.state.input_mode() == InputMode::Normal {
+            self.process_action(Action::TryConnect).await?;
+        }
+
+        loop {
+            let now = Instant::now();
+            let deadline = next_animation_deadline(&self.state, now);
+
+            tokio::select! {
+                event = self.tui.next_event() => {
+                    let event = event?;
+                    let action = handle_event(event, &self.state);
+                    if !action.is_none() {
+                        self.process_terminal_event_burst(action).await?;
+                    }
+                }
+                Some(action) = self.action_rx.recv() => {
+                    self.process_action(action).await?;
+                }
+                // Animation deadline reached (spinner, cursor blink, message timeout)
+                () = async {
+                    match deadline {
+                        Some(d) => sleep_until(d.into()).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {
+                    self.process_action(Action::Render).await?;
+                }
+            }
+
+            if let Some(debounce_until) = self.state.sql_modal.completion_debounce()
+                && Instant::now() >= debounce_until
+            {
+                self.state.sql_modal.consume_completion_debounce();
+                self.process_action(Action::CompletionRequest).await?;
+            }
+
+            if self.state.should_quit {
+                break;
+            }
+        }
+
+        self.tui.exit()?;
+        Ok(())
+    }
+
+    async fn process_terminal_event_burst(&mut self, first_action: Action) -> Result<()> {
+        if !first_action.is_scroll() {
+            self.state.messages.clear_error();
+            return self.process_action(first_action).await;
+        }
+
+        self.state.messages.clear_error();
+        let now = Instant::now();
+        let mut effects = reduce(&mut self.state, first_action, now, &self.services);
+        if !effects.is_empty() {
+            self.append_render_if_dirty(&mut effects, now);
+            return self.flush_effects(effects).await;
+        }
+
+        // Effect-free scroll reduces only mutate state; defer the render to the
+        // end of the burst so N input events produce one draw, not N.
+        let mut drained = 0;
+        while drained < MAX_DRAIN {
+            let Some(event) = self.tui.try_next_event()? else {
+                break;
+            };
+            drained += 1;
+            let action = handle_event(event, &self.state);
+            if action.is_none() {
+                continue;
+            }
+
+            if action.is_scroll() {
+                self.state.messages.clear_error();
+                let now = Instant::now();
+                let mut effects = reduce(&mut self.state, action, now, &self.services);
+                if !effects.is_empty() {
+                    self.append_render_if_dirty(&mut effects, now);
+                    self.flush_effects(effects).await?;
+                    break;
+                }
+            } else {
+                if self.state.render_dirty {
+                    self.state.clear_dirty();
+                    self.process_action(Action::Render).await?;
+                }
+                self.state.messages.clear_error();
+                self.process_action(action).await?;
+                if self.state.should_quit {
+                    return Ok(());
+                }
+            }
+        }
+
+        if self.state.render_dirty {
+            self.state.clear_dirty();
+            self.process_action(Action::Render).await?;
+        }
+
+        Ok(())
+    }
+
+    async fn process_action(&mut self, action: Action) -> Result<()> {
+        let now = Instant::now();
+        let is_animation_tick = matches!(action, Action::Render);
+        if is_animation_tick {
+            self.state.clear_expired_timers(now);
+        }
+        let mut effects = reduce(&mut self.state, action, now, &self.services);
+        if is_animation_tick {
+            if self.state.render_dirty {
+                effects.push(Effect::Render);
+            }
+        } else {
+            self.append_render_if_dirty(&mut effects, now);
+        }
+        self.flush_effects(effects).await
+    }
+
+    async fn flush_effects(&mut self, effects: Vec<Effect>) -> Result<()> {
+        let mut pending = self.run_effects(effects).await?;
+
+        let mut depth = 0;
+        while !pending.is_empty() && depth < MAX_DEPTH {
+            depth += 1;
+            let mut next = Vec::new();
+            for action in pending {
+                let now = Instant::now();
+                let mut effects = reduce(&mut self.state, action, now, &self.services);
+                self.append_render_if_dirty(&mut effects, now);
+                next.extend(self.run_effects(effects).await?);
+            }
+            pending = next;
+        }
+        if depth >= MAX_DEPTH && !pending.is_empty() {
+            dispatch_overflow_fallback(&mut self.state, self.effect_runner.action_tx(), pending);
+            // Render immediately so the overflow error is visible before the next
+            // event-loop pass; errors do not have an expiry wake-up anymore.
+            self.run_effects(vec![Effect::Render]).await?;
+        }
+        Ok(())
+    }
+
+    async fn run_effects(&mut self, effects: Vec<Effect>) -> Result<Vec<Action>> {
+        let mut tui_adapter = TuiAdapter::new(&mut self.tui);
+        let pending = self
+            .effect_runner
+            .execute_effects(
+                effects,
+                &mut tui_adapter,
+                &mut self.state,
+                &self.completion_engine,
+                &self.services,
+            )
+            .await?;
+        self.state.clear_dirty();
+        Ok(pending)
+    }
+
+    fn append_render_if_dirty(&mut self, effects: &mut Vec<Effect>, now: Instant) {
+        if self.state.render_dirty {
+            self.state.clear_expired_timers(now);
+            effects.push(Effect::Render);
+        }
+    }
+}
+
+/// Last-resort handling when DispatchActions recursion exceeds the depth
+/// limit: re-queue through the action channel and surface the failure as a
+/// UI error message (stderr would corrupt the TUI-owned screen).
+fn dispatch_overflow_fallback(
+    state: &mut AppState,
+    action_tx: &mpsc::Sender<Action>,
+    pending: Vec<Action>,
+) {
+    let deferred = pending.len();
+    let mut dropped = 0usize;
+    for action in pending {
+        if action_tx.try_send(action).is_err() {
+            dropped += 1;
+        }
+    }
+    let message = if dropped > 0 {
+        format!(
+            "Internal error: action dispatch depth exceeded ({MAX_DEPTH}); {dropped} actions dropped"
+        )
+    } else {
+        format!(
+            "Internal error: action dispatch depth exceeded ({MAX_DEPTH}); {deferred} actions deferred"
+        )
+    };
+    state.messages.set_error(message);
 }

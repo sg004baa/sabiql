@@ -1,15 +1,17 @@
-pub mod browse;
-pub mod cache;
+pub(in crate::cmd) mod browse;
+pub mod cli_sqlite;
 pub mod completion_engine;
-pub mod connection;
+pub(in crate::cmd) mod connection;
 pub mod effect;
-pub mod er;
-pub mod file_picker;
+pub(in crate::cmd) mod er;
+mod metadata_task;
 pub mod render_schedule;
 pub mod runner;
-pub mod settings;
-pub mod sql_editor;
-pub mod utility;
-
+pub(in crate::cmd) mod settings;
+mod single_task_owner;
+pub(in crate::cmd) mod sql_editor;
+pub(in crate::cmd) mod sqlite_diagnostics;
+pub(in crate::cmd) mod sqlite_path_validate;
 #[cfg(test)]
-pub(crate) mod test_support;
+pub(crate) mod test_fixtures;
+pub(in crate::cmd) mod utility;
