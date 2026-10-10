@@ -56,10 +56,16 @@ pub enum VimOperator {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StagedDeleteState {
+    None,
+    InProgress,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VimSurfaceContext {
     Browse(BrowseVimContext),
     SqlModal(SqlModalVimContext),
-    JsonbDetail(JsonbDetailVimContext),
+    JsonDetail(JsonDetailVimContext),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +85,7 @@ pub enum InspectorVimContext {
 pub struct ResultVimContext {
     pub mode: ResultNavMode,
     pub has_pending_draft: bool,
+    pub staged_delete: StagedDeleteState,
     pub yank_pending: bool,
     pub delete_pending: bool,
 }
@@ -95,19 +102,24 @@ impl BrowseVimContext {
 
 impl From<&AppState> for BrowseVimContext {
     fn from(state: &AppState) -> Self {
-        let result_nav = state.ui.is_focus_mode() || state.ui.focused_pane == FocusedPane::Result;
+        let result_nav = state.ui.is_focus_mode() || state.ui.focused_pane() == FocusedPane::Result;
 
         if result_nav {
             return Self::Result(ResultVimContext {
                 mode: state.result_interaction.selection().mode(),
                 has_pending_draft: state.result_interaction.cell_edit().has_pending_draft(),
+                staged_delete: if state.result_interaction.staged_delete_rows().is_empty() {
+                    StagedDeleteState::None
+                } else {
+                    StagedDeleteState::InProgress
+                },
                 yank_pending: state.result_interaction.is_yank_operator_pending(),
                 delete_pending: state.result_interaction.is_delete_operator_pending(),
             });
         }
 
-        if state.ui.focused_pane == FocusedPane::Inspector {
-            let inspector_ctx = if state.ui.inspector_tab == InspectorTab::Ddl {
+        if state.ui.focused_pane() == FocusedPane::Inspector {
+            let inspector_ctx = if state.ui.inspector_tab() == InspectorTab::Ddl {
                 InspectorVimContext::Ddl
             } else {
                 InspectorVimContext::Other
@@ -128,7 +140,7 @@ pub enum SqlModalVimContext {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum JsonbDetailVimContext {
+pub enum JsonDetailVimContext {
     Viewing,
     Editing,
     Searching,
@@ -151,7 +163,7 @@ mod tests {
 
         fn result_state() -> AppState {
             let mut state = AppState::new("test".to_string());
-            state.ui.focused_pane = FocusedPane::Result;
+            state.ui.set_focused_pane(FocusedPane::Result);
             state.result_interaction.activate_cell(0, 0);
             state
         }

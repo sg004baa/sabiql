@@ -1,16 +1,58 @@
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
-
 pub const MIN_COL_WIDTH: u16 = 4;
 pub const PADDING: u16 = 2;
 
 pub fn calculate_header_min_widths<S: AsRef<str>>(headers: &[S]) -> Vec<u16> {
+    use unicode_width::UnicodeWidthStr;
+
     headers
         .iter()
         .map(|h| (UnicodeWidthStr::width(h.as_ref()) as u16 + PADDING).max(MIN_COL_WIDTH))
         .collect()
 }
 
+// Counts display cells, not chars: CJK text renders two cells per char and
+// would otherwise overflow its column and get clipped without an ellipsis.
+pub fn truncate_to_width_with(s: &str, max_width: usize, ellipsis: &str) -> String {
+    use unicode_width::UnicodeWidthStr;
+
+    if UnicodeWidthStr::width(s) <= max_width {
+        return s.to_string();
+    }
+
+    let ellipsis_width = UnicodeWidthStr::width(ellipsis);
+    // The ellipsis itself must respect the width contract
+    if max_width < ellipsis_width {
+        return take_within_width(ellipsis, max_width);
+    }
+
+    let mut truncated = take_within_width(s, max_width - ellipsis_width);
+    truncated.push_str(ellipsis);
+    truncated
+}
+
+pub fn truncate_to_width(s: &str, max_width: usize) -> String {
+    truncate_to_width_with(s, max_width, "...")
+}
+
+pub fn take_within_width(s: &str, budget: usize) -> String {
+    use unicode_width::UnicodeWidthChar;
+
+    let mut taken = String::new();
+    let mut used = 0;
+    for ch in s.chars() {
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + w > budget {
+            break;
+        }
+        taken.push(ch);
+        used += w;
+    }
+    taken
+}
+
 pub fn wrapped_line_count(text: &str, width: u16) -> u16 {
+    use unicode_width::UnicodeWidthStr;
+
     if width == 0 {
         return 0;
     }
@@ -20,54 +62,6 @@ pub fn wrapped_line_count(text: &str, width: u16) -> u16 {
         let wrapped = w.max(1).div_ceil(width);
         acc.saturating_add(wrapped)
     })
-}
-
-pub fn search_viewport_offset(input: &str, cursor: usize, visible_width: usize) -> usize {
-    let chars: Vec<char> = input.chars().collect();
-    let cursor = cursor.min(chars.len());
-
-    if visible_width == 0 {
-        return cursor;
-    }
-
-    let mut viewport_offset = 0;
-    let mut width_before_cursor = display_width(&chars[..cursor]);
-
-    while width_before_cursor >= visible_width && viewport_offset < cursor {
-        width_before_cursor =
-            width_before_cursor.saturating_sub(char_width(chars[viewport_offset]));
-        viewport_offset += 1;
-    }
-
-    viewport_offset
-}
-
-pub fn slice_chars_fitting_width(input: &str, start: usize, visible_width: usize) -> String {
-    if visible_width == 0 {
-        return String::new();
-    }
-
-    let mut width = 0;
-    let mut visible = String::new();
-
-    for ch in input.chars().skip(start) {
-        let ch_width = char_width(ch);
-        if width + ch_width > visible_width {
-            break;
-        }
-        width += ch_width;
-        visible.push(ch);
-    }
-
-    visible
-}
-
-pub fn display_width(chars: &[char]) -> usize {
-    chars.iter().map(|&ch| char_width(ch)).sum()
-}
-
-pub fn char_width(ch: char) -> usize {
-    UnicodeWidthChar::width(ch).unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -96,11 +90,62 @@ mod tests {
     }
 
     #[test]
-    fn full_width_headers_use_display_width() {
-        let headers = ["名前", "id"];
+    fn cjk_headers_measured_by_display_width() {
+        let headers = ["名前"];
         let widths = calculate_header_min_widths(&headers);
-        // "名前" renders as 4 terminal cells, not 2 chars
-        assert_eq!(widths, vec![6, 4]);
+        // 2 chars × 2 cells + padding
+        assert_eq!(widths, vec![6]);
+    }
+
+    mod truncate_to_width_tests {
+        use super::super::truncate_to_width;
+        use rstest::rstest;
+        use unicode_width::UnicodeWidthStr;
+
+        #[rstest]
+        #[case("hello", 10, "hello")]
+        #[case("hello world", 8, "hello...")]
+        #[case("hello", 0, "")]
+        #[case("hello", 1, ".")]
+        #[case("hello", 2, "..")]
+        #[case("hello", 3, "...")]
+        #[case("こんにちは", 10, "こんにちは")]
+        #[case("こんにちは世界", 5, "こ...")]
+        #[case("日本語テスト", 10, "日本語...")]
+        fn truncates_by_display_cells(
+            #[case] input: &str,
+            #[case] max: usize,
+            #[case] expected: &str,
+        ) {
+            let result = truncate_to_width(input, max);
+
+            assert_eq!(result, expected);
+            assert!(UnicodeWidthStr::width(result.as_str()) <= max);
+        }
+    }
+
+    mod truncate_to_width_with_tests {
+        use super::super::truncate_to_width_with;
+        use rstest::rstest;
+        use unicode_width::UnicodeWidthStr;
+
+        #[rstest]
+        #[case("users", 16, "users")]
+        #[case("exactly_16_chars", 16, "exactly_16_chars")]
+        #[case("public.user_sessions", 16, "public.user_ses\u{2026}")]
+        #[case("ab", 1, "\u{2026}")]
+        #[case("anything", 0, "")]
+        #[case("テーブル名前", 4, "テ\u{2026}")]
+        fn unicode_ellipsis_respects_display_width(
+            #[case] input: &str,
+            #[case] max: usize,
+            #[case] expected: &str,
+        ) {
+            let result = truncate_to_width_with(input, max, "\u{2026}");
+
+            assert_eq!(result, expected);
+            assert!(UnicodeWidthStr::width(result.as_str()) <= max);
+        }
     }
 
     mod wrapped_line_count_tests {
@@ -119,15 +164,5 @@ mod tests {
         fn counts_wrapped_lines(#[case] text: &str, #[case] width: u16, #[case] expected: u16) {
             assert_eq!(wrapped_line_count(text, width), expected);
         }
-    }
-
-    #[test]
-    fn slice_chars_fitting_width_omits_first_wide_char_when_viewport_is_too_narrow() {
-        assert_eq!(slice_chars_fitting_width("界a", 0, 1), "");
-    }
-
-    #[test]
-    fn slice_chars_fitting_width_keeps_chars_that_fit_exactly() {
-        assert_eq!(slice_chars_fitting_width("ab", 0, 2), "ab");
     }
 }

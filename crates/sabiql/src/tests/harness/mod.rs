@@ -1,4 +1,6 @@
 pub mod fixtures;
+pub mod mysql;
+pub mod postgres;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -10,7 +12,10 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Position;
 
 use sabiql_app::model::app_state::AppState;
+use sabiql_app::model::connection::setup::ConnectionField;
+use sabiql_app::model::shared::text_input::TextInputState;
 use sabiql_app::services::AppServices;
+use sabiql_domain::{ConnectionId, DatabaseType};
 use sabiql_ui::shell::layout::MainLayout;
 use sabiql_ui::theme::{ThemePalette, palette_for};
 
@@ -23,8 +28,44 @@ pub fn test_instant() -> Instant {
 
 pub fn create_test_state() -> AppState {
     let mut state = AppState::new("test_project".to_string());
-    state.session.active_connection_name = Some("localhost:5432/test".to_string());
+    state.session.activate_connection_with_dsn(
+        &ConnectionId::from_string("test-connection"),
+        "localhost:5432/test",
+        DatabaseType::PostgreSQL,
+        "localhost:5432/test",
+    );
     state
+}
+
+pub fn focus_connection_field(state: &mut AppState, field: ConnectionField) {
+    let fields = state.connection_setup.visible_fields();
+    let target_idx = fields
+        .iter()
+        .position(|candidate| *candidate == field)
+        .unwrap_or_else(|| panic!("field {field:?} is not visible: {fields:?}"));
+
+    loop {
+        let current = state.connection_setup.focused_field();
+        if current == field {
+            return;
+        }
+        let current_idx = fields
+            .iter()
+            .position(|candidate| *candidate == current)
+            .expect("focused field must be visible");
+        if target_idx > current_idx {
+            state.connection_setup.focus_next_field();
+        } else {
+            state.connection_setup.focus_prev_field();
+        }
+    }
+}
+
+pub fn set_connection_input(state: &mut AppState, field: ConnectionField, input: TextInputState) {
+    *state
+        .connection_setup
+        .input_mut(field)
+        .expect("expected text input field") = input;
 }
 
 pub fn create_test_terminal() -> Terminal<TestBackend> {
@@ -57,21 +98,33 @@ pub fn render_and_get_buffer_at_with_theme(
     now: Instant,
     theme: &ThemePalette,
 ) -> Buffer {
+    render_and_get_buffer_at_with_theme_and_services(
+        terminal,
+        state,
+        now,
+        theme,
+        &AppServices::stub(),
+    )
+}
+
+pub fn render_and_get_buffer_at_with_theme_and_services(
+    terminal: &mut Terminal<TestBackend>,
+    state: &mut AppState,
+    now: Instant,
+    theme: &ThemePalette,
+    services: &AppServices,
+) -> Buffer {
     terminal
         .draw(|frame| {
             let output = MainLayout::render_with_theme(
                 frame,
                 state,
                 Some(FIXED_TIME_MS),
-                &AppServices::stub(),
+                services,
                 now,
                 theme,
             );
-            state.ui.inspector_viewport_plan = output.inspector_viewport_plan;
-            state.ui.result_viewport_plan = output.result_viewport_plan;
-            state.ui.result_widths_cache = output.result_widths_cache;
-            state.ui.inspector_pane_height = output.inspector_pane_height;
-            state.ui.result_pane_height = output.result_pane_height;
+            state.apply_render_output(output);
         })
         .unwrap();
 
@@ -80,6 +133,21 @@ pub fn render_and_get_buffer_at_with_theme(
 
 pub fn render_to_string(terminal: &mut Terminal<TestBackend>, state: &mut AppState) -> String {
     let buffer = render_and_get_buffer(terminal, state);
+    buffer_to_string(&buffer)
+}
+
+pub fn render_to_string_with_services(
+    terminal: &mut Terminal<TestBackend>,
+    state: &mut AppState,
+    services: &AppServices,
+) -> String {
+    let buffer = render_and_get_buffer_at_with_theme_and_services(
+        terminal,
+        state,
+        test_instant(),
+        palette_for(state.ui.theme_id()),
+        services,
+    );
     buffer_to_string(&buffer)
 }
 
@@ -105,31 +173,30 @@ fn buffer_to_string(buffer: &Buffer) -> String {
     result
 }
 
-pub fn connected_state() -> (AppState, Instant) {
-    let now = test_instant();
+pub fn postgres_connected_state() -> AppState {
     let mut state = create_test_state();
     state
         .session
-        .mark_connected(Arc::new(fixtures::sample_metadata(now)));
-    (state, now)
+        .mark_connected(Arc::new(fixtures::sample_metadata()));
+    state
 }
 
-pub fn explorer_selected_state() -> (AppState, Instant) {
-    let (mut state, now) = connected_state();
+pub fn explorer_selected_state() -> AppState {
+    let mut state = postgres_connected_state();
     state.ui.set_explorer_selection(Some(0));
-    (state, now)
+    state
 }
 
-pub fn table_detail_loaded_state() -> (AppState, Instant) {
-    let (mut state, now) = explorer_selected_state();
+pub fn table_detail_loaded_state() -> AppState {
+    let mut state = explorer_selected_state();
     let _ = state
         .session
-        .set_table_detail(fixtures::sample_table_detail(), 0);
-    (state, now)
+        .set_table_detail(fixtures::sample_postgres_table_detail(), 0);
+    state
 }
 
-pub fn with_current_result(state: &mut AppState, now: Instant) {
+pub fn with_current_result(state: &mut AppState) {
     state
         .query
-        .set_current_result(Arc::new(fixtures::sample_query_result(now)));
+        .set_current_result(Arc::new(fixtures::sample_query_result()));
 }

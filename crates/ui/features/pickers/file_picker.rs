@@ -1,3 +1,4 @@
+use crate::primitives::molecules::FooterHintBar;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Modifier, Style};
@@ -6,7 +7,13 @@ use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 
 use crate::app::model::app_state::AppState;
 use crate::app::model::connection::file_picker::FilteredPath;
-use crate::features::pickers::table_picker::filter_visible_width;
+fn filter_visible_width(width: usize, cursor: usize, count: usize) -> usize {
+    if cursor == count {
+        width.saturating_sub(1)
+    } else {
+        width
+    }
+}
 use crate::primitives::atoms::text_cursor_spans;
 use crate::primitives::molecules::render_modal;
 use crate::theme::ThemePalette;
@@ -44,7 +51,7 @@ impl FilePicker {
             Constraint::Percentage(70),
             Constraint::Max(desired_height),
             " Select SQLite File ",
-            &border_footer,
+            FooterHintBar::message(border_footer),
             theme,
         );
 

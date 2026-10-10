@@ -10,6 +10,7 @@ pub struct HorizontalScrollParams {
     pub position: usize,
     pub viewport_size: usize,
     pub total_items: usize,
+    pub label: &'static str,
 }
 
 pub fn render_horizontal_scroll_indicator(
@@ -36,14 +37,12 @@ pub fn render_horizontal_scroll_indicator(
     }
 
     let scrollable_range = params.total_items.saturating_sub(params.viewport_size);
-    let percentage = if scrollable_range > 0 {
-        (params.position * 100) / scrollable_range
-    } else {
-        0
-    };
-    let position_text = format!("col {:>3}%", percentage.min(100));
+    let percentage = (params.position * 100)
+        .checked_div(scrollable_range)
+        .unwrap_or(0);
+    let position_text = format!("{} {:>3}%", params.label, percentage.min(100));
 
-    // Layout: [col XXX%][space][scrollbar with < and >][1-cell gap for border]
+    // Layout: [label XXX%][space][scrollbar with < and >][1-cell gap for border]
     let fixed_parts_len = position_text.len() + 1 + 1;
     let scrollbar_width = available_width.saturating_sub(fixed_parts_len).max(5);
 

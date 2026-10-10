@@ -52,7 +52,8 @@ async fn main() -> Result<()> {
 
         loop {
             tokio::select! {
-                Some(event) = tui.next_event() => {
+                event = tui.next_event() => {
+                    let event = event?;
                     if let Some(action) = handle_event(event, &state) {
                         process_action(action, &mut state, &mut tui, &effect_runner).await?;
                     }

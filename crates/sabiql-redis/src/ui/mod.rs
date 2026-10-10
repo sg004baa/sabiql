@@ -482,9 +482,8 @@ fn render_db_overlay(frame: &mut Frame<'_>, overlay: &DbOverlayState) {
             } else {
                 Style::default().fg(theme.semantic.text.primary)
             };
-            let count_label = count
-                .map(|count| format!("{count} keys"))
-                .unwrap_or_else(|| "...".to_string());
+            let count_label =
+                count.map_or_else(|| "...".to_string(), |count| format!("{count} keys"));
 
             vec![
                 Cell::from(format!("db {db}")).style(style),

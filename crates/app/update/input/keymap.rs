@@ -1,4 +1,5 @@
 use super::keybindings::{KeyBinding, KeyCombo, ModeRow};
+use crate::policy::FeaturePolicy;
 use crate::update::action::Action;
 
 pub fn resolve(combo: &KeyCombo, bindings: &[KeyBinding]) -> Option<Action> {
@@ -9,8 +10,41 @@ pub fn resolve(combo: &KeyCombo, bindings: &[KeyBinding]) -> Option<Action> {
         .map(|kb| kb.action.clone())
 }
 
+pub fn resolve_with_policy(
+    combo: &KeyCombo,
+    bindings: &[KeyBinding],
+    feature_policy: &FeaturePolicy,
+) -> Option<Action> {
+    bindings
+        .iter()
+        .filter(|kb| {
+            !matches!(kb.action, Action::None)
+                && feature_policy.is_enabled(kb.feature_requirement())
+        })
+        .find(|kb| kb.combos.contains(combo))
+        .map(|kb| kb.action.clone())
+}
+
 pub fn resolve_mode(combo: &KeyCombo, rows: &[ModeRow]) -> Option<Action> {
     for row in rows {
+        for eb in row.bindings {
+            if !matches!(eb.action, Action::None) && eb.combos.contains(combo) {
+                return Some(eb.action.clone());
+            }
+        }
+    }
+    None
+}
+
+pub fn resolve_mode_with_policy(
+    combo: &KeyCombo,
+    rows: &[ModeRow],
+    feature_policy: &FeaturePolicy,
+) -> Option<Action> {
+    for row in rows {
+        if !feature_policy.is_enabled(row.feature_requirement()) {
+            continue;
+        }
         for eb in row.bindings {
             if !matches!(eb.action, Action::None) && eb.combos.contains(combo) {
                 return Some(eb.action.clone());
@@ -156,7 +190,7 @@ mod tests {
             assert!(result.is_none());
         }
 
-        // CONNECTION_ERROR_ROWS has multiple bindings; Esc at idx 5 resolves to CloseConnectionError
+        // Esc resolves to connection_error::ESC_CLOSE even though earlier rows exist
         #[test]
         fn first_matching_binding_wins() {
             let result = resolve_mode(&KeyCombo::plain(Key::Esc), CONNECTION_ERROR_ROWS);
@@ -164,7 +198,7 @@ mod tests {
             assert!(matches!(result, Some(Action::CloseConnectionError)));
         }
 
-        // TYPE_FILTER row has no Enter combo — Enter resolves to ConfirmSelection at idx 0
+        // table_picker::TYPE_FILTER has no Enter combo, so it must not shadow ENTER_SELECT
         #[test]
         fn unrelated_row_does_not_block_later_match() {
             let result = resolve_mode(&KeyCombo::plain(Key::Enter), TABLE_PICKER_ROWS);

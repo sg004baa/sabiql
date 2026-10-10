@@ -1,0 +1,457 @@
+use crate::model::app_state::AppState;
+use crate::model::browse::json_detail::JsonDetailMode;
+use crate::model::connection::setup::ConnectionField;
+use crate::model::shared::cursor::CursorMove;
+use crate::model::shared::focused_pane::FocusedPane;
+use crate::model::shared::input_mode::InputMode;
+use crate::model::shared::settings::KeymapPreset;
+use crate::model::shared::text_input::TextInputState;
+use crate::model::sql_editor::modal::{SqlModalStatus, SqlModalTab};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HelpState {
+    origin: HelpOrigin,
+    filter: TextInputState,
+    mode: HelpMode,
+    scroll_offset: usize,
+    horizontal_offset: usize,
+}
+
+impl Default for HelpState {
+    fn default() -> Self {
+        Self {
+            origin: HelpOrigin::Normal {
+                focused_pane: FocusedPane::default(),
+                result_active: false,
+                staged_delete_in_progress: false,
+                can_write_preview: false,
+                can_edit_selected_cell: false,
+                pending_cell_edit_draft: false,
+                keymap_preset: KeymapPreset::Default,
+            },
+            filter: TextInputState::default(),
+            mode: HelpMode::Viewing,
+            scroll_offset: 0,
+            horizontal_offset: 0,
+        }
+    }
+}
+
+impl HelpState {
+    pub fn open(&mut self, origin: HelpOrigin) {
+        self.origin = origin;
+        self.filter.clear();
+        self.mode = HelpMode::Viewing;
+        self.reset_offsets();
+    }
+
+    pub fn close(&mut self) {
+        self.filter.clear();
+        self.mode = HelpMode::Viewing;
+        self.reset_offsets();
+    }
+
+    pub fn origin(&self) -> HelpOrigin {
+        self.origin
+    }
+
+    pub fn filter(&self) -> &TextInputState {
+        &self.filter
+    }
+
+    pub fn mode(&self) -> HelpMode {
+        self.mode
+    }
+
+    pub fn enter_filter_editing(&mut self) {
+        self.mode = HelpMode::EditingFilter;
+        self.reset_offsets();
+    }
+
+    pub fn exit_filter_editing(&mut self) {
+        self.mode = HelpMode::Viewing;
+    }
+
+    pub fn scroll_offset(&self) -> usize {
+        self.scroll_offset
+    }
+
+    pub fn horizontal_offset(&self) -> usize {
+        self.horizontal_offset
+    }
+
+    pub fn set_scroll_offset(&mut self, offset: usize) {
+        self.scroll_offset = offset;
+    }
+
+    pub fn set_horizontal_offset(&mut self, offset: usize) {
+        self.horizontal_offset = offset;
+    }
+
+    pub fn reset_offsets(&mut self) {
+        self.scroll_offset = 0;
+        self.horizontal_offset = 0;
+    }
+
+    pub fn insert_filter_char(&mut self, ch: char) {
+        self.filter.insert_char(ch);
+        self.reset_offsets();
+    }
+
+    pub fn backspace_filter(&mut self) {
+        self.filter.backspace();
+        self.reset_offsets();
+    }
+
+    pub fn edit_filter<R>(&mut self, edit: impl FnOnce(&mut TextInputState) -> R) -> R {
+        let result = edit(&mut self.filter);
+        self.reset_offsets();
+        result
+    }
+
+    pub fn move_filter_cursor(&mut self, direction: CursorMove) {
+        self.filter.move_cursor(direction);
+    }
+
+    pub fn clamp_offsets(&mut self, max_scroll: usize, max_horizontal_scroll: usize) {
+        self.scroll_offset = self.scroll_offset.min(max_scroll);
+        self.horizontal_offset = self.horizontal_offset.min(max_horizontal_scroll);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HelpMode {
+    #[default]
+    Viewing,
+    EditingFilter,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HelpOrigin {
+    Normal {
+        focused_pane: FocusedPane,
+        result_active: bool,
+        staged_delete_in_progress: bool,
+        can_write_preview: bool,
+        can_edit_selected_cell: bool,
+        pending_cell_edit_draft: bool,
+        keymap_preset: KeymapPreset,
+    },
+    CommandLine,
+    CellEdit,
+    TablePicker,
+    CommandPalette,
+    Settings,
+    Help,
+    SqlModal {
+        mode: SqlHelpMode,
+        keymap_preset: KeymapPreset,
+    },
+    ConnectionSetup {
+        keymap_preset: KeymapPreset,
+        focused_field: ConnectionField,
+    },
+    ConnectionError,
+    SqliteDiagnostics,
+    ConfirmDialog,
+    ConnectionSelector,
+    ErTablePicker {
+        keymap_preset: KeymapPreset,
+    },
+    QueryHistoryPicker,
+    JsonDetail {
+        mode: JsonHelpMode,
+    },
+    JsonEdit,
+    CellDetail {
+        searching: bool,
+    },
+    RowDetail,
+}
+
+impl HelpOrigin {
+    pub fn keymap_preset(self) -> KeymapPreset {
+        match self {
+            Self::Normal { keymap_preset, .. }
+            | Self::SqlModal { keymap_preset, .. }
+            | Self::ConnectionSetup { keymap_preset, .. }
+            | Self::ErTablePicker { keymap_preset } => keymap_preset,
+            Self::CommandLine
+            | Self::CellEdit
+            | Self::TablePicker
+            | Self::CommandPalette
+            | Self::Settings
+            | Self::Help
+            | Self::ConnectionError
+            | Self::SqliteDiagnostics
+            | Self::ConfirmDialog
+            | Self::ConnectionSelector
+            | Self::QueryHistoryPicker
+            | Self::JsonDetail { .. }
+            | Self::JsonEdit
+            | Self::CellDetail { .. }
+            | Self::RowDetail => KeymapPreset::Default,
+        }
+    }
+
+    pub fn from_state(state: &AppState) -> Self {
+        match state.input_mode() {
+            InputMode::Normal => Self::Normal {
+                focused_pane: state.ui.focused_pane(),
+                result_active: state.result_interaction.selection().cell().is_some(),
+                staged_delete_in_progress: !state
+                    .result_interaction
+                    .staged_delete_rows()
+                    .is_empty(),
+                can_write_preview: state.can_write_visible_preview(),
+                can_edit_selected_cell: state.can_edit_selected_cell(),
+                pending_cell_edit_draft: state.result_interaction.cell_edit().has_pending_draft(),
+                keymap_preset: state.settings.saved_keymap_preset(),
+            },
+            InputMode::CommandLine => Self::CommandLine,
+            InputMode::CellEdit => Self::CellEdit,
+            InputMode::TablePicker => Self::TablePicker,
+            InputMode::CommandPalette | InputMode::GenerateSqlMenu | InputMode::FilePicker => {
+                Self::CommandPalette
+            }
+            InputMode::Settings => Self::Settings,
+            InputMode::Help => Self::Help,
+            InputMode::SqlModal => Self::SqlModal {
+                mode: SqlHelpMode::from_state(state),
+                keymap_preset: state.settings.saved_keymap_preset(),
+            },
+            InputMode::ConnectionSetup => Self::ConnectionSetup {
+                keymap_preset: state.settings.saved_keymap_preset(),
+                focused_field: state.connection_setup.focused_field,
+            },
+            InputMode::ConnectionError => Self::ConnectionError,
+            InputMode::SqliteDiagnostics => Self::SqliteDiagnostics,
+            InputMode::ConfirmDialog => Self::ConfirmDialog,
+            InputMode::ConnectionSelector => Self::ConnectionSelector,
+            InputMode::ErTablePicker => Self::ErTablePicker {
+                keymap_preset: state.settings.saved_keymap_preset(),
+            },
+            InputMode::QueryHistoryPicker => Self::QueryHistoryPicker,
+            InputMode::JsonDetail => Self::JsonDetail {
+                mode: JsonHelpMode::from_state(state),
+            },
+            InputMode::JsonEdit => Self::JsonEdit,
+            InputMode::CellDetail => Self::CellDetail {
+                searching: state.cell_detail.search().is_active(),
+            },
+            InputMode::RowDetail => Self::RowDetail,
+        }
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Normal {
+                focused_pane: FocusedPane::Explorer,
+                ..
+            } => "Explorer Pane",
+            Self::Normal {
+                focused_pane: FocusedPane::Inspector,
+                ..
+            } => "Inspector Pane",
+            Self::Normal {
+                focused_pane: FocusedPane::Result,
+                ..
+            } => "Result Pane",
+            Self::CommandLine => "Command Line",
+            Self::CellEdit => "Cell Edit",
+            Self::TablePicker => "Table Picker",
+            Self::CommandPalette => "Command Palette",
+            Self::Settings => "Settings",
+            Self::Help => "Help",
+            Self::SqlModal { mode, .. } => mode.label(),
+            Self::ConnectionSetup { .. } => "Connection Setup",
+            Self::ConnectionError => "Connection Error",
+            Self::SqliteDiagnostics => "SQLite Diagnostics",
+            Self::ConfirmDialog => "Confirm Dialog",
+            Self::ConnectionSelector => "Connection Selector",
+            Self::ErTablePicker { .. } => "ER Table Picker",
+            Self::QueryHistoryPicker => "Query History Picker",
+            Self::JsonDetail { mode } => mode.label(),
+            Self::JsonEdit => "JSON Edit",
+            Self::CellDetail { searching: true } => "Cell Detail Search",
+            Self::CellDetail { searching: false } => "Cell Detail",
+            Self::RowDetail => "Row Detail",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SqlHelpMode {
+    Normal,
+    Insert,
+    Plan,
+    Compare,
+    Confirm,
+    Running,
+}
+
+impl SqlHelpMode {
+    fn from_state(state: &AppState) -> Self {
+        match state.sql_modal.status() {
+            SqlModalStatus::Editing => Self::Insert,
+            SqlModalStatus::ConfirmingHigh { .. }
+            | SqlModalStatus::ConfirmingAnalyzeHigh { .. }
+            | SqlModalStatus::ConfirmingRisk { .. }
+            | SqlModalStatus::ConfirmingAnalyzeRisk { .. } => Self::Confirm,
+            SqlModalStatus::Running => Self::Running,
+            SqlModalStatus::Normal | SqlModalStatus::Success(_) | SqlModalStatus::Error(_) => {
+                match state
+                    .session
+                    .active_engine_feature_profile()
+                    .normalize_sql_modal_tab(state.sql_modal.active_tab())
+                {
+                    SqlModalTab::Sql => Self::Normal,
+                    SqlModalTab::Plan => Self::Plan,
+                    SqlModalTab::Compare => Self::Compare,
+                }
+            }
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Normal => "SQL Editor",
+            Self::Insert => "SQL Editor Insert",
+            Self::Plan => "SQL Editor Plan",
+            Self::Compare => "SQL Editor Compare",
+            Self::Confirm => "SQL Editor Confirm",
+            Self::Running => "SQL Editor Running",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JsonHelpMode {
+    Detail,
+    Search,
+    Edit,
+}
+
+impl JsonHelpMode {
+    fn from_state(state: &AppState) -> Self {
+        match state.json_detail.mode() {
+            JsonDetailMode::Viewing => Self::Detail,
+            JsonDetailMode::Editing => Self::Edit,
+            JsonDetailMode::Searching => Self::Search,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Detail => "JSON Detail",
+            Self::Search => "JSON Search",
+            Self::Edit => "JSON Edit",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normal_origin_captures_focused_pane() {
+        let mut state = AppState::new("test".to_string());
+        state.ui.set_focused_pane(FocusedPane::Inspector);
+
+        let origin = HelpOrigin::from_state(&state);
+
+        assert!(matches!(
+            origin,
+            HelpOrigin::Normal {
+                focused_pane: FocusedPane::Inspector,
+                result_active: false,
+                staged_delete_in_progress: false,
+                can_write_preview: false,
+                can_edit_selected_cell: false,
+                pending_cell_edit_draft: false,
+                keymap_preset: KeymapPreset::Default,
+            }
+        ));
+    }
+
+    #[test]
+    fn normal_origin_captures_active_result_cell() {
+        let mut state = AppState::new("test".to_string());
+        state.result_interaction.activate_cell(1, 2);
+
+        let origin = HelpOrigin::from_state(&state);
+
+        assert!(matches!(
+            origin,
+            HelpOrigin::Normal {
+                result_active: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn normal_origin_captures_staged_delete_state() {
+        let mut state = AppState::new("test".to_string());
+        state.result_interaction.stage_row(1);
+
+        let origin = HelpOrigin::from_state(&state);
+
+        assert!(matches!(
+            origin,
+            HelpOrigin::Normal {
+                staged_delete_in_progress: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn filter_input_resets_offsets() {
+        let mut state = HelpState::default();
+        state.set_scroll_offset(10);
+        state.set_horizontal_offset(4);
+
+        state.insert_filter_char('c');
+
+        assert_eq!(state.filter().content(), "c");
+        assert_eq!(state.scroll_offset(), 0);
+        assert_eq!(state.horizontal_offset(), 0);
+    }
+
+    #[test]
+    fn filter_mode_resets_when_help_is_closed() {
+        let mut state = HelpState::default();
+        state.enter_filter_editing();
+
+        state.close();
+
+        assert_eq!(state.mode(), HelpMode::Viewing);
+    }
+
+    #[test]
+    fn filter_mode_returns_to_viewing_without_clearing_the_filter() {
+        let mut state = HelpState::default();
+        state.insert_filter_char('c');
+        state.enter_filter_editing();
+
+        state.exit_filter_editing();
+
+        assert_eq!(state.mode(), HelpMode::Viewing);
+        assert_eq!(state.filter().content(), "c");
+    }
+
+    #[test]
+    fn entering_filter_mode_resets_scroll_offsets() {
+        let mut state = HelpState::default();
+        state.set_scroll_offset(10);
+        state.set_horizontal_offset(4);
+
+        state.enter_filter_editing();
+
+        assert_eq!(state.mode(), HelpMode::EditingFilter);
+        assert_eq!(state.scroll_offset(), 0);
+        assert_eq!(state.horizontal_offset(), 0);
+    }
+}

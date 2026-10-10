@@ -1,0 +1,191 @@
+use crate::domain::DatabaseType;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PreviewCellTextDiffHandling {
+    RawText,
+    StructuredJson,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PreviewCellTextDisplayHandling {
+    RawText,
+    PrettyPrintJsonText,
+    StructuredJson,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CellPresentationPolicy {
+    diff_handling: PreviewCellTextDiffHandling,
+    display_handling: PreviewCellTextDisplayHandling,
+}
+
+impl CellPresentationPolicy {
+    pub(crate) fn new(database_type: DatabaseType, column_data_type: &str, value: &str) -> Self {
+        let diff_handling = match (database_type, column_data_type) {
+            (DatabaseType::PostgreSQL, "jsonb") | (DatabaseType::MySQL, "json") => {
+                PreviewCellTextDiffHandling::StructuredJson
+            }
+            _ => PreviewCellTextDiffHandling::RawText,
+        };
+        let display_handling = match database_type {
+            DatabaseType::SQLite if has_sqlite_text_affinity(column_data_type) => {
+                PreviewCellTextDisplayHandling::PrettyPrintJsonText
+            }
+            DatabaseType::MySQL if column_data_type == "json" => {
+                PreviewCellTextDisplayHandling::StructuredJson
+            }
+            DatabaseType::SQLite | DatabaseType::MySQL => PreviewCellTextDisplayHandling::RawText,
+            DatabaseType::PostgreSQL => match column_data_type {
+                "jsonb" => PreviewCellTextDisplayHandling::StructuredJson,
+                "json" => PreviewCellTextDisplayHandling::PrettyPrintJsonText,
+                _ if looks_like_json_container(value) => {
+                    PreviewCellTextDisplayHandling::PrettyPrintJsonText
+                }
+                _ => PreviewCellTextDisplayHandling::RawText,
+            },
+        };
+
+        Self {
+            diff_handling,
+            display_handling,
+        }
+    }
+
+    pub(crate) fn diff_handling(self) -> PreviewCellTextDiffHandling {
+        self.diff_handling
+    }
+
+    pub(crate) fn display_handling(self) -> PreviewCellTextDisplayHandling {
+        self.display_handling
+    }
+
+    pub(crate) fn uses_json_detail_modal(self) -> bool {
+        self.display_handling == PreviewCellTextDisplayHandling::StructuredJson
+    }
+}
+
+fn looks_like_json_container(value: &str) -> bool {
+    let trimmed = value.trim_start();
+    trimmed.starts_with('{') || trimmed.starts_with('[')
+}
+
+fn has_sqlite_text_affinity(column_data_type: &str) -> bool {
+    let upper = column_data_type.to_ascii_uppercase();
+    upper.contains("CHAR") || upper.contains("CLOB") || upper.contains("TEXT")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sqlite_columns_always_use_raw_text() {
+        assert_eq!(
+            CellPresentationPolicy::new(DatabaseType::SQLite, "TEXT", "").diff_handling(),
+            PreviewCellTextDiffHandling::RawText
+        );
+        assert_eq!(
+            CellPresentationPolicy::new(DatabaseType::SQLite, "json", "").diff_handling(),
+            PreviewCellTextDiffHandling::RawText
+        );
+        assert_eq!(
+            CellPresentationPolicy::new(DatabaseType::SQLite, "jsonb", "").diff_handling(),
+            PreviewCellTextDiffHandling::RawText
+        );
+        assert!(
+            !CellPresentationPolicy::new(DatabaseType::SQLite, "jsonb", "")
+                .uses_json_detail_modal()
+        );
+    }
+
+    #[test]
+    fn postgresql_json_uses_semantic_handling() {
+        assert_eq!(
+            CellPresentationPolicy::new(DatabaseType::PostgreSQL, "jsonb", "").diff_handling(),
+            PreviewCellTextDiffHandling::StructuredJson
+        );
+        assert!(
+            CellPresentationPolicy::new(DatabaseType::PostgreSQL, "jsonb", "")
+                .uses_json_detail_modal()
+        );
+    }
+
+    #[test]
+    fn mysql_json_uses_structured_handling_with_edit_capability() {
+        let policy = CellPresentationPolicy::new(DatabaseType::MySQL, "json", "");
+
+        assert_eq!(
+            policy.diff_handling(),
+            PreviewCellTextDiffHandling::StructuredJson
+        );
+        assert_eq!(
+            policy.display_handling(),
+            PreviewCellTextDisplayHandling::StructuredJson
+        );
+        assert!(policy.uses_json_detail_modal());
+    }
+
+    #[test]
+    fn mysql_non_json_columns_stay_raw() {
+        let policy = CellPresentationPolicy::new(DatabaseType::MySQL, "text", r#"{"a":1}"#);
+
+        assert_eq!(policy.diff_handling(), PreviewCellTextDiffHandling::RawText);
+        assert_eq!(
+            policy.display_handling(),
+            PreviewCellTextDisplayHandling::RawText
+        );
+        assert!(!policy.uses_json_detail_modal());
+    }
+
+    #[test]
+    fn postgresql_json_uses_raw_text_for_diff() {
+        assert_eq!(
+            CellPresentationPolicy::new(DatabaseType::PostgreSQL, "json", "").diff_handling(),
+            PreviewCellTextDiffHandling::RawText
+        );
+    }
+
+    #[test]
+    fn postgresql_text_uses_raw_text_for_diff() {
+        assert_eq!(
+            CellPresentationPolicy::new(DatabaseType::PostgreSQL, "text", "").diff_handling(),
+            PreviewCellTextDiffHandling::RawText
+        );
+    }
+
+    #[test]
+    fn sqlite_text_affinity_uses_pretty_print_json_text_handling() {
+        assert_eq!(
+            CellPresentationPolicy::new(DatabaseType::SQLite, "TEXT", r#"{"items":["admin"]}"#)
+                .display_handling(),
+            PreviewCellTextDisplayHandling::PrettyPrintJsonText
+        );
+        assert_eq!(
+            CellPresentationPolicy::new(DatabaseType::SQLite, "varchar(255)", "42")
+                .display_handling(),
+            PreviewCellTextDisplayHandling::PrettyPrintJsonText
+        );
+    }
+
+    #[test]
+    fn sqlite_non_text_affinity_uses_raw_display_handling() {
+        assert_eq!(
+            CellPresentationPolicy::new(DatabaseType::SQLite, "INTEGER", "42").display_handling(),
+            PreviewCellTextDisplayHandling::RawText
+        );
+        assert_eq!(
+            CellPresentationPolicy::new(DatabaseType::SQLite, "json", r#"{"a":1}"#)
+                .display_handling(),
+            PreviewCellTextDisplayHandling::RawText
+        );
+    }
+
+    #[test]
+    fn postgresql_text_json_container_uses_pretty_print_json_text_handling() {
+        assert_eq!(
+            CellPresentationPolicy::new(DatabaseType::PostgreSQL, "text", r#"{"items":["admin"]}"#)
+                .display_handling(),
+            PreviewCellTextDisplayHandling::PrettyPrintJsonText
+        );
+    }
+}

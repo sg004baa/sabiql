@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use crate::update::action::CursorMove;
+use crate::model::shared::cursor::CursorMove;
 
 use super::text_input::TextInputState;
 
@@ -8,8 +8,8 @@ use super::text_input::TextInputState;
 pub struct PickerState {
     selected: usize,
     scroll_offset: usize,
-    pub pane_height: u16,
-    pub filter_visible_width: usize,
+    pane_height: u16,
+    filter_visible_width: usize,
     filter_input: TextInputState,
 }
 
@@ -24,6 +24,15 @@ impl PickerState {
 
     pub fn scroll_offset(&self) -> usize {
         self.scroll_offset
+    }
+
+    pub fn set_pane_height(&mut self, height: u16) {
+        self.pane_height = height;
+    }
+
+    pub fn set_filter_visible_width(&mut self, width: usize) {
+        self.filter_visible_width = width;
+        self.filter_input.update_viewport(width);
     }
 
     pub fn visible_items(&self) -> usize {
@@ -65,6 +74,13 @@ impl PickerState {
         self.filter_input.backspace();
         self.filter_input.update_viewport(self.filter_visible_width);
         self.reset();
+    }
+
+    pub fn edit_filter<R>(&mut self, edit: impl FnOnce(&mut TextInputState) -> R) -> R {
+        let result = edit(&mut self.filter_input);
+        self.filter_input.update_viewport(self.filter_visible_width);
+        self.reset();
+        result
     }
 
     pub fn move_filter_cursor(&mut self, direction: CursorMove) {

@@ -159,4 +159,28 @@ mod tests {
 
         assert_eq!(combo, KeyCombo::shift(Key::Char('j')),);
     }
+
+    #[test]
+    fn ctrl_shift_uppercase_d_normalizes_to_ctrl_uppercase_d_without_shift() {
+        let event = KeyEvent::new(
+            KeyCode::Char('D'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
+
+        let combo = translate(event);
+
+        assert_eq!(combo, KeyCombo::ctrl(Key::Char('D')));
+    }
+
+    #[test]
+    fn ctrl_shift_lowercase_d_preserves_ctrl_shift() {
+        let event = KeyEvent::new(
+            KeyCode::Char('d'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
+
+        let combo = translate(event);
+
+        assert_eq!(combo, KeyCombo::ctrl_shift(Key::Char('d')));
+    }
 }

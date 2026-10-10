@@ -4,7 +4,10 @@ use crossterm::cursor::SetCursorStyle;
 use crossterm::execute;
 
 use crate::app::model::app_state::AppState;
+use crate::app::model::browse::json_detail::JsonDetailMode;
+use crate::app::model::shared::help::HelpMode;
 use crate::app::model::shared::input_mode::InputMode;
+use crate::app::model::sql_editor::modal::SqlModalStatus;
 use crate::app::ports::outbound::renderer::{RenderOutput, RenderResult, Renderer};
 use crate::app::services::AppServices;
 use crate::shell::layout::MainLayout;
@@ -25,6 +28,18 @@ impl<'a> TuiAdapter<'a> {
 }
 
 impl Renderer for TuiAdapter<'_> {
+    fn suspend(&mut self) -> RenderResult<()> {
+        self.tui
+            .suspend()
+            .map_err(|error| std::io::Error::other(error.to_string()).into())
+    }
+    fn resume(&mut self) -> RenderResult<()> {
+        self.last_cursor_insert = None;
+        self.tui
+            .resume()
+            .map_err(|error| std::io::Error::other(error.to_string()).into())
+    }
+
     fn draw(
         &mut self,
         state: &AppState,
@@ -49,28 +64,32 @@ impl Renderer for TuiAdapter<'_> {
         }
         Ok(output)
     }
-
-    fn suspend(&mut self) -> RenderResult<()> {
-        self.tui.suspend()?;
-        Ok(())
-    }
-
-    fn resume(&mut self) -> RenderResult<()> {
-        self.tui.resume()?;
-        // The external program owned the TTY, so the cursor style must be re-applied.
-        self.last_cursor_insert = None;
-        Ok(())
-    }
 }
 
 fn uses_insert_cursor(state: &AppState) -> bool {
     match state.input_mode() {
-        InputMode::JsonbEdit => true,
-        InputMode::JsonbDetail => state.jsonb_detail.search().active,
-        InputMode::SqlModal => matches!(
-            state.sql_modal.status(),
-            crate::app::model::sql_editor::modal::SqlModalStatus::Editing
-        ),
+        InputMode::JsonEdit | InputMode::FilePicker => true,
+        InputMode::JsonDetail => matches!(state.json_detail.mode(), JsonDetailMode::Searching),
+        InputMode::CellDetail => state.cell_detail.search().is_active(),
+        InputMode::Help => matches!(state.ui.help().mode(), HelpMode::EditingFilter),
+        InputMode::SqlModal => matches!(state.sql_modal.status(), SqlModalStatus::Editing),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn help_filter_uses_insert_cursor() {
+        let mut state = AppState::new("test".to_string());
+        state.modal.set_mode(InputMode::Help);
+
+        assert!(!uses_insert_cursor(&state));
+
+        state.ui.help_mut().enter_filter_editing();
+
+        assert!(uses_insert_cursor(&state));
     }
 }

@@ -2,7 +2,6 @@ mod compare;
 mod explain;
 mod plan_highlight;
 
-use std::sync::LazyLock;
 use std::time::Instant;
 
 use ratatui::Frame;
@@ -13,13 +12,17 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::app::model::app_state::AppState;
+use crate::app::model::shared::engine_feature_profile::EngineFeatureProfile;
+use crate::app::model::shared::settings::KeymapPreset;
 use crate::app::model::sql_editor::modal::{SQL_MODAL_HEIGHT_PERCENT, SqlModalStatus, SqlModalTab};
-use crate::app::services::AppServices;
+use crate::app::policy::write::sql_risk::AcknowledgeReason;
+use crate::app::policy::{FeaturePolicy, FeatureRequirement};
 use crate::app::update::input::keybindings::{
-    SQL_MODAL_COMPARE_KEYS, SQL_MODAL_KEYS, SQL_MODAL_NORMAL_KEYS, SQL_MODAL_PLAN_KEYS, idx,
+    sql_modal, sql_modal_compare, sql_modal_confirming, sql_modal_normal, sql_modal_plan,
+    sql_modal_plan_explain,
 };
 use crate::primitives::molecules::overlay::{centered_rect, render_scrim};
-use crate::primitives::molecules::render_modal_with_border_color;
+use crate::primitives::molecules::{FooterHintBar, render_modal_with_border_color};
 use crate::theme::ThemePalette;
 
 mod completion;
@@ -32,17 +35,17 @@ impl SqlModal {
     pub fn render(
         frame: &mut Frame,
         state: &AppState,
-        services: &AppServices,
         now: Instant,
         theme: &ThemePalette,
     ) -> Option<u16> {
         let is_confirming = matches!(
             state.sql_modal.status(),
-            SqlModalStatus::ConfirmingHigh { .. }
+            SqlModalStatus::ConfirmingHigh { .. } | SqlModalStatus::ConfirmingRisk { .. }
         );
-        let active_tab = services
-            .db_capabilities
-            .normalize_sql_modal_tab(state.sql_modal.active_tab());
+        let engine_feature_profile = state.session.active_engine_feature_profile();
+        let feature_policy = FeaturePolicy::new(&engine_feature_profile);
+        let active_tab =
+            engine_feature_profile.normalize_sql_modal_tab(state.sql_modal.active_tab());
 
         let (area, inner) = if is_confirming {
             match state.sql_modal.status() {
@@ -55,13 +58,14 @@ impl SqlModal {
                         " SQL \u{2500}\u{2500} \u{26a0} {} ",
                         decision.risk_level.as_str()
                     );
-                    let is_match = target_name
-                        .as_ref()
-                        .is_some_and(|name| input.content() == name);
+                    let is_match = input.content() == target_name.as_str();
                     let footer = if is_match {
-                        " Enter: Execute \u{2502} Esc: Back "
+                        FooterHintBar::new([
+                            sql_modal_confirming::ENTER_EXECUTE.as_hint(),
+                            sql_modal_confirming::CANCEL_CONFIRM.as_hint(),
+                        ])
                     } else {
-                        " Esc: Back "
+                        FooterHintBar::new([sql_modal_confirming::CANCEL_CONFIRM.as_hint()])
                     };
                     render_modal_with_border_color(
                         frame,
@@ -73,31 +77,71 @@ impl SqlModal {
                         theme,
                     )
                 }
+                SqlModalStatus::ConfirmingRisk { reason, .. } => {
+                    let (title, border_color) = match reason {
+                        AcknowledgeReason::UnknownRisk => (
+                            " SQL \u{2500}\u{2500} \u{26a0} UNKNOWN RISK ",
+                            theme.semantic.status.warning,
+                        ),
+                        AcknowledgeReason::TargetNameUnavailable => (
+                            " SQL \u{2500}\u{2500} \u{26a0} HIGH ",
+                            theme.semantic.status.error,
+                        ),
+                        AcknowledgeReason::NonAtomicTransaction => (
+                            " SQL \u{2500}\u{2500} \u{26a0} NON-ATOMIC ",
+                            theme.semantic.status.warning,
+                        ),
+                        AcknowledgeReason::AnalyzeExecution => (
+                            " SQL \u{2500}\u{2500} \u{26a0} LOW RISK ",
+                            theme.semantic.status.warning,
+                        ),
+                    };
+                    render_modal_with_border_color(
+                        frame,
+                        Constraint::Percentage(80),
+                        Constraint::Percentage(SQL_MODAL_HEIGHT_PERCENT),
+                        title,
+                        FooterHintBar::new([
+                            sql_modal_confirming::ENTER_EXECUTE.as_hint(),
+                            sql_modal_confirming::CANCEL_CONFIRM.as_hint(),
+                        ]),
+                        border_color,
+                        theme,
+                    )
+                }
                 _ => unreachable!(),
             }
         } else {
-            let hint: &str = match state.sql_modal.status() {
-                SqlModalStatus::Editing => Self::editing_hint(),
-                SqlModalStatus::Running => " Running\u{2026} ",
+            let hint = match state.sql_modal.status() {
+                SqlModalStatus::Editing => {
+                    Self::editing_hint(&feature_policy, state.settings.saved_keymap_preset())
+                }
+                SqlModalStatus::Running => FooterHintBar::message("Running\u{2026}"),
                 SqlModalStatus::ConfirmingAnalyzeHigh {
                     input, target_name, ..
                 } => {
-                    let is_match = target_name
-                        .as_ref()
-                        .is_some_and(|name| input.content() == name);
+                    let is_match = input.content() == target_name.as_str();
                     if is_match {
-                        " Enter: Confirm \u{2502} Esc: Cancel "
+                        FooterHintBar::new([("Enter", "Confirm"), ("Esc", "Cancel")])
                     } else {
-                        " Esc: Cancel "
+                        FooterHintBar::new([("Esc", "Cancel")])
                     }
                 }
+                SqlModalStatus::ConfirmingAnalyzeRisk { .. } => {
+                    FooterHintBar::new([("Enter", "Execute"), ("Esc", "Cancel")])
+                }
                 _ => {
-                    let compare_can_yank =
-                        state.explain.left.is_some() && state.explain.right.is_some();
-                    Self::border_hint(active_tab, compare_can_yank, services)
+                    let compare_can_yank = state.explain.can_yank_compare();
+                    Self::border_hint(
+                        active_tab,
+                        compare_can_yank,
+                        &engine_feature_profile,
+                        &feature_policy,
+                        state.settings.saved_keymap_preset(),
+                    )
                 }
             };
-            Self::render_modal_with_tabs(frame, active_tab, hint, services, theme)
+            Self::render_modal_with_tabs(frame, active_tab, hint, &engine_feature_profile, theme)
         };
 
         // Add 1-char horizontal padding for breathing room inside the modal
@@ -109,11 +153,11 @@ impl SqlModal {
 
         let status_height = if matches!(
             state.sql_modal.status(),
-            SqlModalStatus::ConfirmingHigh { .. }
+            SqlModalStatus::ConfirmingHigh { .. } | SqlModalStatus::ConfirmingRisk { .. }
         ) {
             3
         } else {
-            1
+            status::status_height(state, content_area.width)
         };
 
         let [main_area, separator_area, status_area] = Layout::vertical([
@@ -141,8 +185,7 @@ impl SqlModal {
                 completion::render_completion_popup(frame, area, main_area, state, theme);
             }
         } else if active_tab == SqlModalTab::Plan {
-            let plan_viewport_height =
-                explain::render(frame, main_area, state, services, now, theme);
+            let plan_viewport_height = explain::render(frame, main_area, state, now, theme);
             status::render_status(frame, status_area, state, theme);
             return Some(plan_viewport_height);
         } else {
@@ -157,8 +200,8 @@ impl SqlModal {
     fn render_modal_with_tabs(
         frame: &mut Frame,
         active_tab: SqlModalTab,
-        hint: &str,
-        services: &AppServices,
+        hint: FooterHintBar,
+        engine_feature_profile: &EngineFeatureProfile,
         theme: &ThemePalette,
     ) -> (Rect, Rect) {
         let area = centered_rect(
@@ -169,10 +212,10 @@ impl SqlModal {
         render_scrim(frame, theme);
         frame.render_widget(Clear, area);
 
-        let title = Self::build_title_with_tabs(active_tab, services, theme);
+        let title = Self::build_title_with_tabs(active_tab, engine_feature_profile, theme);
         let block = Block::default()
             .title(title)
-            .title_bottom(Line::styled(hint.to_string(), theme.modal_hint_style()))
+            .title_bottom(hint.line(theme))
             .borders(Borders::ALL)
             .border_set(border::ROUNDED)
             .border_style(theme.modal_border_style())
@@ -185,7 +228,7 @@ impl SqlModal {
 
     fn build_title_with_tabs(
         active_tab: SqlModalTab,
-        services: &AppServices,
+        engine_feature_profile: &EngineFeatureProfile,
         theme: &ThemePalette,
     ) -> Line<'static> {
         let title_style = theme.modal_title_style();
@@ -201,7 +244,7 @@ impl SqlModal {
                 inactive_style
             }
         };
-        let supported_tabs = services.db_capabilities.supported_sql_modal_tabs();
+        let supported_tabs = engine_feature_profile.supported_sql_modal_tabs();
 
         if supported_tabs.len() == 1 {
             return Line::from(vec![Span::styled(" SQL Editor ", title_style)]);
@@ -226,120 +269,90 @@ impl SqlModal {
     fn border_hint(
         tab: SqlModalTab,
         compare_can_yank: bool,
-        services: &AppServices,
-    ) -> &'static str {
-        static PLAN: LazyLock<String> = LazyLock::new(|| {
-            SqlModal::join_hint_pairs(&[
-                SQL_MODAL_PLAN_KEYS[idx::sql_modal_plan::YANK].as_hint(),
-                (
-                    "Tab/⇧Tab",
-                    SQL_MODAL_PLAN_KEYS[idx::sql_modal_plan::TAB].as_hint().1,
-                ),
-                SQL_MODAL_PLAN_KEYS[idx::sql_modal_plan::CLOSE].as_hint(),
-            ])
-        });
-        static COMPARE_WITH_YANK: LazyLock<String> = LazyLock::new(|| {
-            SqlModal::join_hint_pairs(&[
-                SQL_MODAL_COMPARE_KEYS[idx::sql_modal_compare::EDIT_QUERY].as_hint(),
-                SQL_MODAL_COMPARE_KEYS[idx::sql_modal_compare::YANK].as_hint(),
-                (
-                    "Tab/⇧Tab",
-                    SQL_MODAL_COMPARE_KEYS[idx::sql_modal_compare::TAB]
-                        .as_hint()
-                        .1,
-                ),
-                SQL_MODAL_COMPARE_KEYS[idx::sql_modal_compare::CLOSE].as_hint(),
-            ])
-        });
-        static COMPARE_NO_YANK: LazyLock<String> = LazyLock::new(|| {
-            SqlModal::join_hint_pairs(&[
-                SQL_MODAL_COMPARE_KEYS[idx::sql_modal_compare::EDIT_QUERY].as_hint(),
-                (
-                    "Tab/⇧Tab",
-                    SQL_MODAL_COMPARE_KEYS[idx::sql_modal_compare::TAB]
-                        .as_hint()
-                        .1,
-                ),
-                SQL_MODAL_COMPARE_KEYS[idx::sql_modal_compare::CLOSE].as_hint(),
-            ])
-        });
-        static SQL: LazyLock<String> = LazyLock::new(|| {
-            SqlModal::join_hint_pairs(&[
-                SQL_MODAL_NORMAL_KEYS[idx::sql_modal_normal::RUN].as_hint(),
-                SQL_MODAL_PLAN_KEYS[idx::sql_modal_plan::EXPLAIN].as_hint(),
-                SQL_MODAL_NORMAL_KEYS[idx::sql_modal_normal::ENTER_INSERT].as_hint(),
-                (
-                    "Tab/⇧Tab",
-                    SQL_MODAL_PLAN_KEYS[idx::sql_modal_plan::TAB].as_hint().1,
-                ),
-                SQL_MODAL_NORMAL_KEYS[idx::sql_modal_normal::CLOSE].as_hint(),
-            ])
-        });
-        static SQL_NO_EXPLAIN: LazyLock<String> = LazyLock::new(|| {
-            SqlModal::join_hint_pairs(&[
-                SQL_MODAL_NORMAL_KEYS[idx::sql_modal_normal::RUN].as_hint(),
-                SQL_MODAL_NORMAL_KEYS[idx::sql_modal_normal::ENTER_INSERT].as_hint(),
-                (
-                    "Tab/⇧Tab",
-                    SQL_MODAL_PLAN_KEYS[idx::sql_modal_plan::TAB].as_hint().1,
-                ),
-                SQL_MODAL_NORMAL_KEYS[idx::sql_modal_normal::CLOSE].as_hint(),
-            ])
-        });
-        static SQL_NO_TABS: LazyLock<String> = LazyLock::new(|| {
-            SqlModal::join_hint_pairs(&[
-                SQL_MODAL_NORMAL_KEYS[idx::sql_modal_normal::RUN].as_hint(),
-                SQL_MODAL_PLAN_KEYS[idx::sql_modal_plan::EXPLAIN].as_hint(),
-                SQL_MODAL_NORMAL_KEYS[idx::sql_modal_normal::ENTER_INSERT].as_hint(),
-                SQL_MODAL_NORMAL_KEYS[idx::sql_modal_normal::CLOSE].as_hint(),
-            ])
-        });
-        static SQL_NO_TABS_NO_EXPLAIN: LazyLock<String> = LazyLock::new(|| {
-            SqlModal::join_hint_pairs(&[
-                SQL_MODAL_NORMAL_KEYS[idx::sql_modal_normal::RUN].as_hint(),
-                SQL_MODAL_NORMAL_KEYS[idx::sql_modal_normal::ENTER_INSERT].as_hint(),
-                SQL_MODAL_NORMAL_KEYS[idx::sql_modal_normal::CLOSE].as_hint(),
-            ])
-        });
+        engine_feature_profile: &EngineFeatureProfile,
+        feature_policy: &FeaturePolicy,
+        keymap_preset: KeymapPreset,
+    ) -> FooterHintBar {
         match tab {
-            SqlModalTab::Sql if services.db_capabilities.supported_sql_modal_tabs().len() == 1 => {
-                if services.db_capabilities.supports_explain() {
-                    &SQL_NO_TABS
+            SqlModalTab::Sql if engine_feature_profile.supported_sql_modal_tabs().len() == 1 => {
+                if feature_policy.is_enabled(FeatureRequirement::Explain) {
+                    FooterHintBar::new([
+                        sql_modal_normal::RUN.as_hint(),
+                        sql_modal_plan_explain(keymap_preset).as_hint(),
+                        sql_modal_normal::ENTER_INSERT.as_hint(),
+                        sql_modal_normal::CLOSE.as_hint(),
+                    ])
                 } else {
-                    &SQL_NO_TABS_NO_EXPLAIN
+                    FooterHintBar::new([
+                        sql_modal_normal::RUN.as_hint(),
+                        sql_modal_normal::ENTER_INSERT.as_hint(),
+                        sql_modal_normal::CLOSE.as_hint(),
+                    ])
                 }
             }
-            SqlModalTab::Plan => &PLAN,
-            SqlModalTab::Compare if compare_can_yank => &COMPARE_WITH_YANK,
-            SqlModalTab::Compare => &COMPARE_NO_YANK,
+            SqlModalTab::Plan => FooterHintBar::new([
+                sql_modal_plan::YANK.as_hint(),
+                ("Tab/⇧Tab", sql_modal_plan::TAB.as_hint().1),
+                sql_modal_plan::CLOSE.as_hint(),
+            ]),
+            SqlModalTab::Compare => {
+                let mut hints = Vec::new();
+                if feature_policy.is_enabled(FeatureRequirement::PlanComparison) {
+                    hints.push(sql_modal_compare::EDIT_QUERY.as_hint());
+                }
+                if compare_can_yank {
+                    hints.push(sql_modal_compare::YANK.as_hint());
+                }
+                hints.extend([
+                    ("Tab/⇧Tab", sql_modal_compare::TAB.as_hint().1),
+                    sql_modal_compare::CLOSE.as_hint(),
+                ]);
+                FooterHintBar::new(hints)
+            }
             SqlModalTab::Sql => {
-                if services.db_capabilities.supports_explain() {
-                    &SQL
+                if feature_policy.is_enabled(FeatureRequirement::Explain) {
+                    FooterHintBar::new([
+                        sql_modal_normal::RUN.as_hint(),
+                        sql_modal_plan_explain(keymap_preset).as_hint(),
+                        sql_modal_normal::ENTER_INSERT.as_hint(),
+                        ("Tab/⇧Tab", sql_modal_plan::TAB.as_hint().1),
+                        sql_modal_normal::CLOSE.as_hint(),
+                    ])
                 } else {
-                    &SQL_NO_EXPLAIN
+                    FooterHintBar::new([
+                        sql_modal_normal::RUN.as_hint(),
+                        sql_modal_normal::ENTER_INSERT.as_hint(),
+                        ("Tab/⇧Tab", sql_modal_plan::TAB.as_hint().1),
+                        sql_modal_normal::CLOSE.as_hint(),
+                    ])
                 }
             }
         }
     }
 
-    fn editing_hint() -> &'static str {
-        static HINT: LazyLock<String> = LazyLock::new(|| {
-            SqlModal::join_hint_pairs(&[
-                SQL_MODAL_KEYS[idx::sql_modal::RUN].as_hint(),
-                SQL_MODAL_KEYS[idx::sql_modal::EXTERNAL_EDITOR].as_hint(),
-                SQL_MODAL_KEYS[idx::sql_modal::CLEAR].as_hint(),
-                SQL_MODAL_KEYS[idx::sql_modal::QUERY_HISTORY].as_hint(),
-                SQL_MODAL_KEYS[idx::sql_modal::ESC_NORMAL].as_hint(),
-            ])
-        });
-        &HINT
-    }
-
-    fn join_hint_pairs(pairs: &[(&str, &str)]) -> String {
-        let parts: Vec<String> = pairs
-            .iter()
-            .map(|(key, desc)| format!("{key}: {desc}"))
-            .collect();
-        format!(" {} ", parts.join(" \u{2502} "))
+    fn editing_hint(feature_policy: &FeaturePolicy, keymap_preset: KeymapPreset) -> FooterHintBar {
+        match (
+            feature_policy.is_enabled(FeatureRequirement::Explain),
+            keymap_preset,
+        ) {
+            (true, KeymapPreset::Default) => FooterHintBar::new([
+                sql_modal::RUN.as_hint(),
+                sql_modal_plan::EXPLAIN.as_hint(),
+                sql_modal::CLEAR.as_hint(),
+                sql_modal::QUERY_HISTORY.as_hint(),
+                sql_modal::ESC_NORMAL.as_hint(),
+            ]),
+            (false, KeymapPreset::Default) => FooterHintBar::new([
+                sql_modal::RUN.as_hint(),
+                sql_modal::CLEAR.as_hint(),
+                sql_modal::QUERY_HISTORY.as_hint(),
+                sql_modal::ESC_NORMAL.as_hint(),
+            ]),
+            (_, KeymapPreset::Ide) => FooterHintBar::new([
+                sql_modal::RUN.as_hint(),
+                sql_modal::CLEAR.as_hint(),
+                sql_modal::ESC_NORMAL.as_hint(),
+            ]),
+        }
     }
 }

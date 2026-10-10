@@ -62,7 +62,7 @@ fn navigation(combo: &KeyCombo) -> Option<VimNavigation> {
         return match combo.key {
             // NOTE: Ctrl+N/P are intercepted on the main screen (handlers/normal.rs)
             // and mapped to OpenTablePicker / None. These entries are only reached
-            // from modal contexts (SQL Modal Plan/Compare, JSONB Detail via vim dispatch).
+            // from modal contexts (SQL Modal Plan/Compare, JSON Detail via vim dispatch).
             Key::Char('n') => Some(VimNavigation::MoveDown),
             Key::Char('p') => Some(VimNavigation::MoveUp),
             Key::Char('d') => Some(VimNavigation::HalfPageDown),
@@ -96,7 +96,6 @@ fn navigation(combo: &KeyCombo) -> Option<VimNavigation> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::update::input::keybindings::KeyCombo;
     use rstest::rstest;
 
     fn combo(key: Key) -> KeyCombo {

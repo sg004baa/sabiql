@@ -9,6 +9,8 @@ use crate::app::model::shared::focused_pane::FocusedPane;
 use crate::app::model::shared::ui_state::{
     explorer_content_width_from_inner_width, scroll_max_offset, text_display_width,
 };
+use crate::app::policy::table_kind::{explorer_table_label, max_explorer_table_label_width};
+use crate::app::update::input::keybindings::global;
 use crate::domain::MetadataState;
 use crate::theme::ThemePalette;
 
@@ -18,12 +20,12 @@ pub struct Explorer;
 
 impl Explorer {
     pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &ThemePalette) {
-        let is_focused = state.ui.focused_pane == FocusedPane::Explorer;
+        let is_focused = state.ui.focused_pane() == FocusedPane::Explorer;
         let block = panel_block(" [1] Explorer ", is_focused, theme);
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        let is_error = matches!(state.session.metadata_state(), MetadataState::Error(_));
+        let is_error = matches!(state.session.metadata_state(), MetadataState::Error);
         let has_cached_data =
             !is_error && state.session.metadata().is_some() && !state.tables().is_empty();
         Self::render_tables_section(frame, inner, state, has_cached_data, theme);
@@ -39,17 +41,22 @@ impl Explorer {
         let content_width = explorer_content_width_from_inner_width(area.width);
 
         let table_names: Vec<String> = if has_cached_data {
-            state.tables().iter().map(|t| t.qualified_name()).collect()
+            state
+                .tables()
+                .iter()
+                .map(|summary| {
+                    explorer_table_label(summary, state.session.active_database_type_or_default())
+                })
+                .collect()
         } else {
             Vec::new()
         };
-        let max_name_width = table_names
-            .iter()
-            .map(|name| text_display_width(name))
-            .max()
-            .unwrap_or(0);
+        let max_name_width = max_explorer_table_label_width(
+            state.tables(),
+            state.session.active_database_type_or_default(),
+        );
         let max_offset = scroll_max_offset(max_name_width, content_width);
-        let h_offset = state.ui.explorer_horizontal_offset.min(max_offset);
+        let h_offset = state.ui.explorer_horizontal_offset().min(max_offset);
 
         let items: Vec<ListItem> = if has_cached_data {
             table_names
@@ -64,17 +71,30 @@ impl Explorer {
                 MetadataState::Loading => {
                     vec![ListItem::new(" Loading metadata...")]
                 }
-                MetadataState::Error(_) => {
+                MetadataState::Error => {
+                    let action_hint = if state.session.dsn().is_some() {
+                        " (r: retry, Enter: details)".to_string()
+                    } else {
+                        format!(" ({}: select connection)", global::CONNECTIONS.key_short)
+                    };
                     vec![
                         ListItem::new(" Metadata load failed"),
-                        ListItem::new(" (r: retry, Enter: details)"),
+                        ListItem::new(action_hint),
                     ]
                 }
                 MetadataState::Loaded => {
                     vec![ListItem::new(" No tables found")]
                 }
                 MetadataState::NotLoaded => {
-                    vec![ListItem::new(" Press 'r' to load metadata")]
+                    let action_hint = if state.session.dsn().is_some() {
+                        " Press 'r' to load metadata".to_string()
+                    } else {
+                        format!(
+                            " Press '{}' to select a connection",
+                            global::CONNECTIONS.key_short
+                        )
+                    };
+                    vec![ListItem::new(action_hint)]
                 }
             }
         };
@@ -89,13 +109,13 @@ impl Explorer {
             .highlight_symbol("> ");
 
         let selected = if has_cached_data {
-            Some(state.ui.explorer_selected)
+            Some(state.ui.explorer_selected())
         } else {
             None
         };
         let mut list_state = ListState::default()
             .with_selected(selected)
-            .with_offset(state.ui.explorer_scroll_offset);
+            .with_offset(state.ui.explorer_scroll_offset());
         frame.render_stateful_widget(list, area, &mut list_state);
 
         // Render scrollbars
@@ -104,7 +124,7 @@ impl Explorer {
             let viewport_size = area.height.saturating_sub(1) as usize; // Reserve for horizontal scrollbar
 
             if total_items > viewport_size {
-                let scroll_offset = state.ui.explorer_scroll_offset;
+                let scroll_offset = state.ui.explorer_scroll_offset();
 
                 use crate::primitives::atoms::scroll_indicator::{
                     VerticalScrollParams, render_vertical_scroll_indicator_bar,
@@ -134,6 +154,7 @@ impl Explorer {
                         position: h_offset,
                         viewport_size: content_width,
                         total_items: max_name_width,
+                        label: "x",
                     },
                     theme,
                 );

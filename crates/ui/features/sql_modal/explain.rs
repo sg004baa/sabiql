@@ -8,20 +8,26 @@ use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::app::model::app_state::AppState;
 use crate::app::model::shared::flash_timer::FlashId;
+use crate::app::model::shared::text_input::TextInputState;
 use crate::app::model::sql_editor::modal::{HIGH_RISK_INPUT_VISIBLE_WIDTH, SqlModalStatus};
-use crate::app::services::AppServices;
-use crate::primitives::atoms::text_cursor_spans;
+use crate::app::policy::write::sql_risk::AcknowledgeReason;
+use crate::app::policy::{FeaturePolicy, FeatureRequirement};
+use crate::app::update::input::keybindings::sql_modal_plan_explain;
+use crate::domain::DatabaseType;
+use crate::domain::explain_plan::ExplainPlan;
+use crate::domain::sqlite_sql::SQLITE_EXPLAIN_QUERY_PLAN_PREFIX;
+use crate::primitives::atoms::{apply_yank_flash, text_cursor_spans};
 use crate::theme::ThemePalette;
 
-pub fn render(
+pub(super) fn render(
     frame: &mut Frame,
     area: Rect,
     state: &AppState,
-    services: &AppServices,
     now: Instant,
     theme: &ThemePalette,
 ) -> u16 {
-    if !services.db_capabilities.supports_explain() {
+    let feature_policy = FeaturePolicy::new(&state.session.active_engine_feature_profile());
+    if !feature_policy.is_enabled(FeatureRequirement::Explain) {
         let placeholder = Line::from(Span::styled(
             " EXPLAIN is unavailable for this database",
             Style::default().fg(theme.semantic.text.placeholder),
@@ -37,12 +43,18 @@ pub fn render(
         target_name,
     } = state.sql_modal.status()
     {
-        let lines = build_analyze_confirm_lines(area, query, input, target_name.as_deref(), theme);
-        render_scrolled(frame, area, lines, state.explain.confirm_scroll_offset);
+        let lines = build_analyze_confirm_lines(area, query, input, target_name, theme);
+        render_scrolled(frame, area, lines, state.explain.confirm_scroll_offset());
         return area.height;
     }
 
-    if let Some(ref error) = state.explain.error {
+    if let SqlModalStatus::ConfirmingAnalyzeRisk { query, reason } = state.sql_modal.status() {
+        let lines = build_analyze_acknowledge_lines(area, query, reason, theme);
+        render_scrolled(frame, area, lines, state.explain.confirm_scroll_offset());
+        return area.height;
+    }
+
+    if let Some(error) = state.explain.error() {
         let lines: Vec<Line> = error
             .lines()
             .map(|line| {
@@ -54,10 +66,17 @@ pub fn render(
             .collect();
         frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
         area.height
-    } else if let Some(ref plan_text) = state.explain.plan_text {
-        let (label, label_style) = if state.explain.is_analyze {
+    } else if let Some(plan_text) = state.explain.plan_text() {
+        let (label, label_style) = if state.explain.is_analyze() {
             (
                 "EXPLAIN ANALYZE",
+                Style::default()
+                    .fg(theme.semantic.text.accent)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else if state.session.active_database_type_or_default() == DatabaseType::SQLite {
+            (
+                SQLITE_EXPLAIN_QUERY_PLAN_PREFIX,
                 Style::default()
                     .fg(theme.semantic.text.accent)
                     .add_modifier(Modifier::BOLD),
@@ -70,7 +89,7 @@ pub fn render(
                     .add_modifier(Modifier::BOLD),
             )
         };
-        let time_secs = state.explain.execution_time_ms as f64 / 1000.0;
+        let time_secs = state.explain.execution_time_ms() as f64 / 1000.0;
         let header = Line::from(vec![
             Span::styled(format!("{label} "), label_style),
             Span::styled(
@@ -79,7 +98,7 @@ pub fn render(
             ),
         ]);
 
-        let query_snippet = state.explain.plan_query_snippet.as_deref().unwrap_or("");
+        let query_snippet = state.explain.plan_query_snippet().unwrap_or("");
         let query_line = Line::from(vec![
             Span::styled("  ", Style::default()),
             Span::styled(
@@ -88,8 +107,17 @@ pub fn render(
             ),
         ]);
 
-        let scroll = state.explain.scroll_offset;
-        let mut lines = vec![header, query_line, Line::raw("")];
+        let scroll = state.explain.scroll_offset();
+        let mut lines = vec![header, query_line];
+        if state.explain.is_analyze()
+            && state.session.active_database_type_or_default() == DatabaseType::MySQL
+        {
+            lines.push(Line::from(Span::styled(
+                format!("  {}", format_actual_metrics(state.explain.current_plan())),
+                Style::default().fg(theme.semantic.text.muted),
+            )));
+        }
+        lines.push(Line::raw(""));
         lines.extend(
             plan_text
                 .lines()
@@ -98,23 +126,40 @@ pub fn render(
         );
 
         let flash_active = state.flash_timers.is_active(FlashId::SqlModal, now);
-        let content_start = 3; // skip header, query snippet, empty line
-        crate::primitives::atoms::apply_yank_flash(
-            &mut lines[content_start..],
-            flash_active,
-            theme,
-        );
+        let content_start = lines
+            .iter()
+            .position(|line| line == &Line::raw(""))
+            .unwrap_or(0)
+            + 1;
+        apply_yank_flash(&mut lines[content_start..], flash_active, theme);
 
         frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
         area.height
     } else {
+        let explain_key = sql_modal_plan_explain(state.settings.saved_keymap_preset()).key;
         let placeholder = Line::from(Span::styled(
-            " Press Ctrl+E to run EXPLAIN",
+            format!(" Press {explain_key} to run EXPLAIN"),
             Style::default().fg(theme.semantic.text.placeholder),
         ));
         frame.render_widget(Paragraph::new(vec![placeholder]), area);
         area.height
     }
+}
+
+pub(super) fn format_actual_metrics(plan: Option<&ExplainPlan>) -> String {
+    let Some(plan) = plan else {
+        return "Actual: unavailable".to_string();
+    };
+    let (Some(start), Some(end), Some(rows), Some(loops)) = (
+        plan.actual_start_ms,
+        plan.actual_end_ms,
+        plan.actual_rows,
+        plan.loops,
+    ) else {
+        return "Actual: unavailable".to_string();
+    };
+
+    format!("Actual: time={start:.3}..{end:.3} ms rows={rows} loops={loops}")
 }
 
 fn render_scrolled(frame: &mut Frame, area: Rect, lines: Vec<Line>, scroll_offset: usize) {
@@ -127,8 +172,8 @@ fn render_scrolled(frame: &mut Frame, area: Rect, lines: Vec<Line>, scroll_offse
 fn build_analyze_confirm_lines<'a>(
     area: Rect,
     query: &'a str,
-    input: &'a crate::app::model::shared::text_input::TextInputState,
-    target_name: Option<&'a str>,
+    input: &'a TextInputState,
+    name: &'a str,
     theme: &ThemePalette,
 ) -> Vec<Line<'a>> {
     let mut lines = Vec::new();
@@ -167,36 +212,106 @@ fn build_analyze_confirm_lines<'a>(
     }
     lines.push(Line::raw(""));
 
-    match target_name {
-        Some(name) => {
-            let is_match = input.content() == name;
-            let prompt = format!(" Type \"{name}\" to confirm: > ");
-            let mut prompt_spans = vec![Span::styled(
-                prompt,
-                Style::default().fg(theme.semantic.text.secondary),
-            )];
-            prompt_spans.extend(text_cursor_spans(
-                input.content(),
-                input.cursor(),
-                input.viewport_offset(),
-                HIGH_RISK_INPUT_VISIBLE_WIDTH,
-                theme,
-            ));
-            if is_match {
-                prompt_spans.push(Span::styled(
-                    " \u{2713}",
-                    Style::default().fg(theme.semantic.status.success),
-                ));
-            }
-            lines.push(Line::from(prompt_spans));
-        }
-        None => {
-            lines.push(Line::from(Span::styled(
-                " Cannot identify target object name.  Esc: Back",
-                Style::default().fg(theme.semantic.text.muted),
-            )));
-        }
+    let is_match = input.content() == name;
+    let prompt = format!(" Type \"{name}\" to confirm: > ");
+    let mut prompt_spans = vec![Span::styled(
+        prompt,
+        Style::default().fg(theme.semantic.text.secondary),
+    )];
+    prompt_spans.extend(text_cursor_spans(
+        input.content(),
+        input.cursor(),
+        input.viewport_offset(),
+        HIGH_RISK_INPUT_VISIBLE_WIDTH,
+        theme,
+    ));
+    if is_match {
+        prompt_spans.push(Span::styled(
+            " \u{2713}",
+            Style::default().fg(theme.semantic.status.success),
+        ));
     }
+    lines.push(Line::from(prompt_spans));
+
+    lines
+}
+
+fn build_analyze_acknowledge_lines<'a>(
+    area: Rect,
+    query: &'a str,
+    reason: &AcknowledgeReason,
+    theme: &ThemePalette,
+) -> Vec<Line<'a>> {
+    let mut lines = Vec::new();
+
+    let (header_color, explanation) = match reason {
+        AcknowledgeReason::UnknownRisk => (
+            theme.semantic.status.warning,
+            [
+                " sabiql can't assess this statement's risk.",
+                " EXPLAIN ANALYZE will execute it.",
+            ],
+        ),
+        AcknowledgeReason::TargetNameUnavailable => (
+            theme.semantic.status.error,
+            [
+                " This is a destructive statement. EXPLAIN ANALYZE will",
+                " execute it and data loss may occur.",
+            ],
+        ),
+        AcknowledgeReason::NonAtomicTransaction => (
+            theme.semantic.status.warning,
+            [
+                " SQLite must run this script without an automatic",
+                " transaction. EXPLAIN ANALYZE will execute it.",
+            ],
+        ),
+        AcknowledgeReason::AnalyzeExecution => (
+            theme.semantic.status.warning,
+            [
+                " This read-only statement will be executed.",
+                " EXPLAIN ANALYZE will run it and may take time.",
+            ],
+        ),
+    };
+    let header_style = Style::default()
+        .fg(header_color)
+        .add_modifier(Modifier::BOLD);
+
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        " \u{26a0} EXPLAIN ANALYZE",
+        header_style,
+    )));
+    lines.push(Line::raw(""));
+
+    let sep = "\u{2500}".repeat(area.width.saturating_sub(2) as usize);
+    lines.push(Line::styled(format!(" {sep}"), theme.modal_border_style()));
+    lines.push(Line::raw(""));
+
+    for text in explanation {
+        lines.push(Line::from(Span::styled(text, header_style)));
+    }
+    if matches!(reason, AcknowledgeReason::AnalyzeExecution) {
+        lines.push(Line::from(Span::styled(
+            " Risk: LOW",
+            Style::default().fg(theme.semantic.text.secondary),
+        )));
+    }
+    lines.push(Line::raw(""));
+
+    for line in query.lines() {
+        lines.push(Line::from(Span::styled(
+            format!("  {line}"),
+            Style::default().fg(theme.semantic.text.dim),
+        )));
+    }
+    lines.push(Line::raw(""));
+
+    lines.push(Line::from(Span::styled(
+        " Press Enter to execute  Esc: Cancel",
+        Style::default().fg(theme.semantic.text.secondary),
+    )));
 
     lines
 }

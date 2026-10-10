@@ -1,3 +1,4 @@
+use crate::primitives::molecules::FooterHintBar;
 use ratatui::Frame;
 use ratatui::layout::Constraint;
 use ratatui::style::Style;
@@ -17,7 +18,7 @@ impl GenerateSqlMenu {
             Constraint::Percentage(40),
             Constraint::Percentage(30),
             " Generate SQL ",
-            " Enter Select │ Esc/q Close ",
+            FooterHintBar::new([("Enter", "Select"), ("Esc/q", "Close")]),
             theme,
         );
 

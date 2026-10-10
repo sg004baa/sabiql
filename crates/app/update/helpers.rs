@@ -1,17 +1,53 @@
-use crate::domain::QueryResult;
-use crate::domain::connection::DatabaseType;
+use unicode_casefold::UnicodeCaseFold;
+
+use crate::cmd::effect::Effect;
+use crate::domain::DatabaseType;
+use crate::domain::connection::{
+    MySqlConnectionConfig, MySqlSslMode, MySqlTransport, SqliteConnectionConfig,
+};
+use crate::domain::{QueryResult, QueryValue};
 use crate::model::app_state::AppState;
 use crate::model::connection::setup::{ConnectionField, ConnectionSetupState};
+use crate::policy::column::column_read_only_reason;
+use crate::policy::write::inline_cell_edit::InlineCellEditError;
 use crate::policy::write::write_guardrails::{
-    TargetSummary, WriteOperation, WritePreview, evaluate_guardrails,
+    PreviewWriteability, StableRowIdentity, TargetSummary, WriteOperation, WritePreview,
+    evaluate_guardrails, preview_writeability_for_result, stable_row_identity_for_preview,
 };
-use crate::policy::write::write_update::build_pk_pairs;
-use crate::services::AppServices;
+use crate::ports::outbound::ClipboardError;
+use crate::sql_builder::build_bulk_delete_sql;
+use crate::update::action::Action;
+
+pub(in crate::update) fn reject_pending_mysql_connection_probe(state: &mut AppState) -> bool {
+    if state.session.pending_mysql_connection_probe().is_none() {
+        return false;
+    }
+
+    state
+        .messages
+        .set_error("Connection switch in progress".to_string());
+    true
+}
+
+pub(in crate::update) fn clipboard_unavailable() -> Action {
+    Action::CopyFailed(ClipboardError::Unavailable("Clipboard unavailable".into()))
+}
+
+pub(in crate::update) fn metadata_reload_effects(state: &mut AppState, dsn: &str) -> Vec<Effect> {
+    let run_id = state.session.begin_reload();
+
+    vec![
+        Effect::CancelMetadataTasks,
+        Effect::ClearCompletionEngineCache,
+        Effect::FetchMetadata {
+            dsn: dsn.to_string(),
+            run_id,
+        },
+    ]
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum EditGuardrailError {
-    #[error("Editing is unavailable while browsing history")]
-    InHistory,
+pub(in crate::update) enum EditGuardrailError {
     #[error("No result to edit")]
     NoResult,
     #[error("Only Preview results are editable")]
@@ -22,9 +58,11 @@ pub enum EditGuardrailError {
     TableMetadataNotLoaded,
     #[error("Table metadata does not match current preview target")]
     StaleTableMetadata,
+    #[error("Preview target is read-only: {0}")]
+    ReadOnlyPreviewTarget(&'static str),
     #[error("Editing requires a PRIMARY KEY.")]
     EditingRequiresPrimaryKey,
-    #[error("Deletion requires a PRIMARY KEY. This table has no PRIMARY KEY.")]
+    #[error("Deletion requires a PRIMARY KEY.")]
     DeletionRequiresPrimaryKey,
     #[error("No rows staged for deletion")]
     NoRowsStagedForDeletion,
@@ -38,40 +76,56 @@ pub enum EditGuardrailError {
     StableKeyColumnsMissing,
     #[error("No active cell edit session")]
     NoActiveCellEditSession,
-    #[error("No row selected for edit")]
-    NoRowSelectedForEdit,
-    #[error("No column selected for edit")]
-    NoColumnSelectedForEdit,
     #[error("Row index out of bounds")]
     RowIndexOutOfBounds,
     #[error("Column index out of bounds")]
     ColumnIndexOutOfBounds,
+    #[error("Read-only column cannot be edited: {0}")]
+    ReadOnlyColumn(String),
     #[error("No active row")]
     NoActiveRow,
     #[error("No active cell")]
     NoActiveCell,
     #[error("Cell index out of bounds")]
     CellIndexOutOfBounds,
+    #[error("Invalid JSON: {0}")]
+    InvalidJson(String),
+    #[error("No semantic changes to write")]
+    NoSemanticChanges,
+    #[error(transparent)]
+    InlineCellEdit(#[from] InlineCellEditError),
+    #[error("SQLite writes require non-NULL primary key values")]
+    SqliteNullPrimaryKey,
     #[error("{0}")]
     GuardrailBlocked(String),
 }
 
-pub struct BulkDeletePreviewResult {
+pub(in crate::update) struct BulkDeletePreviewResult {
     pub preview: WritePreview,
     pub target_page: usize,
     pub target_row: Option<usize>,
 }
 
+pub(in crate::update) fn reject_sqlite_null_pk(
+    database_type: DatabaseType,
+    pk_pairs: &[(String, QueryValue)],
+) -> Result<(), EditGuardrailError> {
+    if database_type == DatabaseType::SQLite
+        && pk_pairs
+            .iter()
+            .any(|(_, value)| matches!(value, QueryValue::Null))
+    {
+        return Err(EditGuardrailError::SqliteNullPrimaryKey);
+    }
+    Ok(())
+}
+
 // Entry checks in navigation and submit-time checks in query should both use this.
 // Row/column selection source is intentionally left to each caller:
 // navigation uses live selection, query submit uses cell_edit state.
-pub fn editable_preview_base(
+pub(in crate::update) fn editable_preview_base(
     state: &AppState,
-) -> Result<(&QueryResult, &[String]), EditGuardrailError> {
-    if state.query.is_history_mode() {
-        return Err(EditGuardrailError::InHistory);
-    }
-
+) -> Result<(&QueryResult, StableRowIdentity), EditGuardrailError> {
     let result = state
         .query
         .visible_result()
@@ -80,7 +134,7 @@ pub fn editable_preview_base(
         return Err(EditGuardrailError::NotEditableResult);
     }
 
-    if state.query.pagination.schema.is_empty() || state.query.pagination.table.is_empty() {
+    if state.query.pagination.schema().is_empty() || state.query.pagination.table().is_empty() {
         return Err(EditGuardrailError::UnknownTable);
     }
 
@@ -89,58 +143,89 @@ pub fn editable_preview_base(
         .table_detail()
         .ok_or(EditGuardrailError::TableMetadataNotLoaded)?;
 
-    if table_detail.schema != state.query.pagination.schema
-        || table_detail.name != state.query.pagination.table
-    {
+    if !state.query.pagination.matches_table(table_detail) {
         return Err(EditGuardrailError::StaleTableMetadata);
     }
-
-    let pk_cols = table_detail
-        .primary_key
-        .as_ref()
-        .filter(|cols| !cols.is_empty())
-        .map(Vec::as_slice)
+    match preview_writeability_for_result(table_detail, result) {
+        PreviewWriteability::Writable => {}
+        PreviewWriteability::ReadOnly(reason) => {
+            return Err(EditGuardrailError::ReadOnlyPreviewTarget(reason));
+        }
+        PreviewWriteability::MissingStableRowIdentity => {
+            return Err(EditGuardrailError::EditingRequiresPrimaryKey);
+        }
+    }
+    let identity = stable_row_identity_for_preview(table_detail, result)
         .ok_or(EditGuardrailError::EditingRequiresPrimaryKey)?;
 
-    Ok((result, pk_cols))
+    Ok((result, identity))
 }
 
-pub fn build_bulk_delete_preview(
+pub(in crate::update) fn ensure_column_writable(
     state: &AppState,
-    services: &AppServices,
+    column_name: &str,
+    _identity: &StableRowIdentity,
+) -> Result<(), EditGuardrailError> {
+    if let Some(column) = state.session.table_detail().and_then(|table| {
+        table
+            .columns
+            .iter()
+            .find(|column| column.name == column_name)
+    }) && column.is_read_only()
+    {
+        let reason = column_read_only_reason(column).unwrap_or("read-only");
+        return Err(EditGuardrailError::ReadOnlyColumn(format!(
+            "{column_name} ({reason})"
+        )));
+    }
+
+    Ok(())
+}
+
+pub(in crate::update) fn build_bulk_delete_preview(
+    state: &AppState,
 ) -> Result<BulkDeletePreviewResult, EditGuardrailError> {
     if state.result_interaction.staged_delete_rows().is_empty() {
         return Err(EditGuardrailError::NoRowsStagedForDeletion);
     }
-    if state.session.dsn.is_none() {
+    if state.session.dsn().is_none() {
         return Err(EditGuardrailError::NoActiveConnection);
     }
-    if state.query.status() != crate::model::browse::query_execution::QueryStatus::Idle {
+    if state.query.is_running() {
         return Err(EditGuardrailError::WriteUnavailableWhileQueryRunning);
     }
 
-    let (result, pk_cols) = editable_preview_base(state).map_err(|err| match err {
+    let (result, identity) = editable_preview_base(state).map_err(|err| match err {
         EditGuardrailError::EditingRequiresPrimaryKey => {
             EditGuardrailError::DeletionRequiresPrimaryKey
         }
         other => other,
     })?;
 
-    let mut pk_pairs_per_row: Vec<Vec<(String, String)>> = Vec::new();
+    let mut predicate_pairs_per_row: Vec<Vec<(String, QueryValue)>> = Vec::new();
+    let mut target_pairs = Vec::new();
     for &row_idx in state.result_interaction.staged_delete_rows() {
-        let row = result
-            .rows
-            .get(row_idx)
-            .ok_or(EditGuardrailError::StagedRowIndexOutOfBounds(row_idx))?;
-        let pairs = build_pk_pairs(&result.columns, row, pk_cols)
+        if row_idx >= result.values().len() {
+            return Err(EditGuardrailError::StagedRowIndexOutOfBounds(row_idx));
+        }
+        let identity_pairs = identity
+            .identity_pairs_for_row(result, row_idx)
             .ok_or(EditGuardrailError::StableKeyColumnsMissing)?;
-        pk_pairs_per_row.push(pairs);
+        reject_sqlite_null_pk(
+            state.session.active_database_type_or_default(),
+            &identity_pairs,
+        )?;
+        if target_pairs.is_empty() {
+            target_pairs.clone_from(&identity_pairs);
+        }
+        predicate_pairs_per_row.push(identity_pairs);
     }
 
-    let sql = services.sql_dialect.build_bulk_delete_sql(
-        &state.query.pagination.schema,
-        &state.query.pagination.table,
-        &pk_pairs_per_row,
+    let sql = build_bulk_delete_sql(
+        state.session.active_database_type_or_default(),
+        state.query.pagination.schema(),
+        state.query.pagination.table(),
+        &predicate_pairs_per_row,
     );
 
     let staged_count = state.result_interaction.staged_delete_rows().len();
@@ -151,18 +236,18 @@ pub fn build_bulk_delete_preview(
         .next()
         .unwrap();
     let (target_page, target_row) = deletion_refresh_target_bulk(
-        result.rows.len(),
+        result.data_row_count(),
         staged_count,
         first_deleted_idx,
-        state.query.pagination.current_page,
+        state.query.pagination.current_page(),
     );
 
     let target = TargetSummary {
-        schema: state.query.pagination.schema.clone(),
-        table: state.query.pagination.table.clone(),
-        key_values: pk_pairs_per_row.first().cloned().unwrap_or_default(),
+        schema: state.query.pagination.schema().to_string(),
+        table: state.query.pagination.table().to_string(),
+        key_values: target_pairs,
     };
-    let guardrail = evaluate_guardrails(true, true, false, Some(target.clone()));
+    let guardrail = evaluate_guardrails(true, true, Some(target.clone()));
 
     Ok(BulkDeletePreviewResult {
         preview: WritePreview {
@@ -177,7 +262,7 @@ pub fn build_bulk_delete_preview(
     })
 }
 
-pub fn deletion_refresh_target_bulk(
+pub(in crate::update) fn deletion_refresh_target_bulk(
     row_count: usize,
     deleted_count: usize,
     first_deleted_idx: usize,
@@ -196,94 +281,256 @@ pub fn deletion_refresh_target_bulk(
     }
 }
 
-pub fn char_to_byte_index(s: &str, char_idx: usize) -> usize {
-    s.char_indices()
-        .nth(char_idx)
-        .map_or(s.len(), |(byte_idx, _)| byte_idx)
+pub(in crate::update) fn find_text_matches(content: &str, query: &str) -> Vec<usize> {
+    if query.is_empty() {
+        return Vec::new();
+    }
+
+    let query_folded = query.case_fold().collect::<String>();
+    let mut matches = Vec::new();
+    let mut offset = 0;
+
+    for segment in content.split_inclusive('\n') {
+        let line = segment.strip_suffix('\n').unwrap_or(segment);
+        let (folded, offset_map) = casefold_with_char_offsets(line);
+        let mut search_from = 0;
+        while let Some(rel_idx) = folded[search_from..].find(&query_folded) {
+            let match_idx = search_from + rel_idx;
+            matches.push(offset + original_char_offset_for_folded_byte(&offset_map, match_idx));
+            search_from =
+                folded_byte_offset_after_original_match(&offset_map, match_idx, query_folded.len());
+        }
+        offset += segment.chars().count();
+    }
+
+    matches
 }
 
-pub fn validate_field(state: &mut ConnectionSetupState, field: ConnectionField) {
-    state.validation_errors.remove(&field);
+fn casefold_with_char_offsets(text: &str) -> (String, Vec<(usize, usize)>) {
+    let mut folded = String::new();
+    let mut offset_map = Vec::new();
 
-    // Hidden fields (e.g. Host/Port/User for SQLite) are never validated.
-    if !field.is_visible_for(state.database_type) {
-        return;
+    for (original_char_offset, ch) in text.chars().enumerate() {
+        for folded_char in ch.case_fold() {
+            offset_map.push((folded.len(), original_char_offset));
+            folded.push(folded_char);
+        }
+    }
+
+    offset_map.push((folded.len(), text.chars().count()));
+    (folded, offset_map)
+}
+
+fn original_char_offset_for_folded_byte(
+    offset_map: &[(usize, usize)],
+    folded_byte_offset: usize,
+) -> usize {
+    let idx = offset_map.partition_point(|(byte_offset, _)| *byte_offset <= folded_byte_offset);
+    offset_map[idx.saturating_sub(1)].1
+}
+
+fn folded_byte_offset_after_original_match(
+    offset_map: &[(usize, usize)],
+    folded_match_start: usize,
+    folded_match_len: usize,
+) -> usize {
+    let folded_match_end = folded_match_start + folded_match_len;
+    let last_matched_original =
+        original_char_offset_for_folded_byte(offset_map, folded_match_end.saturating_sub(1));
+    offset_map
+        .iter()
+        .find_map(|(byte_offset, original_offset)| {
+            (*byte_offset >= folded_match_end && *original_offset > last_matched_original)
+                .then_some(*byte_offset)
+        })
+        .unwrap_or(folded_match_end)
+}
+
+fn text_input_content(state: &ConnectionSetupState, field: ConnectionField) -> &str {
+    state
+        .input(field)
+        .expect("connection field is a text input")
+        .content()
+}
+
+fn require_non_empty(state: &mut ConnectionSetupState, field: ConnectionField, message: &str) {
+    if text_input_content(state, field).trim().is_empty() {
+        state.set_validation_error(field, message);
+    }
+}
+
+pub(in crate::update) fn validate_field(state: &mut ConnectionSetupState, field: ConnectionField) {
+    state.clear_validation_error(field);
+    if let Some(other_field) = match field {
+        ConnectionField::SslCert => Some(ConnectionField::SslKey),
+        ConnectionField::SslKey => Some(ConnectionField::SslCert),
+        _ => None,
+    } {
+        state.clear_validation_error(other_field);
+    }
+
+    if let Some(max_chars) = field.max_chars() {
+        let length = state.field_value(field).chars().count();
+        if length > max_chars {
+            state
+                .validation_errors
+                .insert(field, format!("Must be {max_chars} characters or less"));
+            return;
+        }
     }
 
     match field {
-        ConnectionField::Host => {
-            if state.host.content().trim().is_empty() {
-                state
-                    .validation_errors
-                    .insert(field, "Required".to_string());
+        ConnectionField::SqlitePath => {
+            let path = text_input_content(state, ConnectionField::SqlitePath).to_string();
+            match SqliteConnectionConfig::new(path) {
+                Ok(_) => {}
+                Err(error) => state.record_sqlite_config_error(error),
             }
         }
-        ConnectionField::Port => {
-            if state.port.content().trim().is_empty() {
-                state
-                    .validation_errors
-                    .insert(field, "Required".to_string());
+        ConnectionField::Port
+            if state.database_type() != DatabaseType::MySQL
+                || state.mysql_transport() == MySqlTransport::Tcp =>
+        {
+            let port = text_input_content(state, field).trim();
+            if port.is_empty() {
+                state.set_validation_error(field, "Required");
             } else {
-                match state.port.content().trim().parse::<u16>() {
+                match port.parse::<u16>() {
                     Err(_) => {
-                        state
-                            .validation_errors
-                            .insert(field, "Invalid port".to_string());
+                        state.set_validation_error(field, "Invalid port");
                     }
                     Ok(0) => {
-                        state
-                            .validation_errors
-                            .insert(field, "Port must be > 0".to_string());
+                        state.set_validation_error(field, "Port must be > 0");
                     }
                     Ok(_) => {}
                 }
             }
         }
         ConnectionField::Database => {
-            // MySQL allows an empty database to browse all schemas at once;
-            // PostgreSQL still requires a specific database to connect to.
-            if state.database_type != DatabaseType::MySQL
-                && state.database.content().trim().is_empty()
-            {
-                state
-                    .validation_errors
-                    .insert(field, "Required".to_string());
+            if matches!(
+                state.database_type(),
+                DatabaseType::PostgreSQL | DatabaseType::MySQL
+            ) {
+                require_non_empty(state, field, "Required");
             }
         }
-        ConnectionField::User => {
-            if state.user.content().trim().is_empty() {
-                state
-                    .validation_errors
-                    .insert(field, "Required".to_string());
+        ConnectionField::Host
+            if state.database_type() == DatabaseType::MySQL
+                && state.mysql_transport() == MySqlTransport::Tcp =>
+        {
+            let host = text_input_content(state, field).trim();
+            if host.is_empty() {
+                state.set_validation_error(field, "Required");
+            } else if !MySqlConnectionConfig::is_valid_host(host) {
+                state.set_validation_error(field, "Invalid host");
+            }
+        }
+        ConnectionField::User if state.database_type() == DatabaseType::MySQL => {
+            require_non_empty(state, field, "Required");
+        }
+        ConnectionField::TransportPath if state.database_type() == DatabaseType::MySQL => {
+            let path = text_input_content(state, field);
+            if state.mysql_transport().requires_path() && path.trim().is_empty() {
+                state.set_validation_error(field, "Required");
+            } else if path.chars().any(char::is_control) {
+                state.set_validation_error(field, "Invalid path");
+            }
+        }
+        ConnectionField::SslCa if state.database_type() == DatabaseType::MySQL => {
+            let path = text_input_content(state, field).to_string();
+            if matches!(
+                state.mysql_ssl_mode(),
+                MySqlSslMode::VerifyCa | MySqlSslMode::VerifyIdentity
+            ) && path.trim().is_empty()
+            {
+                state.set_validation_error(field, "Required for this TLS mode");
+            } else if path.chars().any(char::is_control) {
+                state.set_validation_error(field, "Invalid path");
+            }
+        }
+        ConnectionField::SslCert | ConnectionField::SslKey
+            if state.database_type() == DatabaseType::MySQL =>
+        {
+            let path = text_input_content(state, field).to_string();
+            if path.chars().any(char::is_control) {
+                state.set_validation_error(field, "Invalid path");
+            }
+            let other_field = match field {
+                ConnectionField::SslCert => ConnectionField::SslKey,
+                ConnectionField::SslKey => ConnectionField::SslCert,
+                _ => unreachable!(),
+            };
+            let other_path = text_input_content(state, other_field).to_string();
+            if path.trim().is_empty() != other_path.trim().is_empty() {
+                state.set_validation_error(field, "Both client paths are required");
+                state.set_validation_error(other_field, "Both client paths are required");
+            }
+        }
+        ConnectionField::ServerPublicKeyPath if state.database_type() == DatabaseType::MySQL => {
+            let path = text_input_content(state, field);
+            if path.chars().any(char::is_control) {
+                state.set_validation_error(field, "Invalid path");
+            }
+        }
+        ConnectionField::CleartextAuth if state.database_type() == DatabaseType::MySQL => {
+            if state.cleartext_auth_plugin_enabled()
+                && !state.mysql_ssl_mode().allows_cleartext_auth()
+            {
+                state.set_validation_error(field, "Requires TLS");
+            }
+        }
+        ConnectionField::SslMode if state.database_type() == DatabaseType::MySQL => {
+            if state.mysql_transport() == MySqlTransport::NamedPipe
+                && !matches!(
+                    state.mysql_ssl_mode(),
+                    MySqlSslMode::Disabled | MySqlSslMode::Preferred
+                )
+            {
+                state.set_validation_error(field, "Named pipes do not support TLS");
             }
         }
         ConnectionField::Name => {
-            let name = state.name.content().trim().to_string();
+            let name = text_input_content(state, field).trim().to_string();
             if name.is_empty() {
-                state
-                    .validation_errors
-                    .insert(field, "Name is required".to_string());
-            } else if name.chars().count() > 50 {
-                state
-                    .validation_errors
-                    .insert(field, "Name must be 50 characters or less".to_string());
+                state.set_validation_error(field, "Name is required");
             }
         }
-        ConnectionField::DatabaseType | ConnectionField::Password | ConnectionField::SslMode => {
-            // Non-text / optional fields, no validation needed
-        }
+        ConnectionField::DatabaseType
+        | ConnectionField::Transport
+        | ConnectionField::TransportPath
+        | ConnectionField::Port
+        | ConnectionField::Host
+        | ConnectionField::User
+        | ConnectionField::Password
+        | ConnectionField::SslMode
+        | ConnectionField::SslCa
+        | ConnectionField::SslCert
+        | ConnectionField::SslKey
+        | ConnectionField::ServerPublicKeyPath
+        | ConnectionField::CleartextAuth => {}
     }
 }
 
-pub fn validate_all(state: &mut ConnectionSetupState) {
-    for field in ConnectionField::all() {
-        validate_field(state, *field);
+pub(in crate::update) fn validate_all(state: &mut ConnectionSetupState) {
+    let active_fields = ConnectionField::fields_for(
+        state.database_type(),
+        state.mysql_transport(),
+        state.mysql_ssl_mode(),
+    );
+    state.retain_validation_errors_for_visible_fields();
+    for field in active_fields {
+        validate_field(state, field);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::Column;
+    use std::sync::Arc;
+
+    use crate::domain::connection::ConnectionId;
+    use crate::domain::{ColumnAttributes, DatabaseType, QuerySource, Table};
     use rstest::rstest;
 
     mod validate_field_name {
@@ -297,8 +544,8 @@ mod tests {
             validate_field(&mut state, ConnectionField::Name);
 
             assert_eq!(
-                state.validation_errors.get(&ConnectionField::Name),
-                Some(&"Name is required".to_string())
+                state.validation_error(ConnectionField::Name),
+                Some("Name is required")
             );
         }
 
@@ -309,13 +556,13 @@ mod tests {
         )]
         fn whitespace_only_name_sets_error() {
             let mut state = ConnectionSetupState::default();
-            state.name = TextInputState::new("   ", 3);
+            *state.input_mut(ConnectionField::Name).unwrap() = TextInputState::new("   ", 3);
 
             validate_field(&mut state, ConnectionField::Name);
 
             assert_eq!(
-                state.validation_errors.get(&ConnectionField::Name),
-                Some(&"Name is required".to_string())
+                state.validation_error(ConnectionField::Name),
+                Some("Name is required")
             );
         }
 
@@ -325,17 +572,17 @@ mod tests {
         fn name_length_validation(#[case] name: String, #[case] expect_error: bool) {
             let mut state = ConnectionSetupState::default();
             let len = name.chars().count();
-            state.name = TextInputState::new(name, len);
+            *state.input_mut(ConnectionField::Name).unwrap() = TextInputState::new(name, len);
 
             validate_field(&mut state, ConnectionField::Name);
 
             if expect_error {
                 assert_eq!(
-                    state.validation_errors.get(&ConnectionField::Name),
-                    Some(&"Name must be 50 characters or less".to_string())
+                    state.validation_error(ConnectionField::Name),
+                    Some("Must be 50 characters or less")
                 );
             } else {
-                assert!(!state.validation_errors.contains_key(&ConnectionField::Name));
+                assert!(!state.has_validation_error(ConnectionField::Name));
             }
         }
 
@@ -343,152 +590,332 @@ mod tests {
         fn valid_name_clears_previous_error() {
             let mut state = ConnectionSetupState::default();
             validate_field(&mut state, ConnectionField::Name);
-            assert!(state.validation_errors.contains_key(&ConnectionField::Name));
+            assert!(state.has_validation_error(ConnectionField::Name));
 
-            state.name.set_content("Valid Name".to_string());
+            state
+                .input_mut(ConnectionField::Name)
+                .unwrap()
+                .set_content("Valid Name".to_string());
             validate_field(&mut state, ConnectionField::Name);
 
-            assert!(!state.validation_errors.contains_key(&ConnectionField::Name));
+            assert!(!state.has_validation_error(ConnectionField::Name));
+        }
+
+        #[test]
+        fn zero_port_sets_error() {
+            let mut state = ConnectionSetupState::default();
+            state.set_database_type(DatabaseType::MySQL);
+            state
+                .input_mut(ConnectionField::Port)
+                .unwrap()
+                .set_content("0".to_string());
+
+            validate_field(&mut state, ConnectionField::Port);
+
+            assert_eq!(
+                state.validation_error(ConnectionField::Port),
+                Some("Port must be > 0")
+            );
         }
     }
 
-    mod validate_field_database {
+    mod validate_sqlite_path {
         use super::*;
 
         #[test]
-        fn postgres_empty_database_sets_required_error() {
-            let mut state = ConnectionSetupState {
-                database_type: DatabaseType::PostgreSQL,
-                ..Default::default()
-            };
+        fn empty_path_sets_required_error() {
+            let mut state = ConnectionSetupState::default();
+            state.set_database_type(DatabaseType::SQLite);
+            state
+                .input_mut(ConnectionField::SqlitePath)
+                .unwrap()
+                .set_content("   ".to_string());
 
-            validate_field(&mut state, ConnectionField::Database);
+            validate_field(&mut state, ConnectionField::SqlitePath);
 
             assert_eq!(
-                state.validation_errors.get(&ConnectionField::Database),
-                Some(&"Required".to_string())
+                state.validation_error(ConnectionField::SqlitePath),
+                Some("Required")
             );
         }
 
         #[test]
-        fn mysql_empty_database_is_allowed() {
-            let mut state = ConnectionSetupState {
-                database_type: DatabaseType::MySQL,
-                ..Default::default()
-            };
+        fn unsupported_path_characters_set_error() {
+            let mut state = ConnectionSetupState::default();
+            state.set_database_type(DatabaseType::SQLite);
+            state
+                .input_mut(ConnectionField::SqlitePath)
+                .unwrap()
+                .set_content("/tmp/app\0.db".to_string());
 
-            validate_field(&mut state, ConnectionField::Database);
+            validate_field(&mut state, ConnectionField::SqlitePath);
 
-            assert!(
-                !state
-                    .validation_errors
-                    .contains_key(&ConnectionField::Database)
+            assert_eq!(
+                state.validation_error(ConnectionField::SqlitePath),
+                Some("Unsupported characters")
             );
         }
 
         #[test]
-        fn sqlite_empty_database_sets_required_error() {
-            let mut state = ConnectionSetupState {
-                database_type: DatabaseType::SQLite,
-                ..Default::default()
-            };
+        fn in_memory_database_sets_unsupported_format_error() {
+            let mut state = ConnectionSetupState::default();
+            state.set_database_type(DatabaseType::SQLite);
+            state
+                .input_mut(ConnectionField::SqlitePath)
+                .unwrap()
+                .set_content(":memory:".to_string());
 
-            validate_field(&mut state, ConnectionField::Database);
+            validate_field(&mut state, ConnectionField::SqlitePath);
 
             assert_eq!(
-                state.validation_errors.get(&ConnectionField::Database),
-                Some(&"Required".to_string())
+                state.validation_error(ConnectionField::SqlitePath),
+                Some(
+                    "In-memory SQLite databases cannot retain contents because sabiql starts sqlite3 per operation; use a temporary file"
+                )
             );
+        }
+
+        #[test]
+        fn uri_filename_sets_unsupported_format_error() {
+            let mut state = ConnectionSetupState::default();
+            state.set_database_type(DatabaseType::SQLite);
+            state
+                .input_mut(ConnectionField::SqlitePath)
+                .unwrap()
+                .set_content("file:/tmp/app.db?mode=ro".to_string());
+
+            validate_field(&mut state, ConnectionField::SqlitePath);
+
+            assert_eq!(
+                state.validation_error(ConnectionField::SqlitePath),
+                Some("SQLite URI filenames are not supported; use a regular file path")
+            );
+        }
+
+        #[test]
+        fn validate_all_removes_errors_for_hidden_fields() {
+            let mut state = ConnectionSetupState::default();
+            state.set_database_type(DatabaseType::SQLite);
+            state.set_validation_error(ConnectionField::Host, "Required");
+            state
+                .input_mut(ConnectionField::SqlitePath)
+                .unwrap()
+                .set_content("/tmp/app.db".to_string());
+
+            validate_all(&mut state);
+
+            assert!(!state.has_validation_error(ConnectionField::Host));
         }
     }
 
-    mod validate_field_hidden_fields {
+    mod validate_field_max_length {
         use super::*;
         use crate::model::shared::text_input::TextInputState;
-        use rstest::rstest;
 
         #[rstest]
-        #[case(ConnectionField::Host)]
-        #[case(ConnectionField::Port)]
-        #[case(ConnectionField::User)]
-        fn sqlite_hidden_fields_are_not_validated(#[case] field: ConnectionField) {
-            let mut state = ConnectionSetupState {
-                database_type: DatabaseType::SQLite,
-                ..Default::default()
-            };
-            state.host = TextInputState::default();
-            state.port = TextInputState::default();
-            state.user = TextInputState::default();
+        #[case(ConnectionField::Host, "a".repeat(255), false)]
+        #[case(ConnectionField::Host, "a".repeat(256), true)]
+        #[case(ConnectionField::Database, "a".repeat(255), false)]
+        #[case(ConnectionField::Database, "a".repeat(256), true)]
+        #[case(ConnectionField::User, "a".repeat(255), false)]
+        #[case(ConnectionField::User, "a".repeat(256), true)]
+        #[case(ConnectionField::Password, "a".repeat(255), false)]
+        #[case(ConnectionField::Password, "a".repeat(256), true)]
+        fn max_length_validation(
+            #[case] field: ConnectionField,
+            #[case] value: String,
+            #[case] expect_error: bool,
+        ) {
+            let mut state = ConnectionSetupState::default();
+            let len = value.chars().count();
+            let input = TextInputState::new(value, len);
+
+            match field {
+                ConnectionField::Host => state.host = input,
+                ConnectionField::Database => state.database = input,
+                ConnectionField::User => state.user = input,
+                ConnectionField::Password => state.password = input,
+                _ => unreachable!(),
+            }
 
             validate_field(&mut state, field);
 
-            assert!(!state.validation_errors.contains_key(&field));
-        }
-
-        #[test]
-        #[allow(
-            clippy::field_reassign_with_default,
-            reason = "intentional partial override of Default for clarity"
-        )]
-        fn switching_to_sqlite_clears_stale_hidden_field_error() {
-            let mut state = ConnectionSetupState::default();
-            state.host = TextInputState::default();
-            validate_field(&mut state, ConnectionField::Host);
-            assert!(state.validation_errors.contains_key(&ConnectionField::Host));
-
-            state.database_type = DatabaseType::SQLite;
-            validate_field(&mut state, ConnectionField::Host);
-
-            assert!(!state.validation_errors.contains_key(&ConnectionField::Host));
+            if expect_error {
+                assert_eq!(
+                    state.validation_errors.get(&field),
+                    Some(&"Must be 255 characters or less".to_string())
+                );
+            } else {
+                assert!(!state.validation_errors.contains_key(&field));
+            }
         }
     }
 
-    mod delete_refresh_target {
-        fn deletion_refresh_target(
-            row_count: usize,
-            selected_row: usize,
-            current_page: usize,
-        ) -> (usize, Option<usize>) {
-            if row_count <= 1 {
-                if current_page > 0 {
-                    (current_page - 1, Some(usize::MAX))
-                } else {
-                    (0, None)
-                }
-            } else if selected_row < row_count - 1 {
-                (current_page, Some(selected_row))
-            } else {
-                (current_page, Some(row_count - 2))
-            }
-        }
+    #[test]
+    fn mysql_validation_requires_host_user_and_database() {
+        let mut state = ConnectionSetupState::default();
+        state.set_database_type(DatabaseType::MySQL);
+        state
+            .input_mut(ConnectionField::Host)
+            .unwrap()
+            .set_content(" ".to_string());
+        state
+            .input_mut(ConnectionField::User)
+            .unwrap()
+            .set_content(" ".to_string());
 
-        #[test]
-        fn single_row_first_page_clears_selection() {
-            let (page, row) = deletion_refresh_target(1, 0, 0);
-            assert_eq!(page, 0);
-            assert_eq!(row, None);
-        }
+        validate_all(&mut state);
 
-        #[test]
-        fn single_row_non_first_page_goes_previous_page_last_row() {
-            let (page, row) = deletion_refresh_target(1, 0, 2);
-            assert_eq!(page, 1);
-            assert_eq!(row, Some(usize::MAX));
-        }
+        assert_eq!(
+            state.validation_error(ConnectionField::Host),
+            Some("Required")
+        );
+        assert_eq!(
+            state.validation_error(ConnectionField::User),
+            Some("Required")
+        );
+        assert_eq!(
+            state.validation_error(ConnectionField::Database),
+            Some("Required")
+        );
+    }
 
-        #[test]
-        fn middle_row_keeps_same_index() {
-            let (page, row) = deletion_refresh_target(3, 1, 4);
-            assert_eq!(page, 4);
-            assert_eq!(row, Some(1));
-        }
+    #[test]
+    fn mysql_validation_rejects_url_syntax_in_host() {
+        let mut state = ConnectionSetupState::default();
+        state.set_database_type(DatabaseType::MySQL);
+        state
+            .input_mut(ConnectionField::Host)
+            .unwrap()
+            .set_content("db example".to_string());
 
-        #[test]
-        fn last_row_selects_previous_row() {
-            let (page, row) = deletion_refresh_target(3, 2, 4);
-            assert_eq!(page, 4);
-            assert_eq!(row, Some(1));
-        }
+        validate_field(&mut state, ConnectionField::Host);
+
+        assert_eq!(
+            state.validation_error(ConnectionField::Host),
+            Some("Invalid host")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mysql_unix_socket_validation_uses_path_instead_of_host_and_port() {
+        let mut state = ConnectionSetupState::default();
+        state.set_database_type(DatabaseType::MySQL);
+        state.mysql_transport = MySqlTransport::UnixSocket;
+        state
+            .input_mut(ConnectionField::Host)
+            .unwrap()
+            .set_content(" ".to_string());
+        state
+            .input_mut(ConnectionField::Port)
+            .unwrap()
+            .set_content("not-a-port".to_string());
+        state
+            .input_mut(ConnectionField::TransportPath)
+            .unwrap()
+            .set_content("/run/mysqld/mysqld.sock".to_string());
+
+        validate_field(&mut state, ConnectionField::TransportPath);
+
+        assert_eq!(state.validation_error(ConnectionField::TransportPath), None);
+        assert_eq!(state.validation_error(ConnectionField::Host), None);
+        assert_eq!(state.validation_error(ConnectionField::Port), None);
+    }
+
+    #[test]
+    fn mysql_verification_requires_ca_path() {
+        let mut state = ConnectionSetupState::default();
+        state.set_database_type(DatabaseType::MySQL);
+        state.mysql_ssl_mode = MySqlSslMode::VerifyCa;
+
+        validate_all(&mut state);
+
+        assert_eq!(
+            state.validation_error(ConnectionField::SslCa),
+            Some("Required for this TLS mode")
+        );
+    }
+
+    #[test]
+    fn mysql_cleartext_auth_requires_tls() {
+        let mut state = ConnectionSetupState::default();
+        state.set_database_type(DatabaseType::MySQL);
+        state.enable_cleartext_plugin = true;
+
+        validate_all(&mut state);
+
+        assert_eq!(
+            state.validation_error(ConnectionField::CleartextAuth),
+            Some("Requires TLS")
+        );
+
+        state.mysql_ssl_mode = MySqlSslMode::Required;
+        validate_all(&mut state);
+
+        assert_eq!(state.validation_error(ConnectionField::CleartextAuth), None);
+    }
+
+    #[test]
+    fn mysql_client_certificate_and_key_are_a_pair() {
+        let mut state = ConnectionSetupState::default();
+        state.set_database_type(DatabaseType::MySQL);
+        state
+            .input_mut(ConnectionField::SslCert)
+            .unwrap()
+            .set_content("client.pem".to_string());
+
+        validate_all(&mut state);
+
+        assert_eq!(
+            state.validation_error(ConnectionField::SslCert),
+            Some("Both client paths are required")
+        );
+        assert_eq!(
+            state.validation_error(ConnectionField::SslKey),
+            Some("Both client paths are required")
+        );
+    }
+
+    #[test]
+    fn validating_filled_client_key_clears_stale_pair_error() {
+        let mut state = ConnectionSetupState::default();
+        state.set_database_type(DatabaseType::MySQL);
+        state
+            .input_mut(ConnectionField::SslCert)
+            .unwrap()
+            .set_content("client.pem".to_string());
+        validate_field(&mut state, ConnectionField::SslCert);
+
+        state
+            .input_mut(ConnectionField::SslKey)
+            .unwrap()
+            .set_content("client-key.pem".to_string());
+        validate_field(&mut state, ConnectionField::SslKey);
+
+        assert_eq!(state.validation_error(ConnectionField::SslCert), None);
+        assert_eq!(state.validation_error(ConnectionField::SslKey), None);
+    }
+
+    #[test]
+    fn empty_or_complete_client_certificate_pair_is_accepted() {
+        let mut state = ConnectionSetupState::default();
+        state.set_database_type(DatabaseType::MySQL);
+        validate_all(&mut state);
+        assert_eq!(state.validation_error(ConnectionField::SslCert), None);
+        assert_eq!(state.validation_error(ConnectionField::SslKey), None);
+
+        state
+            .input_mut(ConnectionField::SslCert)
+            .unwrap()
+            .set_content("client.pem".to_string());
+        state
+            .input_mut(ConnectionField::SslKey)
+            .unwrap()
+            .set_content("client-key.pem".to_string());
+        validate_all(&mut state);
+        assert_eq!(state.validation_error(ConnectionField::SslCert), None);
+        assert_eq!(state.validation_error(ConnectionField::SslKey), None);
     }
 
     mod delete_refresh_target_bulk {
@@ -527,6 +954,164 @@ mod tests {
             let (page, row) = deletion_refresh_target_bulk(4, 1, 2, 1);
             assert_eq!(page, 1);
             assert_eq!(row, Some(2));
+        }
+    }
+
+    mod bulk_delete_preview {
+        use crate::test_support;
+
+        use super::*;
+
+        fn sqlite_editable_state() -> AppState {
+            let mut state = AppState::new("test_project".to_string());
+            state.session.activate_connection_with_dsn(
+                &ConnectionId::from_string("test-connection"),
+                "test",
+                DatabaseType::SQLite,
+                "sqlite:///tmp/app.db",
+            );
+            state
+                .query
+                .set_current_result(Arc::new(QueryResult::success(
+                    "SELECT * FROM users".to_string(),
+                    vec!["id".to_string(), "name".to_string()],
+                    vec![vec!["1".to_string(), "Alice".to_string()]],
+                    10,
+                    QuerySource::Preview,
+                )));
+            state.session.set_table_detail_raw(Some(Table {
+                schema: "main".to_string(),
+                name: "users".to_string(),
+                columns: vec![
+                    Column {
+                        attributes: ColumnAttributes::PRIMARY_KEY,
+                        ..test_support::column::test_nullable_column("id", "INTEGER", 1)
+                    },
+                    test_support::column::test_nullable_column("name", "TEXT", 2),
+                ],
+                primary_key: Some(vec!["id".to_string()]),
+                ..test_support::table::minimal("", "")
+            }));
+            state.query.pagination.reset_for_table("main", "users");
+            state.result_interaction.stage_row(0);
+            state
+        }
+
+        #[test]
+        fn sqlite_database_type_uses_schema_free_delete_preview() {
+            let state = sqlite_editable_state();
+
+            let result = build_bulk_delete_preview(&state).unwrap();
+
+            assert_eq!(
+                result.preview.sql,
+                "DELETE FROM \"users\"\nWHERE \"id\" = '1';"
+            );
+        }
+
+        #[test]
+        fn sqlite_table_without_primary_key_cannot_build_delete_preview() {
+            let mut state = sqlite_editable_state();
+            let mut detail = state.session.table_detail().cloned().expect("table detail");
+            detail.primary_key = None;
+            state.session.set_table_detail_raw(Some(detail));
+
+            assert!(matches!(
+                build_bulk_delete_preview(&state),
+                Err(EditGuardrailError::DeletionRequiresPrimaryKey)
+            ));
+        }
+
+        #[test]
+        fn sqlite_without_rowid_table_uses_primary_key_for_delete_preview() {
+            let mut state = sqlite_editable_state();
+            let mut detail = state.session.table_detail().cloned().expect("table detail");
+            detail.kind_info.without_rowid = true;
+            state.session.set_table_detail_raw(Some(detail));
+
+            let result = build_bulk_delete_preview(&state).unwrap();
+
+            assert_eq!(
+                result.preview.sql,
+                "DELETE FROM \"users\"\nWHERE \"id\" = '1';"
+            );
+        }
+
+        #[test]
+        fn sqlite_database_type_rejects_null_primary_key_value() {
+            let mut state = sqlite_editable_state();
+            state
+                .query
+                .set_current_result(Arc::new(QueryResult::success_with_values(
+                    "SELECT * FROM users".to_string(),
+                    vec!["id".to_string(), "name".to_string()],
+                    vec![vec![QueryValue::Null, QueryValue::text("Alice")]],
+                    10,
+                    QuerySource::Preview,
+                )));
+
+            let result = build_bulk_delete_preview(&state);
+
+            assert!(matches!(
+                result,
+                Err(EditGuardrailError::SqliteNullPrimaryKey)
+            ));
+        }
+    }
+
+    mod text_search {
+        use super::find_text_matches;
+
+        #[test]
+        fn text_matches_return_first_match_offset_per_line_case_insensitively() {
+            let matches = find_text_matches(
+                "{\n  \"Theme\": \"dark\",\n  \"theme\": \"light\"\n}",
+                "theme",
+            );
+
+            assert_eq!(matches, vec![5, 24]);
+        }
+
+        #[test]
+        fn text_matches_return_empty_for_empty_query() {
+            let matches = find_text_matches("{\n  \"theme\": \"dark\"\n}", "");
+
+            assert!(matches.is_empty());
+        }
+
+        #[test]
+        fn text_matches_map_unicode_casefold_back_to_original_char_offset() {
+            let matches = find_text_matches("İx", "x");
+
+            assert_eq!(matches, vec![1]);
+        }
+
+        #[test]
+        fn text_matches_casefold_german_sharp_s() {
+            let matches = find_text_matches("Maße", "MASSE");
+
+            assert_eq!(matches, vec![0]);
+        }
+
+        #[test]
+        fn text_matches_do_not_duplicate_expanded_casefold_character() {
+            let matches = find_text_matches("Maße", "s");
+
+            assert_eq!(matches, vec![2]);
+        }
+
+        #[test]
+        fn text_matches_casefold_greek_final_sigma() {
+            let matches = find_text_matches("ὈΔΥΣΣΕΎΣ", "ὀδυσσεύς");
+
+            assert_eq!(matches, vec![0]);
+        }
+
+        #[test]
+        fn text_matches_return_all_matches_within_single_line() {
+            let matches = find_text_matches("theme theme", "theme");
+
+            assert_eq!(matches, vec![0, 6]);
         }
     }
 }
