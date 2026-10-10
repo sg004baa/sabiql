@@ -91,7 +91,8 @@ mod tests {
         let _guard = ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _env = EditorEnv::set(Some("true"));
+        let command = if cfg!(windows) { "cmd /C rem" } else { "true" };
+        let _env = EditorEnv::set(Some(command));
 
         let content = "SELECT 1;\n-- unchanged\n";
         let edited = SystemExternalEditor.edit(content, "sql").unwrap();
@@ -99,6 +100,7 @@ mod tests {
     }
 
     /// Writes an executable script and returns it plus the dir keeping it alive.
+    #[cfg(unix)]
     fn editor_script(body: &str) -> (tempfile::TempDir, String) {
         use std::os::unix::fs::PermissionsExt;
 
@@ -110,6 +112,7 @@ mod tests {
         (dir, command)
     }
 
+    #[cfg(unix)]
     #[test]
     fn editor_terminating_the_file_does_not_grow_the_buffer() {
         let _guard = ENV_LOCK
@@ -125,6 +128,7 @@ mod tests {
         assert_eq!(edited, "SELECT 1;");
     }
 
+    #[cfg(unix)]
     #[test]
     fn trailing_blank_line_written_by_the_editor_survives() {
         let _guard = ENV_LOCK
@@ -143,7 +147,12 @@ mod tests {
         let _guard = ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _env = EditorEnv::set(Some("false"));
+        let command = if cfg!(windows) {
+            "cmd /C exit 1"
+        } else {
+            "false"
+        };
+        let _env = EditorEnv::set(Some(command));
 
         let error = SystemExternalEditor.edit("{}", "json").unwrap_err();
         assert!(matches!(error, ExternalEditorError::EditorFailed(_)));
