@@ -153,7 +153,7 @@ er_browser = "Firefox"
 [[connections]]
 id = "legacy-postgres"
 name = "Saved PostgreSQL"
-database_type = "postgresql"
+database_type = "PostgreSQL"
 host = "pg.example.test"
 port = 5433
 database = "app"
@@ -164,7 +164,7 @@ ssl_mode = "require"
 [[connections]]
 id = "legacy-mysql"
 name = "Saved MySQL"
-database_type = "mysql"
+database_type = "MySQL"
 host = "mysql.example.test"
 port = 3307
 database = ""
@@ -175,9 +175,9 @@ ssl_mode = "prefer"
 [[connections]]
 id = "legacy-sqlite"
 name = "Saved SQLite"
-database_type = "sqlite"
+database_type = "SQLite"
 host = ""
-port = 5432
+port = 0
 database = "./saved db/app.sqlite"
 username = ""
 password = ""
