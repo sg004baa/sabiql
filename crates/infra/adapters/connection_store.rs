@@ -138,6 +138,130 @@ mod tests {
         .unwrap()
     }
 
+    mod legacy_fork_config {
+        use super::*;
+        use crate::domain::connection::MySqlSslMode;
+        use rstest::rstest;
+
+        // The actual v2 format written by this fork before the upstream merge.
+        const LEGACY_CONFIG: &str = r#"
+version = 2
+theme = "light"
+keymap_preset = "ide"
+er_browser = "Firefox"
+
+[[connections]]
+id = "legacy-postgres"
+name = "Saved PostgreSQL"
+database_type = "postgresql"
+host = "pg.example.test"
+port = 5433
+database = "app"
+username = "pg-user"
+password = "pg-secret"
+ssl_mode = "require"
+
+[[connections]]
+id = "legacy-mysql"
+name = "Saved MySQL"
+database_type = "mysql"
+host = "mysql.example.test"
+port = 3307
+database = ""
+username = "mysql-user"
+password = 'p a#ss;="word'
+ssl_mode = "prefer"
+
+[[connections]]
+id = "legacy-sqlite"
+name = "Saved SQLite"
+database_type = "sqlite"
+host = ""
+port = 5432
+database = "./saved db/app.sqlite"
+username = ""
+password = ""
+ssl_mode = "prefer"
+"#;
+
+        #[test]
+        fn loads_original_database_types_without_rewriting_legacy_file() {
+            let temp_dir = TempDir::new().unwrap();
+            let path = temp_dir.path().join(CONFIG_FILE_NAME);
+            fs::write(&path, LEGACY_CONFIG).unwrap();
+            let store = TomlConnectionStore::with_config_dir(temp_dir.path().to_path_buf());
+
+            let profiles = store.load_all().unwrap();
+
+            assert_eq!(profiles.len(), 3);
+            let postgres = profiles[0].postgres_config().unwrap();
+            assert_eq!(postgres.host, "pg.example.test");
+            assert_eq!(postgres.database, "app");
+            assert_eq!(postgres.ssl_mode, SslMode::Require);
+            let mysql = profiles[1].mysql_config().unwrap();
+            assert_eq!(mysql.host, "mysql.example.test");
+            assert_eq!(mysql.port, 3307);
+            assert_eq!(mysql.database, None);
+            assert_eq!(mysql.username, "mysql-user");
+            assert_eq!(mysql.password, "p a#ss;=\"word");
+            assert_eq!(
+                profiles[2].sqlite_config().unwrap().path(),
+                "./saved db/app.sqlite"
+            );
+            assert_eq!(fs::read_to_string(path).unwrap(), LEGACY_CONFIG);
+        }
+
+        #[rstest]
+        #[case::postgres(DatabaseType::PostgreSQL)]
+        #[case::mysql(DatabaseType::MySQL)]
+        #[case::sqlite(DatabaseType::SQLite)]
+        fn saves_each_database_type_alongside_legacy_fork_connections(
+            #[case] database_type: DatabaseType,
+        ) {
+            let temp_dir = TempDir::new().unwrap();
+            let path = temp_dir.path().join(CONFIG_FILE_NAME);
+            fs::write(&path, LEGACY_CONFIG).unwrap();
+            let store = TomlConnectionStore::with_config_dir(temp_dir.path().to_path_buf());
+            let original = store.load_all().unwrap();
+            let new_profile = match database_type {
+                DatabaseType::PostgreSQL => make_test_profile("New PostgreSQL"),
+                DatabaseType::MySQL => ConnectionProfile::new_mysql(
+                    "New MySQL",
+                    "localhost",
+                    3306,
+                    None,
+                    "user",
+                    "secret",
+                    MySqlSslMode::Preferred,
+                )
+                .unwrap(),
+                DatabaseType::SQLite => {
+                    ConnectionProfile::new_sqlite("New SQLite", "./new.sqlite").unwrap()
+                }
+            };
+
+            store.save(&new_profile).unwrap();
+
+            let reloaded = store.load_all().unwrap();
+            assert_eq!(&reloaded[..3], original.as_slice());
+            assert_eq!(reloaded[3], new_profile);
+            let content = fs::read_to_string(path).unwrap();
+            let saved: ConnectionConfigFile = toml::from_str(&content).unwrap();
+            assert_eq!(saved.version, CURRENT_VERSION);
+            assert_eq!(saved.theme.as_deref(), Some("light"));
+            assert_eq!(saved.keymap_preset.as_deref(), Some("ide"));
+            assert_eq!(saved.er_browser.as_deref(), Some("Firefox"));
+            assert!(!content.contains("database_type ="));
+            assert_eq!(saved.connections[1].db_type, DatabaseType::MySQL);
+            assert_eq!(saved.connections[2].db_type, DatabaseType::SQLite);
+            assert_eq!(
+                saved.connections[2].path.as_deref(),
+                Some("./saved db/app.sqlite")
+            );
+            assert_eq!(saved.connections[2].database, None);
+        }
+    }
+
     mod loading {
         use super::*;
 

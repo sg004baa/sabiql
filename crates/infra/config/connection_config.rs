@@ -12,7 +12,7 @@ use crate::domain::connection::{
 };
 
 pub(crate) const CURRENT_VERSION: u32 = 3;
-// Version 2 remains readable because older config files omit db_type and map to PostgreSQL.
+// Version 2 includes upstream PostgreSQL entries and the fork's database_type entries.
 const SUPPORTED_CONFIG_VERSIONS: &[u32] = &[2, CURRENT_VERSION];
 
 pub(crate) fn is_supported_config_version(version: u32) -> bool {
@@ -36,11 +36,11 @@ pub(crate) struct ConnectionConfigFile {
     pub connections: Vec<ConnectionConfigEntry>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ConnectionConfigEntry {
     pub id: String,
     pub name: String,
-    #[serde(default)]
+    #[serde(default, alias = "database_type")]
     pub db_type: DatabaseType,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
@@ -103,7 +103,19 @@ impl TryFrom<&ConnectionConfigFile> for Vec<ConnectionProfile> {
         config
             .connections
             .iter()
-            .map(ConnectionProfile::try_from)
+            .map(|entry| {
+                // The fork's v2 SQLite profiles stored the file path in database.
+                // Keep v3 validation strict and never rewrite the file on read.
+                if config.version == 2
+                    && entry.db_type == DatabaseType::SQLite
+                    && entry.path.is_none()
+                {
+                    let mut migrated = entry.clone();
+                    migrated.path.clone_from(&entry.database);
+                    return ConnectionProfile::try_from(&migrated);
+                }
+                ConnectionProfile::try_from(entry)
+            })
             .collect()
     }
 }
@@ -409,6 +421,23 @@ mod tests {
 
         assert!(matches!(
             result,
+            Err(ConnectionProfileError::SqliteConfig(
+                SqliteConnectionConfigError::EmptyPath
+            ))
+        ));
+    }
+
+    #[test]
+    fn v3_sqlite_entry_does_not_treat_database_as_legacy_path() {
+        let mut entry = sqlite_entry(None);
+        entry.database = Some("./legacy.sqlite".to_string());
+        let config = ConnectionConfigFile {
+            connections: vec![entry],
+            ..Default::default()
+        };
+
+        assert!(matches!(
+            Vec::<ConnectionProfile>::try_from(&config),
             Err(ConnectionProfileError::SqliteConfig(
                 SqliteConnectionConfigError::EmptyPath
             ))

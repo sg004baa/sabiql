@@ -15,5 +15,6 @@ The fork incorporates `riii111/sabiql` through `52781c60e2f3d5a73ca0c7a2ba57559a
 - `Tab` / `Shift+Tab` and `>` / `<` cycle panes; `/` opens the table picker and `Ctrl+K` opens settings. Inspector tabs use `[` / `]` to keep pane cycling available.
 - Result columns retain the 50-cell width cap. Newlines, tabs and other control characters render as visible escapes, and marked rows retain their highlight.
 - The fork's Homebrew/release configuration and self-update repository remain `sg004baa/sabiql`.
+- Existing fork v2 connection files retain their database types (`database_type`) and SQLite paths stored in `database`. Reading leaves the original file intact; a successful save writes the canonical v3 format while preserving existing connections and application settings.
 
 The remaining engine behavior, feature policies and keymap presets follow upstream v3.0.1.
