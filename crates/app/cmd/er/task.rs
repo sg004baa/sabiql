@@ -189,7 +189,9 @@ mod tests {
                 None,
             );
 
-            let action = recv_action_with_timeout(&mut rx, Duration::from_secs(1)).await;
+            // Windows can spend several seconds symbolizing the intentional
+            // panic's backtrace before Tokio delivers the failed-task action.
+            let action = recv_action_with_timeout(&mut rx, Duration::from_secs(10)).await;
             match action {
                 Action::ErDiagramFailed { run_id, error } => {
                     assert!(error.contains("Task panicked"));
