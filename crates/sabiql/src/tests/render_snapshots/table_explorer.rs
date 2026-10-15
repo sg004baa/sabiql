@@ -190,3 +190,30 @@ fn mysql_header_and_explorer_show_table_names() {
 
     insta::assert_snapshot!(output);
 }
+
+#[test]
+fn mysql_server_connection_disambiguates_database_names() {
+    let mut state = create_test_state();
+    state.session.activate_connection_with_target(
+        &ConnectionId::from_string("mysql-server"),
+        "mysql",
+        DatabaseType::MySQL,
+        "mysql://user@localhost:3306/?ssl-mode=PREFERRED",
+        None,
+    );
+    let mut metadata = DatabaseMetadata::new("(all databases)".to_string());
+    metadata.table_summaries = vec![
+        TableSummary::new("app".to_string(), "users".to_string(), None, false),
+        TableSummary::new("archive".to_string(), "users".to_string(), None, false),
+    ];
+    state.session.mark_connected(Arc::new(metadata));
+    assert_eq!(state.table_display_name("app", "users"), "app.users");
+    assert_eq!(
+        state.table_display_name("archive", "users"),
+        "archive.users"
+    );
+
+    let mut terminal = create_test_terminal();
+    let output = render_to_string(&mut terminal, &mut state);
+    insta::assert_snapshot!(output);
+}

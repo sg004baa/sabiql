@@ -33,7 +33,6 @@ pub async fn run_mysql_cli_query_for_test(
     let option_file = MySqlOptionFile::create(&target)?;
     let args = [
         format!("--defaults-file={}", option_file.path.display()),
-        "--no-login-paths".to_string(),
         "--connect-timeout=10".to_string(),
         "--skip-reconnect".to_string(),
         "--batch".to_string(),

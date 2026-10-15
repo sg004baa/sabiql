@@ -14,7 +14,11 @@ mod xml;
 use tokio::process::Command;
 
 pub(super) fn sanitize_mysql_command_environment(command: &mut Command) {
+    // Even --no-defaults / --defaults-file can load .mylogin.cnf. Redirect it
+    // explicitly: --no-login-paths is unavailable in MySQL 8.0 clients.
+    let empty_login_file = if cfg!(windows) { "NUL" } else { "/dev/null" };
     command
+        .env("MYSQL_TEST_LOGIN_FILE", empty_login_file)
         .env_remove("MYSQL_PWD")
         .env_remove("MYSQL_PASSWORD")
         .env_remove("LIBMYSQL_ENABLE_CLEARTEXT_PLUGIN");
@@ -48,10 +52,16 @@ mod tests {
         command
             .env("MYSQL_PWD", "password")
             .env("MYSQL_PASSWORD", "password")
+            .env("MYSQL_TEST_LOGIN_FILE", "/ambient/login.cnf")
             .env("LIBMYSQL_ENABLE_CLEARTEXT_PLUGIN", "1")
             .env("SABIQL_TEST_ENVIRONMENT", "preserved");
 
         sanitize_mysql_command_environment(&mut command);
+
+        assert!(command.as_std().get_envs().any(|(key, value)| {
+            key == OsStr::new("MYSQL_TEST_LOGIN_FILE")
+                && value == Some(OsStr::new(if cfg!(windows) { "NUL" } else { "/dev/null" }))
+        }));
 
         for name in [
             "MYSQL_PWD",

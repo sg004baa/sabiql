@@ -341,7 +341,15 @@ impl CompletionEngine {
             };
             seen.insert(key)
         });
-        quote_mysql_identifiers(&mut candidates, scope.database_type);
+        let qualified_tables = (scope.database_type == DatabaseType::MySQL
+            && scope.active_database.is_none()
+            && matches!(
+                context,
+                CompletionContext::Table | CompletionContext::CteOrTable
+            ))
+        .then_some(metadata)
+        .flatten();
+        quote_mysql_identifiers(&mut candidates, scope.database_type, qualified_tables);
 
         candidates
     }
@@ -808,7 +816,9 @@ impl CompletionEngine {
                         10
                     };
                     CompletionCandidate {
-                        text: if scope.database_type == DatabaseType::MySQL {
+                        text: if scope.database_type == DatabaseType::MySQL
+                            && scope.active_database.is_some()
+                        {
                             t.name.clone()
                         } else {
                             t.qualified_name()
@@ -1074,7 +1084,9 @@ impl CompletionEngine {
                 {
                     let is_name_prefix = t.name.to_lowercase().starts_with(&prefix_lower);
                     candidates.push(CompletionCandidate {
-                        text: if scope.database_type == DatabaseType::MySQL {
+                        text: if scope.database_type == DatabaseType::MySQL
+                            && scope.active_database.is_some()
+                        {
                             t.name.clone()
                         } else {
                             t.qualified_name()
@@ -1221,12 +1233,31 @@ fn is_completion_keyword_for_database(database_type: DatabaseType, keyword: &str
     }
 }
 
-fn quote_mysql_identifiers(candidates: &mut [CompletionCandidate], database_type: DatabaseType) {
+fn quote_mysql_identifiers(
+    candidates: &mut [CompletionCandidate],
+    database_type: DatabaseType,
+    qualified_tables: Option<&DatabaseMetadata>,
+) {
     if database_type != DatabaseType::MySQL {
         return;
     }
 
     for candidate in candidates {
+        if candidate.kind == CompletionKind::Table
+            && let Some(table) = qualified_tables.and_then(|metadata| {
+                metadata
+                    .table_summaries
+                    .iter()
+                    .find(|table| table.qualified_name() == candidate.text)
+            })
+        {
+            candidate.text = format!(
+                "`{}`.`{}`",
+                table.schema.replace('`', "``"),
+                table.name.replace('`', "``"),
+            );
+            continue;
+        }
         if matches!(
             candidate.kind,
             CompletionKind::Database | CompletionKind::Table | CompletionKind::Column
@@ -1816,6 +1847,35 @@ mod tests {
                 false,
             )];
             metadata
+        }
+
+        #[test]
+        fn server_connection_completion_qualifies_and_quotes_each_identifier() {
+            let e = engine();
+            let mut metadata = metadata();
+            metadata.table_summaries = vec![
+                TableSummary::new("app.db".to_string(), "order`items".to_string(), None, false),
+                TableSummary::new(
+                    "archive".to_string(),
+                    "order`items".to_string(),
+                    None,
+                    false,
+                ),
+            ];
+            let sql = "SELECT * FROM ";
+            let candidates = e.get_candidates_for_database(
+                sql,
+                sql.len(),
+                Some(&metadata),
+                None,
+                CompletionDatabaseScope {
+                    database_type: DatabaseType::MySQL,
+                    active_database: None,
+                },
+            );
+            for name in ["`app.db`.`order``items`", "`archive`.`order``items`"] {
+                assert!(candidates.iter().any(|candidate| candidate.text == name));
+            }
         }
 
         #[test]

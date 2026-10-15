@@ -407,10 +407,7 @@ pub(in crate::update) fn validate_field(state: &mut ConnectionSetupState, field:
             }
         }
         ConnectionField::Database => {
-            if matches!(
-                state.database_type(),
-                DatabaseType::PostgreSQL | DatabaseType::MySQL
-            ) {
+            if state.database_type() == DatabaseType::PostgreSQL {
                 require_non_empty(state, field, "Required");
             }
         }
@@ -752,7 +749,7 @@ mod tests {
     }
 
     #[test]
-    fn mysql_validation_requires_host_user_and_database() {
+    fn mysql_validation_requires_host_and_user_but_allows_empty_database() {
         let mut state = ConnectionSetupState::default();
         state.set_database_type(DatabaseType::MySQL);
         state
@@ -774,10 +771,7 @@ mod tests {
             state.validation_error(ConnectionField::User),
             Some("Required")
         );
-        assert_eq!(
-            state.validation_error(ConnectionField::Database),
-            Some("Required")
-        );
+        assert_eq!(state.validation_error(ConnectionField::Database), None);
     }
 
     #[test]

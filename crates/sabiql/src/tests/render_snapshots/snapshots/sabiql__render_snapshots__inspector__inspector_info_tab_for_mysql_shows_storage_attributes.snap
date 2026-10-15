@@ -1,9 +1,9 @@
 ---
 source: crates/sabiql/src/tests/render_snapshots/inspector.rs
-assertion_line: 476
+assertion_line: 480
 expression: output
 ---
-test_project ▸ test_db ▸ -                                                                                                                            connected | app
+test_project ▸ app ▸ -                                                                                                                                connected | app
 ┌ [1] Explorer ─────────────────────────┐[Info] [Cols] [Idx] [FK] [Trig] [DDL]
 │> users                                │┌ [2] Inspector ───────────────────────────────────────────────────────────────────────────────────────────────────────────┐
 │  posts                                ││Comment: User accounts                                                                                                    │

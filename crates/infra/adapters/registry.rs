@@ -270,21 +270,10 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn mysql_dsn_requires_a_selected_database_for_metadata() {
-        let registry = DbAdapterRegistry::new();
-
-        let result = registry.fetch_metadata("mysql://localhost").await;
-
-        assert!(matches!(
-            result,
-            Err(DbOperationError::UnsupportedOperation(_))
-        ));
-    }
-
     #[rstest]
     #[case::sqlite_url("sqlite:///tmp/app.db", Some(DatabaseType::SQLite))]
     #[case::mysql_url("mysql://localhost/db", Some(DatabaseType::MySQL))]
+    #[case::mysql_server_url("mysql://localhost", Some(DatabaseType::MySQL))]
     #[case::postgres_url("postgres://localhost/db", Some(DatabaseType::PostgreSQL))]
     #[case::postgres_conninfo("host='localhost' dbname='db'", Some(DatabaseType::PostgreSQL))]
     #[case::unsupported_scheme("redis://localhost", None)]

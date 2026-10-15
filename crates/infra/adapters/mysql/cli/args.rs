@@ -5,7 +5,6 @@ pub(super) const MYSQL_CLIENT_MAX_PACKET_BYTES: usize = 32 * 1024 * 1024;
 pub(super) fn mysql_connection_args(option_file: &Path) -> Vec<String> {
     vec![
         format!("--defaults-file={}", option_file.display()),
-        "--no-login-paths".to_string(),
         "--connect-timeout=10".to_string(),
         "--skip-reconnect".to_string(),
     ]
@@ -65,14 +64,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn connection_arguments_keep_defaults_file_first_and_disable_login_paths() {
+    fn connection_arguments_keep_defaults_file_first() {
         let args = mysql_connection_args(Path::new("/tmp/sabiql-mysql.cnf"));
 
         assert_eq!(
             args,
             vec![
                 "--defaults-file=/tmp/sabiql-mysql.cnf",
-                "--no-login-paths",
                 "--connect-timeout=10",
                 "--skip-reconnect",
             ]
@@ -87,7 +85,6 @@ mod tests {
             args,
             vec![
                 "--defaults-file=/tmp/sabiql-mysql.cnf",
-                "--no-login-paths",
                 "--connect-timeout=10",
                 "--skip-reconnect",
                 "--xml",
@@ -113,7 +110,6 @@ mod tests {
             args,
             vec![
                 "--defaults-file=/tmp/sabiql-mysql.cnf",
-                "--no-login-paths",
                 "--connect-timeout=10",
                 "--skip-reconnect",
                 "--batch",
@@ -138,7 +134,6 @@ mod tests {
             args,
             vec![
                 "--defaults-file=/tmp/sabiql-mysql.cnf",
-                "--no-login-paths",
                 "--connect-timeout=10",
                 "--skip-reconnect",
                 "--xml",

@@ -8,7 +8,7 @@ use crate::domain::{
 };
 
 use super::super::cli::{MYSQL_QUERY_TIMEOUT, MySqlResultSet};
-use super::super::dsn::parse_and_validate_mysql_dsn;
+use super::super::dsn::{MySqlDsn, parse_and_validate_mysql_dsn};
 use super::super::sql::{
     FOREIGN_KEY_RESULT_COLUMNS, SIGNATURE_COLUMNS_QUERY, SIGNATURE_COLUMNS_RESULT_COLUMNS,
     SIGNATURE_FOREIGN_KEYS_QUERY, SIGNATURE_UNIQUE_COLUMNS_QUERY,
@@ -41,9 +41,38 @@ async fn fetch_table_signatures_with_program(
     timeout: Duration,
 ) -> Result<TableSignatureSnapshot, DbOperationError> {
     let target = parse_and_validate_mysql_dsn(dsn)?;
-    let database = selected_database(&target)?;
+    if target.database.is_some() {
+        return fetch_selected_table_signatures(&target, program, timeout).await;
+    }
+    // Scope each signature batch to one database so identically named tables in
+    // different databases retain independent columns, keys, and cache entries.
+    let metadata = super::catalog::fetch_server_metadata(&target).await?;
+    let mut snapshot = TableSignatureSnapshot {
+        signatures: Vec::new(),
+        prefetched_table_details: Vec::new(),
+    };
+    for schema in metadata.schemas {
+        let scoped_target = MySqlDsn {
+            database: Some(schema.name),
+            ..target.clone()
+        };
+        let batch = fetch_selected_table_signatures(&scoped_target, program, timeout).await?;
+        snapshot.signatures.extend(batch.signatures);
+        snapshot
+            .prefetched_table_details
+            .extend(batch.prefetched_table_details);
+    }
+    Ok(snapshot)
+}
+
+async fn fetch_selected_table_signatures(
+    target: &MySqlDsn,
+    program: &OsStr,
+    timeout: Duration,
+) -> Result<TableSignatureSnapshot, DbOperationError> {
+    let database = selected_database(target)?;
     let (capabilities, results) = execute_metadata_queries_in_session_with_program(
-        &target,
+        target,
         &[
             (TABLES_QUERY, TABLES_RESULT_COLUMNS),
             (SIGNATURE_COLUMNS_QUERY, SIGNATURE_COLUMNS_RESULT_COLUMNS),

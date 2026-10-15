@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use crate::app::ports::outbound::DbOperationError;
 use crate::domain::{
-    Column, ColumnAttributes, ColumnGenerationKind, FkAction, ForeignKey, QueryValue, TableKind,
-    TableKindInfo, TableStorageAttributes, TableSummary,
+    Column, ColumnAttributes, ColumnGenerationKind, DatabaseMetadata, FkAction, ForeignKey,
+    QueryValue, Schema, TableKind, TableKindInfo, TableStorageAttributes, TableSummary,
 };
 
 use super::super::{
@@ -87,6 +87,44 @@ pub(super) async fn fetch_metadata_snapshot(
     let (lower_case_table_names, result) =
         execute_metadata_query(target, TABLES_QUERY, TABLES_RESULT_COLUMNS).await?;
     metadata_snapshot_from_result(database, None, &result, lower_case_table_names)
+}
+
+const USER_DATABASES_QUERY: &str = "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME NOT IN ('mysql', 'information_schema', 'performance_schema', 'sys') ORDER BY SCHEMA_NAME";
+
+pub(super) async fn fetch_server_metadata(
+    target: &MySqlDsn,
+) -> Result<DatabaseMetadata, DbOperationError> {
+    let tables_query = TABLES_QUERY.replace(
+        "TABLE_SCHEMA = DATABASE()",
+        "TABLE_SCHEMA NOT IN ('mysql', 'information_schema', 'performance_schema', 'sys')",
+    );
+    let (_, results) = execute_metadata_queries_in_session(
+        target,
+        &[
+            (USER_DATABASES_QUERY, &["SCHEMA_NAME"]),
+            (&tables_query, TABLES_RESULT_COLUMNS),
+        ],
+    )
+    .await?;
+    let mut metadata = DatabaseMetadata::new("(all databases)".to_string());
+    expect_columns(&results[0], &["SCHEMA_NAME"])?;
+    metadata.schemas = results[0]
+        .values
+        .iter()
+        .map(|row| {
+            if row.len() != 1 {
+                return Err(metadata_shape_error("SCHEMATA row"));
+            }
+            Ok(Schema::new(
+                required_text(&row[0], "SCHEMA_NAME")?.to_string(),
+            ))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    metadata.table_summaries = parse_table_metadata(&results[1])?
+        .into_iter()
+        .map(table_summary)
+        .collect();
+    Ok(metadata)
 }
 
 fn mysql_table_not_found(schema: &str, table: &str) -> DbOperationError {

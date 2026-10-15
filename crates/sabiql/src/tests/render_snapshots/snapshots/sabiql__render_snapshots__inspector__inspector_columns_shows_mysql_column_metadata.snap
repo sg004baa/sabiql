@@ -1,9 +1,9 @@
 ---
 source: crates/sabiql/src/tests/render_snapshots/inspector.rs
-assertion_line: 113
+assertion_line: 114
 expression: output
 ---
-test_project ▸ test_db ▸ -                                                                                                                            connected | app
+test_project ▸ app ▸ -                                                                                                                                connected | app
 ┌ [1] Explorer ─────────────────────────┐[Info] [Cols] [Idx] [FK] [Trig] [DDL]
 │> users                                │┌ [2] Inspector ───────────────────────────────────────────────────────────────────────────────────────────────────────────┐
 │  posts                                ││Name    Type           Null   PK   Read-only   Default   Comment       Charset   Collation     Generation                 │

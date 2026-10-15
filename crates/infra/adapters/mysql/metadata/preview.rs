@@ -18,7 +18,7 @@ use super::super::{
 };
 use super::catalog::{
     MySqlColumnMetadata, column_from_metadata, parse_preview_columns_for_table, primary_key_names,
-    selected_database, validate_selected_schema_name,
+    validate_selected_schema_name,
 };
 
 #[derive(Debug, Clone)]
@@ -68,8 +68,15 @@ async fn execute_preview_with_program(
     program: &OsStr,
     timeout: Duration,
 ) -> Result<PreviewExecution, DbOperationError> {
-    let target = parse_and_validate_mysql_dsn(dsn)?;
-    let database = selected_database(&target)?;
+    let mut target = parse_and_validate_mysql_dsn(dsn)?;
+    // A table operation has an explicit schema even when the connection itself
+    // is server-wide. Bind this process so DATABASE(), key discovery, and
+    // SHOW CREATE all describe that table's database.
+    target.database.get_or_insert_with(|| schema.to_string());
+    let database = target
+        .database
+        .as_deref()
+        .expect("table database is selected");
     let option_file = MySqlOptionFile::create(&target)?;
     let mut session = MySqlMetadataSession::spawn_with_program(program, option_file)?;
     let result = tokio::time::timeout(

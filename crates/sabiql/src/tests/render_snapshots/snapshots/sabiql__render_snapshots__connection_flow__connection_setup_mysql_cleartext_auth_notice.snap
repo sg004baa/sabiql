@@ -1,5 +1,5 @@
 ---
-source: src/tests/render_snapshots/connection_flow.rs
+source: crates/sabiql/src/tests/render_snapshots/connection_flow.rs
 expression: output
 ---
 test_project ▸ - ▸ -                                                                                                                 not loaded | localhost:5432/test
@@ -24,7 +24,7 @@ test_project ▸ - ▸ -                                                        
 │                                       ││          │  Transport:  [ TCP                      ▼ ]                │                                                  │
 │                                       ││          │  Host:       [ localhost                  ]                │                                                  │
 │                                       ││          │  Port:       [ 3306                       ]                │                                                  │
-│                                       ││          │  Database:   [                            ]                │                                                  │
+│                                       ││          │  Database:   [ empty = all databases      ]                │                                                  │
 │                                       ││          │  User:       [                            ]                │                                                  │
 │                                       │└──────────│  Password:   [ empty = no password        ]                │──────────────────────────────────────────────────┘
 │                                       │┌ [3] Resul│  SSL Mode:   [ PREFERRED                ▼ ]                │──────────────────────────────────────────────────┐

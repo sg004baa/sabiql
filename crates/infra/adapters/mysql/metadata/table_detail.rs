@@ -25,7 +25,7 @@ use super::catalog::{
     foreign_keys_from_metadata, mark_single_column_unique, metadata_shape_error,
     metadata_snapshot_from_result, optional_text, parse_boolean_flag, parse_foreign_key_metadata,
     parse_optional_positive_i32, parse_positive_i32, parse_unique_column_metadata,
-    primary_key_names, required_text, selected_database,
+    primary_key_names, required_text,
 };
 
 #[derive(Debug, Clone)]
@@ -72,8 +72,15 @@ async fn fetch_table_columns_and_fks_with_program(
     program: &OsStr,
     timeout: Duration,
 ) -> Result<Table, DbOperationError> {
-    let target = parse_and_validate_mysql_dsn(dsn)?;
-    let database = selected_database(&target)?;
+    let mut target = parse_and_validate_mysql_dsn(dsn)?;
+    // A table operation has an explicit schema even when the connection itself
+    // is server-wide. Bind this process so DATABASE(), key discovery, and
+    // SHOW CREATE all describe that table's database.
+    target.database.get_or_insert_with(|| schema.to_string());
+    let database = target
+        .database
+        .as_deref()
+        .expect("table database is selected");
     let option_file = MySqlOptionFile::create(&target)?;
     let mut session = MySqlMetadataSession::spawn_with_metadata_program(program, option_file)?;
     let result = tokio::time::timeout(timeout, async {
@@ -140,8 +147,15 @@ async fn fetch_table_detail_with_program(
     program: &OsStr,
     timeout: Duration,
 ) -> Result<Table, DbOperationError> {
-    let target = parse_and_validate_mysql_dsn(dsn)?;
-    let database = selected_database(&target)?;
+    let mut target = parse_and_validate_mysql_dsn(dsn)?;
+    // A table operation has an explicit schema even when the connection itself
+    // is server-wide. Bind this process so DATABASE(), key discovery, and
+    // SHOW CREATE all describe that table's database.
+    target.database.get_or_insert_with(|| schema.to_string());
+    let database = target
+        .database
+        .as_deref()
+        .expect("table database is selected");
     let option_file = MySqlOptionFile::create(&target)?;
     let mut session = MySqlMetadataSession::spawn_with_metadata_program(program, option_file)?;
     let result = tokio::time::timeout(

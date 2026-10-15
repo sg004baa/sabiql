@@ -9,6 +9,7 @@ use crate::domain::connection::{
 
 use super::adapter::MySqlAdapter;
 
+#[derive(Clone)]
 pub(super) struct MySqlDsn {
     pub(super) transport: MySqlTransport,
     pub(super) transport_path: Option<String>,

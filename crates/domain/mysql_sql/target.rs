@@ -42,8 +42,10 @@ pub(super) fn target_is_selected_database_with_lower_case_table_names(
         (Some(target_database), Some(selected)) => {
             database_names_match(target_database, selected, lower_case_table_names)
         }
-        (None, Some(_)) => true,
-        (Some(_) | None, None) => false,
+        // A server-wide connection has no implicit database. Require an
+        // explicitly qualified target instead of guessing a default database.
+        (None, Some(_)) | (Some(_), None) => true,
+        (None, None) => false,
     }
 }
 
@@ -216,6 +218,24 @@ mod tests {
             classify_mysql_multi_statement,
             classify_mysql_multi_statement_with_lower_case_table_names,
         };
+
+        #[test]
+        fn server_connection_requires_qualified_write_targets() {
+            for sql in [
+                "UPDATE app.items SET value = 1 WHERE id = 1",
+                "DELETE FROM archive.items WHERE id = 1",
+                "CREATE TABLE app.items (id INT PRIMARY KEY)",
+            ] {
+                assert!(classify_mysql_multi_statement(sql, None).is_ok(), "{sql}");
+            }
+            for sql in [
+                "UPDATE items SET value = 1 WHERE id = 1",
+                "DELETE FROM items WHERE id = 1",
+                "CREATE TABLE items (id INT PRIMARY KEY)",
+            ] {
+                assert!(classify_mysql_multi_statement(sql, None).is_err(), "{sql}");
+            }
+        }
 
         #[test]
         fn ddl_rejects_a_different_database() {

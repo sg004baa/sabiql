@@ -274,11 +274,67 @@ mod metadata_fetch {
 
     use super::shared::{MYSQL_COMPOSITE_TABLE, MYSQL_VIEW};
     use crate::tests::harness::mysql::{
-        MYSQL_FIXTURE_TABLE, mysql_integration_config, with_mysql_test_db,
+        MYSQL_FIXTURE_TABLE, MySqlTestDb, mysql_integration_config, with_mysql_test_db,
     };
     use sabiql_app::ports::outbound::{AccessMode, DdlGenerator, MetadataProvider, QueryExecutor};
     use sabiql_domain::{FkAction, IndexType, TableKind, TriggerEvent, TriggerTiming};
     use sabiql_infra::adapters::DbAdapterRegistry;
+
+    #[tokio::test]
+    #[ignore = "requires Oracle MySQL 8.4 server and CLI"]
+    async fn server_connection_without_database_browses_both_databases() -> Result<(), String> {
+        use sabiql_app::ports::outbound::{DsnBuilder, MySqlConnectionProbe};
+        use sabiql_domain::connection::{ConnectionConfig, ConnectionId, ConnectionProfile};
+        use sabiql_infra::adapters::mysql::MySqlAdapter;
+
+        let db = MySqlTestDb::setup().map_err(|error| format!("{error:?}"))?;
+        db.run_cli_script(
+            "DROP TABLE IF EXISTS sabiql_test.mysql_server_scope_same_name; DROP TABLE IF EXISTS SABIQL_TEST.mysql_server_scope_same_name; CREATE TABLE sabiql_test.mysql_server_scope_same_name (id INT PRIMARY KEY, main_value INT UNIQUE); \
+             CREATE TABLE SABIQL_TEST.mysql_server_scope_same_name (id INT PRIMARY KEY, other_value TEXT); \
+             INSERT INTO sabiql_test.mysql_server_scope_same_name VALUES (1, 42); \
+             INSERT INTO SABIQL_TEST.mysql_server_scope_same_name VALUES (2, 'other database')",
+        ).await?;
+        let mut config = mysql_integration_config();
+        config.database = None;
+        let profile = ConnectionProfile::with_id_and_config(
+            ConnectionId::new(),
+            "mysql-server",
+            ConnectionConfig::MySQL(config),
+        )
+        .unwrap();
+        let adapter = MySqlAdapter::new();
+        let dsn = adapter.build_dsn(&profile);
+        let result = async {
+            adapter.probe(&dsn).await.map_err(|error| format!("{error:?}"))?;
+            let metadata = DbAdapterRegistry::new().fetch_metadata(&dsn).await.map_err(|error| format!("{error:?}"))?;
+            assert_eq!(metadata.database_name, "(all databases)");
+            assert!(metadata.schemas.iter().any(|schema| schema.name == "sabiql_test"));
+            assert!(metadata.schemas.iter().any(|schema| schema.name == "SABIQL_TEST"));
+            assert!(!metadata.schemas.iter().any(|schema| matches!(schema.name.as_str(), "mysql" | "sys" | "information_schema" | "performance_schema")));
+            let signatures = adapter.fetch_table_signatures(&dsn).await.map_err(|error| format!("{error:?}"))?;
+            for (schema, column, value) in [
+                ("sabiql_test", "main_value", "42"),
+                ("SABIQL_TEST", "other_value", "other database"),
+            ] {
+                assert!(metadata.table_summaries.iter().any(|table| table.schema == schema && table.name == "mysql_server_scope_same_name"));
+                let cached = signatures.prefetched_table_details.iter().find(|table| table.schema == schema && table.name == "mysql_server_scope_same_name").unwrap();
+                assert_eq!(cached.columns[1].name, column);
+                let detail = adapter.fetch_table_detail(&dsn, schema, "mysql_server_scope_same_name").await.map_err(|error| format!("{error:?}"))?;
+                assert_eq!(detail.columns[1].name, column);
+                assert_eq!(detail.primary_key.as_deref(), Some(["id".to_string()].as_slice()));
+                assert_eq!(detail.columns[1].is_unique(), schema == "sabiql_test");
+                let light = adapter.fetch_table_columns_and_fks(&dsn, schema, "mysql_server_scope_same_name").await.map_err(|error| format!("{error:?}"))?;
+                assert_eq!(light.columns[1].name, column);
+                let preview = adapter.execute_preview(&dsn, schema, "mysql_server_scope_same_name", 10, 0).await.map_err(|error| format!("{error:?}"))?;
+                assert_eq!(preview.values()[0][1].as_str(), Some(value));
+            }
+            adapter.execute_adhoc(&dsn, "UPDATE sabiql_test.mysql_server_scope_same_name SET main_value = 43 WHERE id = 1", AccessMode::ReadWrite).await.map_err(|error| format!("{error:?}"))?;
+            assert!(adapter.execute_adhoc(&dsn, "UPDATE mysql_server_scope_same_name SET main_value = 0 WHERE id = 1", AccessMode::ReadWrite).await.is_err());
+            Ok(())
+        }.await;
+        db.run_cli_script("DROP TABLE IF EXISTS sabiql_test.mysql_server_scope_same_name; DROP TABLE IF EXISTS SABIQL_TEST.mysql_server_scope_same_name").await?;
+        result
+    }
 
     const MYSQL_FK_PARENT: &str = "mysql_metadata_parent";
     const MYSQL_FK_CHILD: &str = "mysql_metadata_child";

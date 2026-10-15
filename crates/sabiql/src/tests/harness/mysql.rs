@@ -1,5 +1,7 @@
 use sabiql_app::ports::outbound::{DbOperationError, DsnBuilder};
-use sabiql_domain::connection::{ConnectionProfile, MySqlConnectionConfig, MySqlSslMode};
+use sabiql_domain::connection::{
+    ConnectionConfig, ConnectionId, ConnectionProfile, MySqlConnectionConfig, MySqlSslMode,
+};
 use sabiql_infra::adapters::mysql::MySqlAdapter;
 use sabiql_infra::adapters::mysql::test_support::run_mysql_cli_query_for_test;
 #[cfg(unix)]
@@ -17,14 +19,10 @@ pub struct MySqlTestDb {
 impl MySqlTestDb {
     pub fn setup() -> Result<Self, DbOperationError> {
         let config = mysql_integration_config();
-        let profile = ConnectionProfile::new_mysql(
+        let profile = ConnectionProfile::with_id_and_config(
+            ConnectionId::new(),
             "mysql-integration",
-            config.host.clone(),
-            config.port,
-            config.database.clone(),
-            config.username.clone(),
-            config.password.clone(),
-            config.ssl_mode,
+            ConnectionConfig::MySQL(config),
         )
         .map_err(|error| DbOperationError::ConnectionFailed(error.to_string()))?;
         let adapter = MySqlAdapter::new();
@@ -56,7 +54,7 @@ impl MySqlTestDb {
     async fn run_cli(&self, query: &str) -> Result<String, String> {
         run_mysql_cli_query_for_test(&self.dsn, query)
             .await
-            .map_err(|error| error.to_string())
+            .map_err(|error| format!("{error:?}"))
     }
 
     #[cfg(unix)]

@@ -27,14 +27,14 @@ use crate::model::shared::render_output::{
 };
 use crate::model::shared::settings::SettingsState;
 use crate::model::shared::text_input::TextInputState;
-use crate::model::shared::ui_state::{UiState, scroll_max_offset};
+use crate::model::shared::ui_state::{UiState, scroll_max_offset, text_display_width};
 use crate::model::sql_editor::modal::SqlModalContext;
 use crate::model::sql_editor::query_history::QueryHistoryPickerState;
 use crate::model::sqlite::diagnostics::SqliteDiagnosticsState;
 use crate::model::table_prefetch::TablePrefetchState;
 use crate::policy::preview_cell_text::CellPresentationPolicy;
 use crate::policy::sql::result_query::is_rerunnable_select;
-use crate::policy::table_kind::max_explorer_table_label_width;
+use crate::policy::table_kind::{explorer_table_label, table_display_name};
 use crate::policy::write::inline_cell_edit::supports_inline_edit;
 use crate::policy::write::write_guardrails::{
     PreviewWriteability, preview_writeability_for_result,
@@ -182,10 +182,7 @@ impl AppState {
             .set_explorer_pane_height(layout.explorer.pane_height);
         self.ui
             .set_explorer_content_width(layout.explorer.content_width);
-        let max_name_width = max_explorer_table_label_width(
-            self.tables(),
-            self.session.active_database_type_or_default(),
-        );
+        let max_name_width = self.max_explorer_table_label_width();
         let max_offset = scroll_max_offset(max_name_width, self.ui.explorer_content_width());
         self.ui
             .set_explorer_horizontal_offset(self.ui.explorer_horizontal_offset().min(max_offset));
@@ -298,6 +295,32 @@ impl AppState {
 
     pub fn tables(&self) -> &[TableSummary] {
         self.session.tables()
+    }
+
+    pub fn table_display_name(&self, schema: &str, name: &str) -> String {
+        let database_type = self.session.active_database_type_or_default();
+        if database_type == DatabaseType::MySQL && self.session.active_database().is_none() {
+            return format!("{schema}.{name}");
+        }
+        table_display_name(database_type, schema, name)
+    }
+
+    pub fn explorer_table_label(&self, summary: &TableSummary) -> String {
+        let database_type = self.session.active_database_type_or_default();
+        let label = explorer_table_label(summary, database_type);
+        if database_type == DatabaseType::MySQL && self.session.active_database().is_none() {
+            format!("{}.{label}", summary.schema)
+        } else {
+            label
+        }
+    }
+
+    pub fn max_explorer_table_label_width(&self) -> usize {
+        self.tables()
+            .iter()
+            .map(|summary| text_display_width(&self.explorer_table_label(summary)))
+            .max()
+            .unwrap_or(0)
     }
 
     pub fn filtered_tables(&self) -> Vec<&TableSummary> {

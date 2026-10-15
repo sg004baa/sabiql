@@ -2,7 +2,6 @@ use crate::model::app_state::AppState;
 use crate::model::shared::focused_pane::FocusedPane;
 use crate::model::shared::key_sequence::KeySequenceState;
 use crate::model::shared::ui_state::scroll_max_offset;
-use crate::policy::table_kind::max_explorer_table_label_width;
 use crate::update::action::{
     Action, CursorPosition, ScrollAmount, ScrollDirection, ScrollTarget, ScrollToCursorTarget,
     SelectMotion,
@@ -170,10 +169,7 @@ pub(in crate::update) fn reduce_explorer(state: &mut AppState, action: &Action) 
             direction: ScrollDirection::Right,
             amount: ScrollAmount::Line,
         } => {
-            let max_name_width = max_explorer_table_label_width(
-                state.tables(),
-                state.session.active_database_type_or_default(),
-            );
+            let max_name_width = state.max_explorer_table_label_width();
             let max_offset = scroll_max_offset(max_name_width, state.ui.explorer_content_width());
             if state.ui.explorer_horizontal_offset() < max_offset {
                 state

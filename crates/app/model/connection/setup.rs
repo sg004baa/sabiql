@@ -99,6 +99,7 @@ impl ConnectionField {
         if database_type == DatabaseType::MySQL {
             return match self {
                 Self::Password => "empty = no password",
+                Self::Database => "empty = all databases",
                 _ => "",
             };
         }

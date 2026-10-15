@@ -310,7 +310,7 @@ mod tests {
         #[case(
             UnsupportedOperationKind::ClientVersion,
             "Unsupported MySQL CLI version",
-            "Install the Oracle MySQL 8.4 client; the MySQL CLI is required"
+            "Install an Oracle MySQL 8.0.19+ (8.x or 9.x) client; the MySQL CLI is required"
         )]
         #[case(
             UnsupportedOperationKind::ServerProduct,

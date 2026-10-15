@@ -53,6 +53,9 @@ pub(super) use preview::{convert_preview_values_with_binary_charset, execute_pre
 impl MetadataProvider for MySqlAdapter {
     async fn fetch_metadata(&self, dsn: &str) -> Result<DatabaseMetadata, DbOperationError> {
         let target = parse_and_validate_mysql_dsn(dsn)?;
+        if target.database.is_none() {
+            return catalog::fetch_server_metadata(&target).await;
+        }
         let database = catalog::selected_database(&target)?;
         let tables = catalog::fetch_metadata_snapshot(&target, database).await?;
         let mut metadata = DatabaseMetadata::new(database.to_string());

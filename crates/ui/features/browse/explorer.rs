@@ -9,7 +9,6 @@ use crate::app::model::shared::focused_pane::FocusedPane;
 use crate::app::model::shared::ui_state::{
     explorer_content_width_from_inner_width, scroll_max_offset, text_display_width,
 };
-use crate::app::policy::table_kind::{explorer_table_label, max_explorer_table_label_width};
 use crate::app::update::input::keybindings::global;
 use crate::domain::MetadataState;
 use crate::theme::ThemePalette;
@@ -44,17 +43,12 @@ impl Explorer {
             state
                 .tables()
                 .iter()
-                .map(|summary| {
-                    explorer_table_label(summary, state.session.active_database_type_or_default())
-                })
+                .map(|summary| state.explorer_table_label(summary))
                 .collect()
         } else {
             Vec::new()
         };
-        let max_name_width = max_explorer_table_label_width(
-            state.tables(),
-            state.session.active_database_type_or_default(),
-        );
+        let max_name_width = state.max_explorer_table_label_width();
         let max_offset = scroll_max_offset(max_name_width, content_width);
         let h_offset = state.ui.explorer_horizontal_offset().min(max_offset);
 

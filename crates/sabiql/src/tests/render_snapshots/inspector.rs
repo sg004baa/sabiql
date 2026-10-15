@@ -99,11 +99,12 @@ fn inspector_columns_shows_mysql_column_metadata() {
     table.columns[2].generation_expression = Some("(`id` * 2)".to_string());
     table.columns[2].generation_kind = Some(ColumnGenerationKind::Stored);
     let _ = state.session.set_table_detail(table, 0);
-    state.session.activate_connection_with_dsn(
+    state.session.activate_connection_with_target(
         &ConnectionId::from_string("mysql-test"),
         "app",
         DatabaseType::MySQL,
         "mysql://user@localhost:3306/app?ssl-mode=PREFERRED",
+        Some("app"),
     );
     state.ui.set_inspector_tab(InspectorTab::Columns);
     state.ui.set_focused_pane(FocusedPane::Inspector);
@@ -142,11 +143,12 @@ fn inspector_indexes_tab_for_mysql_hides_unsupported_partial_column() {
         ),
     }];
     let _ = state.session.set_table_detail(table, 0);
-    state.session.activate_connection_with_dsn(
+    state.session.activate_connection_with_target(
         &ConnectionId::from_string("mysql-test"),
         "app",
         DatabaseType::MySQL,
         "mysql://user@localhost:3306/app?ssl-mode=PREFERRED",
+        Some("app"),
     );
     state.ui.set_inspector_tab(InspectorTab::Indexes);
     state.ui.set_focused_pane(FocusedPane::Inspector);
@@ -435,11 +437,12 @@ fn inspector_info_tab_for_mysql_hides_schema_field() {
     let _ = state
         .session
         .set_table_detail(fixtures::sample_postgres_table_detail(), 0);
-    state.session.activate_connection_with_dsn(
+    state.session.activate_connection_with_target(
         &ConnectionId::from_string("mysql-test"),
         "app",
         DatabaseType::MySQL,
         "mysql://user@localhost:3306/app?ssl-mode=PREFERRED",
+        Some("app"),
     );
     state.ui.set_inspector_tab(InspectorTab::Info);
     state.ui.set_focused_pane(FocusedPane::Inspector);
@@ -462,11 +465,12 @@ fn inspector_info_tab_for_mysql_shows_storage_attributes() {
         create_options: Some("partitioned".to_string()),
     };
     let _ = state.session.set_table_detail(table, 0);
-    state.session.activate_connection_with_dsn(
+    state.session.activate_connection_with_target(
         &ConnectionId::from_string("mysql-test"),
         "app",
         DatabaseType::MySQL,
         "mysql://user@localhost:3306/app?ssl-mode=PREFERRED",
+        Some("app"),
     );
     state.ui.set_inspector_tab(InspectorTab::Info);
     state.ui.set_focused_pane(FocusedPane::Inspector);

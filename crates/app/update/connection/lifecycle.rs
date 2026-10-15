@@ -40,13 +40,6 @@ pub(in crate::update) fn reduce_connection_lifecycle(
                 database,
             } = target;
 
-            if *database_type == DatabaseType::MySQL && database.is_none() {
-                state
-                    .messages
-                    .set_error("MySQL connection field `database` is required".to_string());
-                return DispatchResult::handled();
-            }
-
             save_current_connection_cache(state);
             clear_query_confirmation(state);
 
@@ -185,12 +178,6 @@ pub(super) fn try_connect(state: &mut AppState) -> Vec<Effect> {
     };
 
     if state.session.active_database_type() == Some(DatabaseType::MySQL) {
-        if state.session.active_database().is_none() {
-            state
-                .messages
-                .set_error("MySQL connection field `database` is required".to_string());
-            return vec![];
-        }
         let target = ConnectionTarget {
             id: state
                 .session
@@ -2295,7 +2282,7 @@ mod tests {
         }
 
         #[test]
-        fn mysql_switch_without_database_is_rejected_before_probe() {
+        fn mysql_switch_without_database_starts_probe_and_preserves_current_connection() {
             let mut state = AppState::new("test".to_string());
             let current = ConnectionTarget {
                 id: ConnectionId::from_string("postgres-current"),
@@ -2312,6 +2299,7 @@ mod tests {
                     ..Default::default()
                 },
             );
+            state.ui.set_explorer_selection(Some(7));
             let target = ConnectionTarget {
                 id: ConnectionId::from_string("mysql-old"),
                 dsn: "mysql://user@localhost:3306".to_string(),
@@ -2322,13 +2310,32 @@ mod tests {
 
             let effects = reduce(&mut state, &Action::SwitchConnection(target)).unwrap();
 
-            assert!(effects.is_empty());
+            assert!(effects.iter().any(|effect| matches!(
+                effect,
+                Effect::ProbeMySqlConnection { target, .. } if target.database.is_none()
+            )));
             assert_eq!(state.session.active_connection_id(), Some(&current.id));
             assert_eq!(state.session.active_database(), None);
             assert_eq!(state.connection_caches[&current.id].explorer_selected, 7);
-            assert!(state.messages.last_error().is_some_and(|message| {
-                message.contains("MySQL connection field `database` is required")
-            }));
+            assert!(state.messages.last_error().is_none());
+        }
+
+        #[test]
+        fn mysql_retry_without_database_starts_connection_probe() {
+            let mut state = AppState::new("test".to_string());
+            state.session.activate_connection_with_target(
+                &ConnectionId::from_string("mysql-server"),
+                "mysql",
+                DatabaseType::MySQL,
+                "mysql://user@localhost:3306/",
+                None,
+            );
+            let effects = try_connect(&mut state);
+            assert!(
+                matches!(effects.as_slice(), [Effect::ProbeMySqlConnection { target, .. }] if target.database.is_none())
+            );
+            assert!(state.session.connection_state().is_connecting());
+            assert!(state.messages.last_error().is_none());
         }
 
         #[test]

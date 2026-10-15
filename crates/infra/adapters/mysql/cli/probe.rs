@@ -25,9 +25,8 @@ const MYSQL_PROBE_RESULT_COLUMNS: [&str; 3] = [
     "__sabiql_sql_mode",
     "__sabiql_lower_case_table_names",
 ];
-const MYSQL_VERSION_ARGS: [&str; 3] = ["--no-defaults", "--no-login-paths", "--version"];
-const MYSQL_SUPPORTED_MAJOR: u32 = 8;
-const MYSQL_SUPPORTED_MINOR: u32 = 4;
+const MYSQL_VERSION_ARGS: [&str; 2] = ["--no-defaults", "--version"];
+const MYSQL_MINIMUM_CLIENT_VERSION: (u32, u32, u32) = (8, 0, 19);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::adapters::mysql) struct MySqlServerProbeResult {
@@ -46,7 +45,7 @@ async fn check_mysql_cli_version_with_program(program: &OsStr) -> Result<(), DbO
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    if !output.status.success() || !is_oracle_mysql_cli_84_version(&version_output) {
+    if !output.status.success() || !is_supported_mysql_cli_version(&version_output) {
         return Err(DbOperationError::UnsupportedOperationWithKind {
             kind: UnsupportedOperationKind::ClientVersion,
             details: version_output.trim().to_string(),
@@ -152,14 +151,16 @@ fn contains_unsupported_mysql_product(value: &str) -> bool {
         .any(|product| lower.contains(product))
 }
 
-fn is_oracle_mysql_cli_84_version(value: &str) -> bool {
+fn is_supported_mysql_cli_version(value: &str) -> bool {
     let lower = value.to_ascii_lowercase();
-    lower.contains("mysql") && is_oracle_mysql_84_version(value)
+    lower.contains("mysql") && is_supported_mysql_client_version(value)
 }
 
-fn is_oracle_mysql_84_version(value: &str) -> bool {
+fn is_supported_mysql_client_version(value: &str) -> bool {
     !contains_unsupported_mysql_product(value)
-        && version_major_minor(value) == Some((MYSQL_SUPPORTED_MAJOR, MYSQL_SUPPORTED_MINOR))
+        && version_components(value).is_some_and(|version| {
+            matches!(version.0, 8 | 9) && version >= MYSQL_MINIMUM_CLIENT_VERSION
+        })
 }
 
 pub(super) fn validate_server_product(version: &str) -> Result<(), DbOperationError> {
@@ -195,12 +196,12 @@ pub(super) fn validate_sql_mode(sql_mode: &str) -> Result<(), DbOperationError> 
     }
 }
 
-fn version_major_minor(value: &str) -> Option<(u32, u32)> {
+fn version_components(value: &str) -> Option<(u32, u32, u32)> {
     let mut numbers = value
         .split(|character: char| !character.is_ascii_digit())
         .filter(|part| !part.is_empty())
         .filter_map(|part| part.parse::<u32>().ok());
-    Some((numbers.next()?, numbers.next()?))
+    Some((numbers.next()?, numbers.next()?, numbers.next()?))
 }
 
 fn mysql_probe_args(option_file: &std::path::Path) -> Vec<String> {
@@ -317,19 +318,33 @@ mod probe_tests {
 
     #[test]
     fn validates_supported_versions_and_sql_modes() {
-        assert!(is_oracle_mysql_cli_84_version("mysql  Ver 8.4.3 for macos"));
-        assert!(!is_oracle_mysql_cli_84_version(
+        assert!(is_supported_mysql_cli_version("mysql  Ver 8.4.3 for macos"));
+        assert!(is_supported_mysql_cli_version(
             "mysql  Ver 8.0.36 for macos"
         ));
-        assert!(!is_oracle_mysql_cli_84_version(
+        assert!(is_supported_mysql_cli_version("mysql  Ver 9.4.0 for macos"));
+        assert!(!is_supported_mysql_cli_version(
+            "mysql  Ver 8.0.18 for Linux"
+        ));
+        assert!(is_supported_mysql_cli_version(
+            "mysql  Ver 8.0.19 for Linux"
+        ));
+        assert!(!is_supported_mysql_cli_version(
+            "mysql  Ver 5.7.44 for Linux"
+        ));
+        assert!(!is_supported_mysql_cli_version(
+            "mysql  Ver 10.0.0 for Linux"
+        ));
+        assert!(!is_supported_mysql_cli_version("mysql unknown"));
+        assert!(!is_supported_mysql_cli_version(
             "mysql  Ver 15.1 Distrib 10.11.8-MariaDB"
         ));
-        assert!(!is_oracle_mysql_cli_84_version(
+        assert!(!is_supported_mysql_cli_version(
             "mysql  Ver 8.4.3-3 for Linux (Percona Server)"
         ));
-        assert!(is_oracle_mysql_84_version("8.4.3"));
-        assert!(!is_oracle_mysql_84_version("8.4.3-TiDB"));
-        assert!(!is_oracle_mysql_84_version("8.4.3-Percona"));
+        assert!(is_supported_mysql_client_version("8.4.3"));
+        assert!(!is_supported_mysql_client_version("8.4.3-TiDB"));
+        assert!(!is_supported_mysql_client_version("8.4.3-Percona"));
         assert!(validate_server_product("5.7.44").is_ok());
         assert!(validate_server_product("8.0.36").is_ok());
         assert!(validate_server_product("8.4.10").is_ok());
@@ -406,7 +421,6 @@ mod probe_tests {
             args,
             vec![
                 "--defaults-file=/tmp/sabiql-mysql.cnf".to_string(),
-                "--no-login-paths".to_string(),
                 "--connect-timeout=10".to_string(),
                 "--skip-reconnect".to_string(),
                 "--xml".to_string(),
@@ -423,10 +437,7 @@ mod probe_tests {
 
     #[test]
     fn version_arguments_stay_isolated_from_query_options() {
-        assert_eq!(
-            MYSQL_VERSION_ARGS,
-            ["--no-defaults", "--no-login-paths", "--version"]
-        );
+        assert_eq!(MYSQL_VERSION_ARGS, ["--no-defaults", "--version"]);
         assert!(!MYSQL_VERSION_ARGS.contains(&"--quick"));
     }
 
@@ -597,7 +608,7 @@ mod probe_tests {
         #[tokio::test]
         async fn isolates_version_check_from_ambient_unknown_options() {
             let (_directory, program) = fake_mysql_version_client(
-                r#"if [ "$#" -ne 3 ] || [ "$1" != "--no-defaults" ] || [ "$2" != "--no-login-paths" ] || [ "$3" != "--version" ]; then
+                r#"if [ "$#" -ne 2 ] || [ "$1" != "--no-defaults" ] || [ "$2" != "--version" ] || [ "$MYSQL_TEST_LOGIN_FILE" != "/dev/null" ]; then
     printf '%s\n' "unknown option '--ambient-unknown'" >&2
     exit 1
 fi
@@ -639,13 +650,25 @@ printf '%s\n' 'mysql  Ver 8.4.3 for macos'
         #[tokio::test]
         async fn rejects_unsupported_client_version() {
             let (_directory, program) =
-                fake_mysql_version_client("printf '%s\\n' 'mysql  Ver 8.0.36 for macos'");
+                fake_mysql_version_client("printf '%s\\n' 'mysql  Ver 8.0.18 for macos'");
 
             let error = check_mysql_cli_version_with_program(program.as_os_str())
                 .await
                 .unwrap_err();
 
-            assert_client_version_error(error, "mysql  Ver 8.0.36 for macos");
+            assert_client_version_error(error, "mysql  Ver 8.0.18 for macos");
+        }
+
+        #[tokio::test]
+        async fn accepts_supported_clients_outside_84_series() {
+            for version in ["8.0.36", "9.4.0"] {
+                let (_directory, program) = fake_mysql_version_client(&format!(
+                    "printf '%s\\n' 'mysql  Ver {version} for macos'"
+                ));
+                check_mysql_cli_version_with_program(program.as_os_str())
+                    .await
+                    .unwrap();
+            }
         }
     }
 }
