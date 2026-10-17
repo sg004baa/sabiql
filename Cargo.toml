@@ -68,6 +68,11 @@ windows-sys = { version = "0.61", features = [
 lto = true
 codegen-units = 1
 
+# The profile that dist uses for release artifacts.
+[profile.dist]
+inherits = "release"
+lto = "thin"
+
 [workspace.lints.rust]
 redundant_imports = "deny"
 unreachable_pub = "deny"
