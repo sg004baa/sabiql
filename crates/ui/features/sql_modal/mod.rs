@@ -113,9 +113,7 @@ impl SqlModal {
             }
         } else {
             let hint = match state.sql_modal.status() {
-                SqlModalStatus::Editing => {
-                    Self::editing_hint(&feature_policy, state.settings.saved_keymap_preset())
-                }
+                SqlModalStatus::Editing => Self::editing_hint(state.settings.saved_keymap_preset()),
                 SqlModalStatus::Running => FooterHintBar::message("Running\u{2026}"),
                 SqlModalStatus::ConfirmingAnalyzeHigh {
                     input, target_name, ..
@@ -330,29 +328,16 @@ impl SqlModal {
         }
     }
 
-    fn editing_hint(feature_policy: &FeaturePolicy, keymap_preset: KeymapPreset) -> FooterHintBar {
-        match (
-            feature_policy.is_enabled(FeatureRequirement::Explain),
-            keymap_preset,
-        ) {
-            (true, KeymapPreset::Default) => FooterHintBar::new([
-                sql_modal::RUN.as_hint(),
-                sql_modal_plan::EXPLAIN.as_hint(),
-                sql_modal::CLEAR.as_hint(),
-                sql_modal::QUERY_HISTORY.as_hint(),
-                sql_modal::ESC_NORMAL.as_hint(),
-            ]),
-            (false, KeymapPreset::Default) => FooterHintBar::new([
-                sql_modal::RUN.as_hint(),
-                sql_modal::CLEAR.as_hint(),
-                sql_modal::QUERY_HISTORY.as_hint(),
-                sql_modal::ESC_NORMAL.as_hint(),
-            ]),
-            (_, KeymapPreset::Ide) => FooterHintBar::new([
-                sql_modal::RUN.as_hint(),
-                sql_modal::CLEAR.as_hint(),
-                sql_modal::ESC_NORMAL.as_hint(),
-            ]),
+    fn editing_hint(keymap_preset: KeymapPreset) -> FooterHintBar {
+        let mut hints = vec![
+            sql_modal::RUN.as_hint(),
+            sql_modal::EXTERNAL_EDITOR.as_hint(),
+            sql_modal::CLEAR.as_hint(),
+        ];
+        if keymap_preset == KeymapPreset::Default {
+            hints.push(sql_modal::QUERY_HISTORY.as_hint());
         }
+        hints.push(sql_modal::ESC_NORMAL.as_hint());
+        FooterHintBar::new(hints)
     }
 }

@@ -47,7 +47,10 @@ impl JsonDetail {
             )
         };
         let hints = if is_editing {
-            vec![json_edit::ESC_NORMAL.as_hint()]
+            vec![
+                json_edit::EXTERNAL_EDITOR.as_hint(),
+                json_edit::ESC_NORMAL.as_hint(),
+            ]
         } else if matches!(state.json_detail.mode(), JsonDetailMode::Searching) {
             vec![
                 json_search::CONFIRM.as_hint(),

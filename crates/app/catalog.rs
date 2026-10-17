@@ -520,6 +520,7 @@ fn sql_current_rows(
                     &sql_modal::HOME_END,
                     &sql_modal::TAB,
                     &sql_modal::CLEAR,
+                    &sql_modal::EXTERNAL_EDITOR,
                 ],
                 feature_policy,
             ),
