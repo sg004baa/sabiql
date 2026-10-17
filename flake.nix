@@ -21,6 +21,18 @@
       ];
 
       forAllSystems = nixpkgs.lib.genAttrs systems;
+
+      rustVersion = "1.98.1";
+      mkRustToolchain =
+        pkgs:
+        pkgs.rust-bin.stable.${rustVersion}.default.override {
+          extensions = [
+            "clippy"
+            "rust-analyzer"
+            "rust-src"
+            "rustfmt"
+          ];
+        };
     in
     {
       packages = forAllSystems (
@@ -31,14 +43,7 @@
             overlays = [ rust-overlay.overlays.default ];
           };
 
-          rustToolchain = pkgs.rust-bin.stable."1.94.0".default.override {
-            extensions = [
-              "clippy"
-              "rust-analyzer"
-              "rust-src"
-              "rustfmt"
-            ];
-          };
+          rustToolchain = mkRustToolchain pkgs;
           rustPlatform = pkgs.makeRustPlatform {
             cargo = rustToolchain;
             rustc = rustToolchain;
@@ -55,7 +60,7 @@
         {
           default = rustPlatform.buildRustPackage {
             pname = "sabiql";
-            version = "1.11.0";
+            version = "3.0.1";
 
             src = self;
             cargoLock.lockFile = ./Cargo.lock;
@@ -69,8 +74,8 @@
             '';
 
             meta = {
-              description = "A fast, driver-less TUI for browsing and editing PostgreSQL databases";
-              homepage = "https://github.com/riii111/sabiql";
+              description = "Fast, safe-by-design, Vim-first DB TUI with ER diagrams";
+              homepage = "https://github.com/sg004baa/sabiql";
               license = pkgs.lib.licenses.mit;
               mainProgram = "sabiql";
             };
@@ -86,14 +91,7 @@
             overlays = [ rust-overlay.overlays.default ];
           };
 
-          rustToolchain = pkgs.rust-bin.stable."1.94.0".default.override {
-            extensions = [
-              "clippy"
-              "rust-analyzer"
-              "rust-src"
-              "rustfmt"
-            ];
-          };
+          rustToolchain = mkRustToolchain pkgs;
         in
         {
           default = pkgs.mkShell {
@@ -104,7 +102,9 @@
               pkgs.cargo-nextest
               pkgs.graphviz
               pkgs.lefthook
+              pkgs.mysql84
               pkgs.postgresql
+              pkgs.sqlite
               pkgs.python3
               pkgs.ruby
             ];

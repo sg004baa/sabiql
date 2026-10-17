@@ -1,46 +1,42 @@
 use super::*;
 use sabiql_app::model::shared::confirm_dialog::ConfirmIntent;
 use sabiql_domain::connection::ServiceEntry;
-use sabiql_domain::connection::{
-    ConnectionId, ConnectionName, ConnectionProfile, DatabaseType, SslMode,
-};
+use sabiql_domain::connection::{ConnectionId, ConnectionProfile, SslMode};
 
 fn three_connections() -> (ConnectionId, Vec<ConnectionProfile>) {
     let active_id = ConnectionId::new();
     let profiles = vec![
-        ConnectionProfile {
-            id: active_id.clone(),
-            name: ConnectionName::new("Production").unwrap(),
-            host: "prod.example.com".to_string(),
-            port: 5432,
-            database: "prod_db".to_string(),
-            username: "admin".to_string(),
-            password: "secret".to_string(),
-            ssl_mode: SslMode::Require,
-            database_type: DatabaseType::PostgreSQL,
-        },
-        ConnectionProfile {
-            id: ConnectionId::new(),
-            name: ConnectionName::new("Staging").unwrap(),
-            host: "staging.example.com".to_string(),
-            port: 5432,
-            database: "staging_db".to_string(),
-            username: "user".to_string(),
-            password: "pass".to_string(),
-            ssl_mode: SslMode::Prefer,
-            database_type: DatabaseType::PostgreSQL,
-        },
-        ConnectionProfile {
-            id: ConnectionId::new(),
-            name: ConnectionName::new("Local Dev").unwrap(),
-            host: "localhost".to_string(),
-            port: 5432,
-            database: "dev_db".to_string(),
-            username: "dev".to_string(),
-            password: "dev".to_string(),
-            ssl_mode: SslMode::Disable,
-            database_type: DatabaseType::PostgreSQL,
-        },
+        ConnectionProfile::with_id_postgres(
+            active_id.clone(),
+            "Production",
+            "prod.example.com",
+            5432,
+            "prod_db",
+            "admin",
+            "secret",
+            SslMode::Require,
+        )
+        .unwrap(),
+        ConnectionProfile::new_postgres(
+            "Staging",
+            "staging.example.com",
+            5432,
+            "staging_db",
+            "user",
+            "pass",
+            SslMode::Prefer,
+        )
+        .unwrap(),
+        ConnectionProfile::new_postgres(
+            "Local Dev",
+            "localhost",
+            5432,
+            "dev_db",
+            "dev",
+            "dev",
+            SslMode::Disable,
+        )
+        .unwrap(),
     ];
     (active_id, profiles)
 }
@@ -52,7 +48,12 @@ fn connection_selector_with_multiple_connections() {
 
     let (active_id, connections) = three_connections();
     state.set_connections(connections);
-    state.session.active_connection_id = Some(active_id);
+    state.session.activate_connection_with_dsn(
+        &active_id,
+        "localhost:5432/test",
+        sabiql_domain::DatabaseType::PostgreSQL,
+        "localhost:5432/test",
+    );
     state.modal.set_mode(InputMode::ConnectionSelector);
     state.ui.set_connection_list_selection(Some(0));
 
@@ -72,21 +73,18 @@ fn connection_selector_with_service_entries() {
         vec![
             ServiceEntry {
                 service_name: "dev-db".to_string(),
-                host: Some("localhost".to_string()),
-                dbname: Some("devdb".to_string()),
-                port: Some(5432),
-                user: Some("dev".to_string()),
             },
             ServiceEntry {
                 service_name: "prod-replica".to_string(),
-                host: Some("replica.example.com".to_string()),
-                dbname: Some("proddb".to_string()),
-                port: Some(5433),
-                user: None,
             },
         ],
     );
-    state.session.active_connection_id = Some(active_id);
+    state.session.activate_connection_with_dsn(
+        &active_id,
+        "localhost:5432/test",
+        sabiql_domain::DatabaseType::PostgreSQL,
+        "localhost:5432/test",
+    );
     state.modal.set_mode(InputMode::ConnectionSelector);
     state.ui.set_connection_list_selection(Some(0));
 
@@ -103,17 +101,9 @@ fn connection_selector_with_long_service_name() {
     state.set_service_entries(vec![
         ServiceEntry {
             service_name: "my-very-long-service-name-that-exceeds-normal-length".to_string(),
-            host: Some("db.example.com".to_string()),
-            dbname: Some("mydb".to_string()),
-            port: Some(5432),
-            user: None,
         },
         ServiceEntry {
             service_name: "short".to_string(),
-            host: Some("localhost".to_string()),
-            dbname: None,
-            port: None,
-            user: None,
         },
     ]);
     state.modal.set_mode(InputMode::ConnectionSelector);
@@ -132,22 +122,18 @@ fn connection_selector_with_active_service() {
     state.set_service_entries(vec![
         ServiceEntry {
             service_name: "dev-local".to_string(),
-            host: Some("localhost".to_string()),
-            dbname: Some("devdb".to_string()),
-            port: Some(5432),
-            user: Some("dev".to_string()),
         },
         ServiceEntry {
             service_name: "prod-replica".to_string(),
-            host: Some("replica.example.com".to_string()),
-            dbname: Some("proddb".to_string()),
-            port: Some(5433),
-            user: None,
         },
     ]);
     // Set active connection to the first service entry
-    state.session.active_connection_id =
-        Some(ConnectionId::from_string("service:dev-local".to_string()));
+    state.session.activate_connection_with_dsn(
+        &ConnectionId::from_string("service:dev-local".to_string()),
+        "localhost:5432/test",
+        sabiql_domain::DatabaseType::PostgreSQL,
+        "localhost:5432/test",
+    );
     state.modal.set_mode(InputMode::ConnectionSelector);
     state.ui.set_connection_list_selection(Some(0));
 
@@ -165,10 +151,6 @@ fn connection_selector_with_multibyte_service_name() {
 
     state.set_service_entries(vec![ServiceEntry {
         service_name: "本番データベース接続".to_string(),
-        host: Some("db.example.com".to_string()),
-        dbname: Some("mydb".to_string()),
-        port: Some(5432),
-        user: None,
     }]);
     state.modal.set_mode(InputMode::ConnectionSelector);
     state.ui.set_connection_list_selection(Some(0));

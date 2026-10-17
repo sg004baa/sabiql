@@ -1,12 +1,13 @@
 ---
-source: src/tests/render_snapshots/inspector.rs
+source: crates/sabiql/src/tests/render_snapshots/inspector.rs
+assertion_line: 355
 expression: output
 ---
-test_project | test_db | - | no dsn | localhost:5432/test                                                                                                            
+test_project ▸ test_db ▸ -                                                                                                            connected | localhost:5432/test
 ┌ [1] Explorer ─────────────────────────┐[Info] [Cols] [Idx] [FK] [RLS] [Trig] [DDL]                                                                                 
 │> public.users                         │┌ [2] Inspector ───────────────────────────────────────────────────────────────────────────────────────────────────────────┐
-│  public.posts                         ││Name                            Timing             Event                    Function                    SecDef            │
-│  public.comments                      ││audit_users                     AFTER              INSERT/UPDATE            audit_func                                    │
+│  public.posts                         ││Name                            Timing             Event                    Function                    Security          │
+│  public.comments                      ││audit_users                     AFTER              INSERT/UPDATE            audit_func                  INVOKER           │
 │                                       ││                                                                                                                          │
 │                                       ││                                                                                                                          │
 │                                       ││                                                                                                                          │
@@ -51,4 +52,4 @@ test_project | test_db | - | no dsn | localhost:5432/test
 │                                       ││                                                                                                                          │
 │                                       ││                                                                                                                          │
 └───────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-r:Reload  s:SQL  e:ER Diagram  / ^P:Tables  ^O:History  ^R:Read-Only  f:Focus  Tab/⇧Tab:Pane  ←/→:InsTabs  ?:Help  ^K:Settings  q:Quit
+r:Reload  s:SQL  e:ER Diagram  c:Connections  ^P:Tables  ^O:History  ^R:Read-Only  f:Focus  [/]:InsTabs  ?:Help  F1:Palette  ,:Settings  q:Quit

@@ -1,30 +1,48 @@
 use crate::model::shared::key_sequence::Prefix;
+use crate::model::shared::settings::KeymapPreset;
 use crate::model::sql_editor::modal::{SqlModalStatus, SqlModalTab};
+use crate::policy::{FeaturePolicy, FeatureRequirement};
 use crate::update::action::{
-    Action, ExternalEditorTarget, InputTarget, ModalKind, ScrollAmount, ScrollDirection,
-    ScrollTarget,
+    Action, InputTarget, ModalKind, ScrollAmount, ScrollDirection, ScrollTarget,
 };
-use crate::update::input::keybindings::{Key, KeyCombo, Modifiers};
+use crate::update::input::keybindings::{
+    Key, KeyCombo, Modifiers, sql_modal_compare_explain, sql_modal_normal_query_history,
+    sql_modal_plan_explain,
+};
 use crate::update::input::vim::{
     SqlModalVimContext, VimSurfaceContext, action_for_input, action_for_key,
 };
 
-#[cfg(test)]
-pub fn handle_sql_modal_keys(
-    combo: KeyCombo,
-    completion_visible: bool,
-    status: &SqlModalStatus,
-    active_tab: SqlModalTab,
-) -> Action {
-    handle_sql_modal_keys_with_prefix(combo, completion_visible, status, active_tab, None)
-}
-
-pub fn handle_sql_modal_keys_with_prefix(
+pub(super) fn handle_sql_modal_keys_with_feature_policy(
     combo: KeyCombo,
     completion_visible: bool,
     status: &SqlModalStatus,
     active_tab: SqlModalTab,
     pending_prefix: Option<Prefix>,
+    keymap_preset: KeymapPreset,
+    feature_policy: &FeaturePolicy,
+) -> Action {
+    handle_sql_modal_keys_internal(
+        combo,
+        completion_visible,
+        status,
+        active_tab,
+        pending_prefix,
+        keymap_preset,
+        feature_policy,
+        feature_policy.is_enabled(FeatureRequirement::ExplainAnalyze),
+    )
+}
+
+fn handle_sql_modal_keys_internal(
+    combo: KeyCombo,
+    completion_visible: bool,
+    status: &SqlModalStatus,
+    active_tab: SqlModalTab,
+    pending_prefix: Option<Prefix>,
+    keymap_preset: KeymapPreset,
+    feature_policy: &FeaturePolicy,
+    supports_explain_analyze: bool,
 ) -> Action {
     use crate::update::action::CursorMove;
 
@@ -36,7 +54,7 @@ pub fn handle_sql_modal_keys_with_prefix(
     // Normal / Success / Error share the same command set (no text editing)
     if matches!(
         status,
-        SqlModalStatus::Normal | SqlModalStatus::Success | SqlModalStatus::Error
+        SqlModalStatus::Normal | SqlModalStatus::Success(_) | SqlModalStatus::Error(_)
     ) {
         let ctrl = combo.modifiers.contains(Modifiers::CTRL);
         let alt = combo.modifiers.contains(Modifiers::ALT);
@@ -60,7 +78,13 @@ pub fn handle_sql_modal_keys_with_prefix(
             };
         }
 
-        if ctrl && combo.key == Key::Char('e') {
+        let explain_binding = match active_tab {
+            SqlModalTab::Compare => sql_modal_compare_explain(keymap_preset),
+            SqlModalTab::Sql | SqlModalTab::Plan => sql_modal_plan_explain(keymap_preset),
+        };
+        if explain_binding.combos.contains(&combo)
+            && feature_policy.is_enabled(explain_binding.feature_requirement())
+        {
             return Action::ExplainRequest;
         }
 
@@ -76,9 +100,6 @@ pub fn handle_sql_modal_keys_with_prefix(
 
         // Plan tab specific keys (read-only viewer)
         if active_tab == SqlModalTab::Plan {
-            if plain && combo.key == Key::Char('q') {
-                return Action::CloseModal(ModalKind::SqlModal);
-            }
             if let Some(action) = action_for_key(
                 &combo,
                 VimSurfaceContext::SqlModal(SqlModalVimContext::PlanViewer),
@@ -87,16 +108,13 @@ pub fn handle_sql_modal_keys_with_prefix(
             }
 
             return match combo.key {
-                Key::Char('e') if alt => Action::ExplainAnalyzeRequest,
+                Key::Char('e') if alt && supports_explain_analyze => Action::ExplainAnalyzeRequest,
                 _ => Action::None,
             };
         }
 
         // Compare tab specific keys (read-only viewer)
         if active_tab == SqlModalTab::Compare {
-            if plain && combo.key == Key::Char('q') {
-                return Action::CloseModal(ModalKind::SqlModal);
-            }
             if let Some(action) = action_for_key(
                 &combo,
                 VimSurfaceContext::SqlModal(SqlModalVimContext::CompareViewer),
@@ -105,23 +123,27 @@ pub fn handle_sql_modal_keys_with_prefix(
             }
 
             return match combo.key {
-                Key::Char('e') if alt => Action::ExplainAnalyzeRequest,
-                Key::Char('e') if plain => Action::CompareEditQuery,
+                Key::Char('e') if alt && supports_explain_analyze => Action::ExplainAnalyzeRequest,
+                Key::Char('e')
+                    if plain && feature_policy.is_enabled(FeatureRequirement::PlanComparison) =>
+                {
+                    Action::CompareEditQuery
+                }
                 _ => Action::None,
             };
         }
 
-        if alt && combo.key == Key::Char('e') {
+        if alt && combo.key == Key::Char('e') && supports_explain_analyze {
             return Action::ExplainAnalyzeRequest;
         }
-        if ctrl && combo.key == Key::Char('o') {
+        if sql_modal_normal_query_history(keymap_preset)
+            .combos
+            .contains(&combo)
+        {
             return Action::OpenModal(ModalKind::QueryHistoryPicker);
         }
         if ctrl && combo.key == Key::Char('l') {
             return Action::SqlModalClear;
-        }
-        if plain && combo.key == Key::Char('q') {
-            return Action::CloseModal(ModalKind::SqlModal);
         }
         if plain && combo.key == Key::Char('g') {
             return Action::BeginKeySequence(Prefix::G);
@@ -195,7 +217,7 @@ pub fn handle_sql_modal_keys_with_prefix(
                 target: InputTarget::SqlModalHighRisk,
                 direction: CursorMove::End,
             },
-            Key::Enter if plain => Action::SqlModalHighRiskConfirmExecute,
+            Key::Enter if plain => Action::SqlModalConfirmExecute,
             Key::Esc => Action::SqlModalCancelConfirm,
             _ => Action::None,
         };
@@ -243,6 +265,34 @@ pub fn handle_sql_modal_keys_with_prefix(
         };
     }
 
+    if matches!(status, SqlModalStatus::ConfirmingRisk { .. }) {
+        let plain = !combo.modifiers.intersects(Modifiers::CTRL | Modifiers::ALT);
+        return match combo.key {
+            Key::Enter if plain => Action::SqlModalConfirmExecute,
+            Key::Esc => Action::SqlModalCancelConfirm,
+            _ => Action::None,
+        };
+    }
+
+    if matches!(status, SqlModalStatus::ConfirmingAnalyzeRisk { .. }) {
+        let plain = !combo.modifiers.intersects(Modifiers::CTRL | Modifiers::ALT);
+        return match combo.key {
+            Key::Up if plain => Action::Scroll {
+                target: ScrollTarget::ExplainConfirm,
+                direction: ScrollDirection::Up,
+                amount: ScrollAmount::Line,
+            },
+            Key::Down if plain => Action::Scroll {
+                target: ScrollTarget::ExplainConfirm,
+                direction: ScrollDirection::Down,
+                amount: ScrollAmount::Line,
+            },
+            Key::Enter if plain => Action::ExplainAnalyzeConfirm,
+            Key::Esc => Action::ExplainAnalyzeCancel,
+            _ => Action::None,
+        };
+    }
+
     let ctrl = combo.modifiers.contains(Modifiers::CTRL);
     let alt = combo.modifiers.contains(Modifiers::ALT);
     let shift = combo.modifiers.contains(Modifiers::SHIFT);
@@ -254,16 +304,16 @@ pub fn handle_sql_modal_keys_with_prefix(
         return Action::SqlModalSubmit;
     }
 
-    if ctrl && combo.key == Key::Char('o') {
+    if keymap_preset == KeymapPreset::Default && ctrl_only && combo.key == Key::Char('o') {
         return Action::OpenModal(ModalKind::QueryHistoryPicker);
     }
 
-    if ctrl && combo.key == Key::Char(' ') {
-        return Action::CompletionTrigger;
+    if keymap_preset == KeymapPreset::Ide && ctrl_only && combo.key == Key::Char('o') {
+        return Action::None;
     }
 
-    if ctrl && combo.key == Key::Char('e') {
-        return Action::OpenExternalEditor(ExternalEditorTarget::SqlEditor);
+    if ctrl_only && combo.key == Key::Char('e') {
+        return Action::None;
     }
 
     if ctrl && combo.key == Key::Char('l') {
@@ -271,7 +321,11 @@ pub fn handle_sql_modal_keys_with_prefix(
     }
 
     if alt && combo.key == Key::Char('e') {
-        return Action::ExplainAnalyzeRequest;
+        return if supports_explain_analyze {
+            Action::ExplainAnalyzeRequest
+        } else {
+            Action::None
+        };
     }
 
     if completion_visible {
@@ -326,7 +380,7 @@ pub fn handle_sql_modal_keys_with_prefix(
             target: InputTarget::SqlModal,
         },
         Key::Enter => Action::SqlModalNewLine,
-        Key::Tab => Action::SqlModalTab,
+        Key::Tab => Action::SqlModalInsertTab,
         Key::Char(c) => Action::TextInput {
             target: InputTarget::SqlModal,
             ch: c,
@@ -338,6 +392,8 @@ pub fn handle_sql_modal_keys_with_prefix(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::shared::engine_feature_profile::EngineFeatureProfile;
+    use crate::model::sql_editor::modal::AdhocSuccessSnapshot;
     use crate::update::action::CursorMove;
     use crate::update::input::keybindings::{Key, KeyCombo};
     use rstest::rstest;
@@ -354,11 +410,63 @@ mod tests {
         KeyCombo::alt(k)
     }
 
+    fn success_status() -> SqlModalStatus {
+        SqlModalStatus::Success(AdhocSuccessSnapshot {
+            command_tag: None,
+            row_count: 0,
+            execution_time_ms: 0,
+            mysql_diagnostics: Vec::new(),
+        })
+    }
+
+    fn error_status() -> SqlModalStatus {
+        SqlModalStatus::Error("error".to_string())
+    }
+
+    fn handle_sql_modal_keys(
+        combo: KeyCombo,
+        completion_visible: bool,
+        status: &SqlModalStatus,
+        active_tab: SqlModalTab,
+    ) -> Action {
+        handle_sql_modal_keys_with_prefix(
+            combo,
+            completion_visible,
+            status,
+            active_tab,
+            None,
+            KeymapPreset::Default,
+            true,
+        )
+    }
+
+    fn handle_sql_modal_keys_with_prefix(
+        combo: KeyCombo,
+        completion_visible: bool,
+        status: &SqlModalStatus,
+        active_tab: SqlModalTab,
+        pending_prefix: Option<Prefix>,
+        keymap_preset: KeymapPreset,
+        supports_explain_analyze: bool,
+    ) -> Action {
+        let feature_policy = FeaturePolicy::new(&EngineFeatureProfile::postgres_like());
+        handle_sql_modal_keys_internal(
+            combo,
+            completion_visible,
+            status,
+            active_tab,
+            pending_prefix,
+            keymap_preset,
+            &feature_policy,
+            supports_explain_analyze,
+        )
+    }
+
     #[derive(Debug, PartialEq)]
     enum Expected {
         SqlModalSubmit,
         SqlModalNewLine,
-        SqlModalTab,
+        SqlModalInsertTab,
         SqlModalBackspace,
         SqlModalDelete,
         SqlModalInput(char),
@@ -368,7 +476,6 @@ mod tests {
         SqlModalEnterInsert,
         SqlModalEnterNormal,
         SqlModalYank,
-        CompletionTrigger,
         CompletionAccept,
         CompletionDismiss,
         CompletionPrev,
@@ -376,7 +483,6 @@ mod tests {
         OpenModal(ModalKind),
         SqlModalClear,
         ExplainRequest,
-        OpenExternalEditor(ExternalEditorTarget),
         ExplainAnalyzeRequest,
         SqlModalNextTab,
         SqlModalPrevTab,
@@ -392,7 +498,7 @@ mod tests {
         match expected {
             Expected::SqlModalSubmit => assert!(matches!(result, Action::SqlModalSubmit)),
             Expected::SqlModalNewLine => assert!(matches!(result, Action::SqlModalNewLine)),
-            Expected::SqlModalTab => assert!(matches!(result, Action::SqlModalTab)),
+            Expected::SqlModalInsertTab => assert!(matches!(result, Action::SqlModalInsertTab)),
             Expected::SqlModalBackspace => assert!(matches!(
                 result,
                 Action::TextBackspace {
@@ -416,7 +522,7 @@ mod tests {
                 );
             }
             Expected::CloseModal(expected_kind) => {
-                assert!(matches!(result, Action::CloseModal(kind) if kind == expected_kind))
+                assert!(matches!(result, Action::CloseModal(kind) if kind == expected_kind));
             }
             Expected::SqlModalAppendInsert => {
                 assert!(matches!(result, Action::SqlModalAppendInsert));
@@ -428,7 +534,6 @@ mod tests {
                 assert!(matches!(result, Action::SqlModalEnterNormal));
             }
             Expected::SqlModalYank => assert!(matches!(result, Action::SqlModalYank)),
-            Expected::CompletionTrigger => assert!(matches!(result, Action::CompletionTrigger)),
             Expected::CompletionAccept => assert!(matches!(result, Action::CompletionAccept)),
             Expected::CompletionDismiss => assert!(matches!(result, Action::CompletionDismiss)),
             Expected::CompletionPrev => assert!(matches!(result, Action::CompletionPrev)),
@@ -438,11 +543,6 @@ mod tests {
             }
             Expected::SqlModalClear => assert!(matches!(result, Action::SqlModalClear)),
             Expected::ExplainRequest => assert!(matches!(result, Action::ExplainRequest)),
-            Expected::OpenExternalEditor(expected_target) => {
-                assert!(
-                    matches!(result, Action::OpenExternalEditor(target) if target == expected_target)
-                );
-            }
             Expected::ExplainAnalyzeRequest => {
                 assert!(matches!(result, Action::ExplainAnalyzeRequest));
             }
@@ -501,7 +601,7 @@ mod tests {
         // Completion-aware keys: behavior when completion is hidden
         #[rstest]
         #[case(Key::Esc, Expected::SqlModalEnterNormal)]
-        #[case(Key::Tab, Expected::SqlModalTab)]
+        #[case(Key::Tab, Expected::SqlModalInsertTab)]
         #[case(Key::Enter, Expected::SqlModalNewLine)]
         #[case(Key::Up, Expected::SqlModalMoveCursor(CursorMove::Up))]
         #[case(Key::Down, Expected::SqlModalMoveCursor(CursorMove::Down))]
@@ -646,15 +746,15 @@ mod tests {
         }
 
         #[test]
-        fn ctrl_space_triggers_completion() {
+        fn ctrl_alt_o_falls_through_to_text_input() {
             let result = handle_sql_modal_keys(
-                combo_ctrl(Key::Char(' ')),
+                KeyCombo::ctrl_alt(Key::Char('o')),
                 false,
                 &SqlModalStatus::Editing,
                 SqlModalTab::Sql,
             );
 
-            assert_action(result, Expected::CompletionTrigger);
+            assert_action(result, Expected::SqlModalInput('o'));
         }
 
         #[rstest]
@@ -793,6 +893,8 @@ mod tests {
                 &SqlModalStatus::Normal,
                 SqlModalTab::Sql,
                 Some(Prefix::G),
+                KeymapPreset::Default,
+                true,
             );
 
             assert_action(result, Expected::SqlModalMoveCursor(CursorMove::FirstLine));
@@ -806,6 +908,8 @@ mod tests {
                 &SqlModalStatus::Normal,
                 SqlModalTab::Sql,
                 Some(Prefix::G),
+                KeymapPreset::Default,
+                true,
             );
 
             assert!(matches!(result, Action::CancelKeySequence));
@@ -819,11 +923,105 @@ mod tests {
                 &SqlModalStatus::Normal,
                 SqlModalTab::Sql,
                 Some(Prefix::G),
+                KeymapPreset::Default,
+                true,
             );
 
             assert!(matches!(result, Action::CancelKeySequence));
         }
 
+        #[test]
+        fn ide_normal_uses_plain_history_key() {
+            let result = handle_sql_modal_keys_with_prefix(
+                combo(Key::Char('O')),
+                false,
+                &SqlModalStatus::Normal,
+                SqlModalTab::Sql,
+                None,
+                KeymapPreset::Ide,
+                true,
+            );
+
+            assert!(matches!(
+                result,
+                Action::OpenModal(ModalKind::QueryHistoryPicker)
+            ));
+        }
+
+        #[test]
+        fn ide_normal_disables_ctrl_history_key() {
+            let result = handle_sql_modal_keys_with_prefix(
+                combo_ctrl(Key::Char('o')),
+                false,
+                &SqlModalStatus::Normal,
+                SqlModalTab::Sql,
+                None,
+                KeymapPreset::Ide,
+                true,
+            );
+
+            assert!(matches!(result, Action::None));
+        }
+
+        #[test]
+        fn ide_normal_uses_plain_explain_key() {
+            let result = handle_sql_modal_keys_with_prefix(
+                combo(Key::Char('E')),
+                false,
+                &SqlModalStatus::Normal,
+                SqlModalTab::Plan,
+                None,
+                KeymapPreset::Ide,
+                true,
+            );
+
+            assert!(matches!(result, Action::ExplainRequest));
+        }
+
+        #[test]
+        fn ide_normal_disables_ctrl_explain_key() {
+            let result = handle_sql_modal_keys_with_prefix(
+                combo_ctrl(Key::Char('e')),
+                false,
+                &SqlModalStatus::Normal,
+                SqlModalTab::Plan,
+                None,
+                KeymapPreset::Ide,
+                true,
+            );
+
+            assert!(matches!(result, Action::None));
+        }
+
+        #[test]
+        fn ide_editing_ctrl_history_key_is_ignored() {
+            let result = handle_sql_modal_keys_with_prefix(
+                combo_ctrl(Key::Char('o')),
+                false,
+                &SqlModalStatus::Editing,
+                SqlModalTab::Sql,
+                None,
+                KeymapPreset::Ide,
+                true,
+            );
+
+            assert!(matches!(result, Action::None));
+        }
+
+        #[test]
+        fn ide_editing_ctrl_explain_key_is_ignored() {
+            let result = handle_sql_modal_keys_with_prefix(
+                combo_ctrl(Key::Char('e')),
+                false,
+                &SqlModalStatus::Editing,
+                SqlModalTab::Sql,
+                None,
+                KeymapPreset::Ide,
+                true,
+            );
+
+            assert!(matches!(result, Action::None));
+        }
         #[rstest]
         #[case(Key::Char('a'))]
         #[case(Key::Char('e'))]
@@ -1001,8 +1199,8 @@ mod tests {
         }
 
         #[rstest]
-        #[case(SqlModalStatus::Success)]
-        #[case(SqlModalStatus::Error)]
+        #[case(success_status())]
+        #[case(error_status())]
         fn success_error_share_normal_keybindings(#[case] status: SqlModalStatus) {
             let yank =
                 handle_sql_modal_keys(combo(Key::Char('y')), false, &status, SqlModalTab::Sql);
@@ -1067,30 +1265,15 @@ mod tests {
         use super::*;
 
         #[test]
-        fn ctrl_e_opens_the_external_editor() {
+        fn editing_mode_ctrl_alt_e_does_not_request_explain() {
             let result = handle_sql_modal_keys(
-                combo_ctrl(Key::Char('e')),
+                KeyCombo::ctrl_alt(Key::Char('e')),
                 false,
                 &SqlModalStatus::Editing,
                 SqlModalTab::Sql,
             );
 
-            assert_action(
-                result,
-                Expected::OpenExternalEditor(ExternalEditorTarget::SqlEditor),
-            );
-        }
-
-        #[test]
-        fn ctrl_e_still_requests_explain_outside_editing() {
-            let result = handle_sql_modal_keys(
-                combo_ctrl(Key::Char('e')),
-                false,
-                &SqlModalStatus::Normal,
-                SqlModalTab::Sql,
-            );
-
-            assert_action(result, Expected::ExplainRequest);
+            assert!(!matches!(result, Action::ExplainRequest));
         }
     }
 
@@ -1250,6 +1433,38 @@ mod tests {
             assert_action(result, Expected::ExplainAnalyzeRequest);
         }
 
+        #[test]
+        fn editing_alt_e_is_noop_when_analyze_is_unsupported() {
+            let result = handle_sql_modal_keys_with_prefix(
+                combo_alt(Key::Char('e')),
+                false,
+                &SqlModalStatus::Editing,
+                SqlModalTab::Sql,
+                None,
+                KeymapPreset::Default,
+                false,
+            );
+
+            assert!(matches!(result, Action::None));
+        }
+
+        #[rstest]
+        #[case(SqlModalTab::Plan)]
+        #[case(SqlModalTab::Compare)]
+        fn alt_e_is_noop_when_analyze_is_unsupported(#[case] tab: SqlModalTab) {
+            let result = handle_sql_modal_keys_with_prefix(
+                combo_alt(Key::Char('e')),
+                false,
+                &SqlModalStatus::Normal,
+                tab,
+                None,
+                KeymapPreset::Default,
+                false,
+            );
+
+            assert!(matches!(result, Action::None));
+        }
+
         #[rstest]
         #[case(Key::Char('a'))]
         #[case(Key::Enter)]
@@ -1269,8 +1484,8 @@ mod tests {
         }
 
         #[rstest]
-        #[case(SqlModalStatus::Success)]
-        #[case(SqlModalStatus::Error)]
+        #[case(success_status())]
+        #[case(error_status())]
         fn plan_tab_read_only_keys_work_in_success_error(#[case] status: SqlModalStatus) {
             let scroll =
                 handle_sql_modal_keys(combo(Key::Char('j')), false, &status, SqlModalTab::Plan);
@@ -1281,8 +1496,8 @@ mod tests {
         }
 
         #[rstest]
-        #[case(SqlModalStatus::Success)]
-        #[case(SqlModalStatus::Error)]
+        #[case(success_status())]
+        #[case(error_status())]
         fn compare_tab_read_only_keys_work_in_success_error(#[case] status: SqlModalStatus) {
             let scroll =
                 handle_sql_modal_keys(combo(Key::Char('j')), false, &status, SqlModalTab::Compare);
@@ -1298,6 +1513,114 @@ mod tests {
             assert_action(scroll, Expected::ExplainCompareScrollDown);
             assert_action(close, Expected::CloseModal(ModalKind::SqlModal));
             assert_action(explain, Expected::ExplainRequest);
+        }
+    }
+
+    mod risk_acknowledge {
+        use super::*;
+        use crate::policy::write::sql_risk::AcknowledgeReason;
+
+        fn confirming_risk() -> SqlModalStatus {
+            SqlModalStatus::ConfirmingRisk {
+                reason: AcknowledgeReason::UnknownRisk,
+                label: "DO".to_string(),
+            }
+        }
+
+        fn confirming_analyze_risk() -> SqlModalStatus {
+            SqlModalStatus::ConfirmingAnalyzeRisk {
+                query: "MERGE INTO t USING s ON t.id = s.id".to_string(),
+                reason: AcknowledgeReason::UnknownRisk,
+            }
+        }
+
+        #[test]
+        fn enter_acknowledges_execution() {
+            let result = handle_sql_modal_keys(
+                combo(Key::Enter),
+                false,
+                &confirming_risk(),
+                SqlModalTab::Sql,
+            );
+
+            assert!(matches!(result, Action::SqlModalConfirmExecute));
+        }
+
+        #[test]
+        fn esc_cancels_confirmation() {
+            let result =
+                handle_sql_modal_keys(combo(Key::Esc), false, &confirming_risk(), SqlModalTab::Sql);
+
+            assert!(matches!(result, Action::SqlModalCancelConfirm));
+        }
+
+        #[rstest]
+        #[case(Key::Char('a'))]
+        #[case(Key::Char('y'))]
+        #[case(Key::Tab)]
+        #[case(Key::Backspace)]
+        fn other_keys_are_unbound(#[case] code: Key) {
+            let result =
+                handle_sql_modal_keys(combo(code), false, &confirming_risk(), SqlModalTab::Sql);
+
+            assert!(matches!(result, Action::None));
+        }
+
+        #[test]
+        fn analyze_enter_confirms() {
+            let result = handle_sql_modal_keys(
+                combo(Key::Enter),
+                false,
+                &confirming_analyze_risk(),
+                SqlModalTab::Plan,
+            );
+
+            assert!(matches!(result, Action::ExplainAnalyzeConfirm));
+        }
+
+        #[test]
+        fn analyze_esc_cancels() {
+            let result = handle_sql_modal_keys(
+                combo(Key::Esc),
+                false,
+                &confirming_analyze_risk(),
+                SqlModalTab::Plan,
+            );
+
+            assert!(matches!(result, Action::ExplainAnalyzeCancel));
+        }
+
+        #[rstest]
+        #[case(Key::Up, ScrollDirection::Up)]
+        #[case(Key::Down, ScrollDirection::Down)]
+        fn analyze_arrow_keys_scroll_confirm(#[case] code: Key, #[case] expected: ScrollDirection) {
+            let result = handle_sql_modal_keys(
+                combo(code),
+                false,
+                &confirming_analyze_risk(),
+                SqlModalTab::Plan,
+            );
+
+            assert!(matches!(
+                result,
+                Action::Scroll {
+                    target: ScrollTarget::ExplainConfirm,
+                    direction,
+                    amount: ScrollAmount::Line,
+                } if direction == expected
+            ));
+        }
+
+        #[test]
+        fn analyze_text_input_is_unbound() {
+            let result = handle_sql_modal_keys(
+                combo(Key::Char('x')),
+                false,
+                &confirming_analyze_risk(),
+                SqlModalTab::Plan,
+            );
+
+            assert!(matches!(result, Action::None));
         }
     }
 

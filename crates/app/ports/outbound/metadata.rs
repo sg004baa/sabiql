@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use crate::domain::{DatabaseMetadata, Table, TableSignature};
+use crate::domain::{DatabaseMetadata, Table, TableSignatureSnapshot};
 
 use super::DbOperationError;
 
@@ -8,6 +8,10 @@ use super::DbOperationError;
 #[async_trait]
 pub trait MetadataProvider: Send + Sync {
     async fn fetch_metadata(&self, dsn: &str) -> Result<DatabaseMetadata, DbOperationError>;
+
+    async fn fetch_effective_user(&self, _dsn: &str) -> Result<Option<String>, DbOperationError> {
+        Ok(None)
+    }
 
     async fn fetch_table_detail(
         &self,
@@ -26,5 +30,5 @@ pub trait MetadataProvider: Send + Sync {
     async fn fetch_table_signatures(
         &self,
         dsn: &str,
-    ) -> Result<Vec<TableSignature>, DbOperationError>;
+    ) -> Result<TableSignatureSnapshot, DbOperationError>;
 }

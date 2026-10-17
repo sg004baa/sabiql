@@ -1,17 +1,33 @@
 use crate::model::app_state::AppState;
+use crate::model::shared::settings::KeymapPreset;
 use crate::update::action::{Action, InputTarget};
 use crate::update::input::keybindings::{self, Key, KeyCombo, Modifiers};
 
-pub fn handle_connection_setup_keys(combo: KeyCombo, state: &AppState) -> Action {
+pub(super) fn handle_connection_setup_keys(combo: KeyCombo, state: &AppState) -> Action {
     use crate::model::connection::setup::ConnectionField;
     use crate::update::action::CursorMove;
 
-    let dropdown_open = state.connection_setup.db_type_dropdown.is_open
-        || state.connection_setup.ssl_dropdown.is_open;
+    let dropdown_open = state.connection_setup.has_open_dropdown();
     let ctrl = combo.modifiers.contains(Modifiers::CTRL);
     let alt = combo.modifiers.contains(Modifiers::ALT);
     let shift = combo.modifiers.contains(Modifiers::SHIFT);
     let ctrl_only = ctrl && !alt && !shift;
+
+    let primary_save = keybindings::connection_setup_save(state.settings.saved_keymap_preset());
+    let auxiliary_save = state.settings.saved_keymap_preset() == KeymapPreset::Ide
+        && keybindings::connection_setup::SAVE.combos.contains(&combo);
+    if (primary_save.combos.contains(&combo) || auxiliary_save)
+        && !(combo.key == Key::Enter
+            && matches!(
+                state.connection_setup.focused_field(),
+                ConnectionField::DatabaseType
+                    | ConnectionField::Transport
+                    | ConnectionField::SslMode
+                    | ConnectionField::CleartextAuth
+            ))
+    {
+        return Action::ConnectionSetupSave;
+    }
 
     if dropdown_open {
         return match combo.key {
@@ -25,25 +41,19 @@ pub fn handle_connection_setup_keys(combo: KeyCombo, state: &AppState) -> Action
         };
     }
 
-    // Ctrl+S: save
-    if ctrl && combo.key == Key::Char('s') {
-        return Action::ConnectionSetupSave;
-    }
-
-    // Ctrl+F: open file picker (reducer no-ops unless SQLite + File field focused)
-    if ctrl_only && combo.key == Key::Char('f') {
-        return Action::OpenFilePicker;
-    }
-
     match combo.key {
         Key::Tab => Action::ConnectionSetupNextField,
         Key::BackTab => Action::ConnectionSetupPrevField,
         Key::Esc => Action::ConnectionSetupCancel,
 
-        // Dropdown toggle (Enter on DatabaseType or SslMode field)
         Key::Enter
-            if state.connection_setup.focused_field == ConnectionField::DatabaseType
-                || state.connection_setup.focused_field == ConnectionField::SslMode =>
+            if matches!(
+                state.connection_setup.focused_field(),
+                ConnectionField::DatabaseType
+                    | ConnectionField::Transport
+                    | ConnectionField::SslMode
+                    | ConnectionField::CleartextAuth
+            ) =>
         {
             Action::ConnectionSetupToggleDropdown
         }
@@ -79,13 +89,13 @@ pub fn handle_connection_setup_keys(combo: KeyCombo, state: &AppState) -> Action
     }
 }
 
-pub fn handle_connection_error_keys(combo: KeyCombo) -> Action {
+pub(super) fn handle_connection_error_keys(combo: KeyCombo) -> Action {
     keybindings::CONNECTION_ERROR
         .resolve(&combo)
         .unwrap_or(Action::None)
 }
 
-pub fn handle_connection_selector_keys(combo: KeyCombo) -> Action {
+pub(super) fn handle_connection_selector_keys(combo: KeyCombo) -> Action {
     keybindings::CONNECTION_SELECTOR
         .resolve(&combo)
         .unwrap_or(Action::None)
@@ -123,6 +133,36 @@ mod tests {
             state
         }
 
+        fn focus_field(state: &mut AppState, field: ConnectionField) {
+            let fields = state.connection_setup.visible_fields();
+            let target_idx = fields
+                .iter()
+                .position(|candidate| *candidate == field)
+                .unwrap_or_else(|| panic!("field {field:?} is not visible: {fields:?}"));
+
+            loop {
+                let current = state.connection_setup.focused_field();
+                if current == field {
+                    return;
+                }
+                let current_idx = fields
+                    .iter()
+                    .position(|candidate| *candidate == current)
+                    .expect("focused field must be visible");
+                if target_idx > current_idx {
+                    state.connection_setup.focus_next_field();
+                } else {
+                    state.connection_setup.focus_prev_field();
+                }
+            }
+        }
+
+        fn setup_state_with_preset(preset: KeymapPreset) -> AppState {
+            let mut state = setup_state();
+            state.settings.load_keymap_preset(preset);
+            state
+        }
+
         #[test]
         fn tab_moves_to_next_field() {
             let state = setup_state();
@@ -144,6 +184,54 @@ mod tests {
         #[test]
         fn ctrl_s_saves() {
             let state = setup_state();
+
+            let result = handle_connection_setup_keys(combo_ctrl(Key::Char('s')), &state);
+
+            assert!(matches!(result, Action::ConnectionSetupSave));
+        }
+
+        #[test]
+        fn ide_enter_saves() {
+            let mut state = setup_state_with_preset(KeymapPreset::Ide);
+            focus_field(&mut state, ConnectionField::Name);
+
+            let result = handle_connection_setup_keys(combo(Key::Enter), &state);
+
+            assert!(matches!(result, Action::ConnectionSetupSave));
+        }
+
+        #[test]
+        fn ide_enter_on_database_type_toggles_dropdown() {
+            let state = setup_state_with_preset(KeymapPreset::Ide);
+
+            let result = handle_connection_setup_keys(combo(Key::Enter), &state);
+
+            assert!(matches!(result, Action::ConnectionSetupToggleDropdown));
+        }
+
+        #[test]
+        fn ide_enter_on_ssl_field_toggles_dropdown() {
+            let mut state = setup_state_with_preset(KeymapPreset::Ide);
+            focus_field(&mut state, ConnectionField::SslMode);
+
+            let result = handle_connection_setup_keys(combo(Key::Enter), &state);
+
+            assert!(matches!(result, Action::ConnectionSetupToggleDropdown));
+        }
+
+        #[test]
+        fn ide_ctrl_s_saves() {
+            let state = setup_state_with_preset(KeymapPreset::Ide);
+
+            let result = handle_connection_setup_keys(combo_ctrl(Key::Char('s')), &state);
+
+            assert!(matches!(result, Action::ConnectionSetupSave));
+        }
+
+        #[test]
+        fn ide_ctrl_s_saves_on_ssl_field() {
+            let mut state = setup_state_with_preset(KeymapPreset::Ide);
+            state.connection_setup.focused_field = ConnectionField::SslMode;
 
             let result = handle_connection_setup_keys(combo_ctrl(Key::Char('s')), &state);
 
@@ -234,7 +322,17 @@ mod tests {
         #[test]
         fn enter_on_ssl_field_toggles_dropdown() {
             let mut state = setup_state();
-            state.connection_setup.focused_field = ConnectionField::SslMode;
+            focus_field(&mut state, ConnectionField::SslMode);
+
+            let result = handle_connection_setup_keys(combo(Key::Enter), &state);
+
+            assert!(matches!(result, Action::ConnectionSetupToggleDropdown));
+        }
+
+        #[test]
+        fn enter_on_database_type_field_toggles_dropdown() {
+            let mut state = setup_state();
+            focus_field(&mut state, ConnectionField::DatabaseType);
 
             let result = handle_connection_setup_keys(combo(Key::Enter), &state);
 
@@ -246,7 +344,15 @@ mod tests {
 
             fn dropdown_state() -> AppState {
                 let mut state = setup_state();
-                state.connection_setup.ssl_dropdown.is_open = true;
+                focus_field(&mut state, ConnectionField::SslMode);
+                state.connection_setup.toggle_focused_dropdown();
+                state
+            }
+
+            fn database_type_dropdown_state() -> AppState {
+                let mut state = setup_state();
+                focus_field(&mut state, ConnectionField::DatabaseType);
+                state.connection_setup.toggle_focused_dropdown();
                 state
             }
 
@@ -264,6 +370,15 @@ mod tests {
                     std::mem::discriminant(&result),
                     std::mem::discriminant(&expected)
                 );
+            }
+
+            #[test]
+            fn database_type_dropdown_routes_navigation() {
+                let state = database_type_dropdown_state();
+
+                let result = handle_connection_setup_keys(combo(Key::Up), &state);
+
+                assert!(matches!(result, Action::ConnectionSetupDropdownPrev));
             }
 
             #[rstest]
@@ -378,10 +493,10 @@ mod tests {
         }
 
         #[test]
-        fn r_key_retries_service_connection() {
+        fn r_key_retries_connection() {
             let result = handle_connection_error_keys(combo(Key::Char('r')));
 
-            assert!(matches!(result, Action::RetryServiceConnection));
+            assert!(matches!(result, Action::RetryConnection));
         }
     }
 

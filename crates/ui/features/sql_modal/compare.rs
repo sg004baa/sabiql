@@ -9,20 +9,23 @@ use ratatui::widgets::{Paragraph, Wrap};
 use crate::app::model::app_state::AppState;
 use crate::app::model::explain_context::CompareSlot;
 use crate::app::model::shared::flash_timer::FlashId;
+use crate::app::update::input::keybindings::sql_modal_compare_explain;
+use crate::domain::DatabaseType;
 use crate::domain::explain_plan::{self, ComparisonVerdict};
+use crate::primitives::atoms::apply_yank_flash_masked;
+use crate::primitives::utils::text_utils::truncate_to_width_with;
 use crate::theme::ThemePalette;
 
-pub fn render(
+pub(super) fn render(
     frame: &mut Frame,
     area: Rect,
     state: &AppState,
     now: Instant,
     theme: &ThemePalette,
 ) -> u16 {
-    let can_yank = state.explain.left.is_some() && state.explain.right.is_some();
-    let left = state.explain.left.as_ref();
-    let right = state.explain.right.as_ref();
-    let scroll_offset = state.explain.compare_scroll_offset;
+    let can_yank = state.explain.can_yank_compare();
+    let (left, right) = state.explain.compare_slots();
+    let scroll_offset = state.explain.compare_scroll_offset();
 
     let mut lines: Vec<Line> = Vec::new();
     let mut flash_mask: Vec<bool> = Vec::new();
@@ -38,8 +41,9 @@ pub fn render(
     }
 
     if lines.is_empty() {
+        let explain_key = sql_modal_compare_explain(state.settings.saved_keymap_preset()).key;
         lines.push(Line::from(Span::styled(
-            " Run EXPLAIN (Ctrl+E) to start comparing.",
+            format!(" Run EXPLAIN ({explain_key}) to start comparing."),
             Style::default().fg(theme.semantic.text.placeholder),
         )));
         flash_mask.push(false);
@@ -51,12 +55,7 @@ pub fn render(
     let visible_mask: Vec<bool> = flash_mask.into_iter().skip(clamped).collect();
 
     let flash_active = can_yank && state.flash_timers.is_active(FlashId::SqlModal, now);
-    crate::primitives::atoms::apply_yank_flash_masked(
-        &mut visible,
-        flash_active,
-        &visible_mask,
-        theme,
-    );
+    apply_yank_flash_masked(&mut visible, flash_active, &visible_mask, theme);
 
     frame.render_widget(
         Paragraph::new(visible)
@@ -341,14 +340,10 @@ fn render_stacked_slot(
             flash_mask,
             Line::from(Span::styled(format!(" {}", s.source.label()), active_style)),
         );
-        let time_secs = s.plan.execution_secs();
         push_chrome(
             lines,
             flash_mask,
-            Line::from(Span::styled(
-                format!("  {}  ({:.2}s)", mode_label(s.plan.is_analyze), time_secs),
-                badge_style,
-            )),
+            Line::from(Span::styled(slot_detail_text(Some(s)), badge_style)),
         );
         for line in s.plan.raw_text.lines() {
             push_content(
@@ -385,7 +380,15 @@ fn slot_detail_text(slot: Option<&CompareSlot>) -> String {
     match slot {
         Some(s) => {
             let time_secs = s.plan.execution_secs();
-            format!(" {}  ({:.2}s)", mode_label(s.plan.is_analyze), time_secs)
+            let summary = format!(" {}  ({:.2}s)", mode_label(s.plan.is_analyze), time_secs);
+            if s.database_type == DatabaseType::MySQL && s.plan.is_analyze {
+                format!(
+                    "{summary}  {}",
+                    super::explain::format_actual_metrics(Some(&s.plan))
+                )
+            } else {
+                summary
+            }
         }
         None => " Run EXPLAIN again".to_string(),
     }
@@ -396,12 +399,13 @@ fn mode_label(is_analyze: bool) -> &'static str {
 }
 
 pub(super) fn pad_or_truncate(s: &str, width: usize) -> String {
-    let char_count = s.chars().count();
-    if char_count > width {
-        s.chars().take(width.saturating_sub(1)).collect::<String>() + "\u{2026}"
-    } else {
-        format!("{s:<width$}")
-    }
+    use unicode_width::UnicodeWidthStr;
+
+    // Truncation can land short of `width` (a 2-cell char may not fit the
+    // last cell), so pad the remainder to keep side-by-side columns aligned
+    let truncated = truncate_to_width_with(s, width, "\u{2026}");
+    let pad = width.saturating_sub(UnicodeWidthStr::width(truncated.as_str()));
+    format!("{truncated}{}", " ".repeat(pad))
 }
 
 #[cfg(test)]
@@ -411,17 +415,43 @@ mod tests {
     use crate::domain::explain_plan::ExplainPlan;
     use crate::theme::DEFAULT_THEME;
 
+    mod pad_or_truncate_tests {
+        use super::super::pad_or_truncate;
+        use rstest::rstest;
+        use unicode_width::UnicodeWidthStr;
+
+        #[rstest]
+        #[case("abc", 5, "abc  ")]
+        #[case("abcdef", 5, "abcd\u{2026}")]
+        #[case("日本語テスト", 5, "日本\u{2026}")]
+        #[case("日本語", 4, "日\u{2026} ")]
+        fn fills_exact_display_width(
+            #[case] input: &str,
+            #[case] width: usize,
+            #[case] expected: &str,
+        ) {
+            let result = pad_or_truncate(input, width);
+
+            assert_eq!(result, expected);
+            assert_eq!(UnicodeWidthStr::width(result.as_str()), width);
+        }
+    }
+
     fn sample_slot(label: SlotSource, plan: &str) -> CompareSlot {
         CompareSlot {
             plan: ExplainPlan {
                 raw_text: plan.to_string(),
                 top_node_type: Some("Seq Scan".to_string()),
                 total_cost: Some(10.0),
-                estimated_rows: Some(1),
+                estimated_rows: Some(1.0),
+                actual_start_ms: None,
+                actual_end_ms: None,
+                actual_rows: None,
+                loops: None,
                 is_analyze: false,
                 execution_time_ms: 250,
             },
-            query_snippet: "SELECT 1".to_string(),
+            database_type: DatabaseType::PostgreSQL,
             full_query: "SELECT 1".to_string(),
             source: label,
         }
@@ -481,5 +511,29 @@ mod tests {
 
         assert_eq!(lines.len(), flash_mask.len());
         assert!(flash_mask.iter().all(|&flash| !flash));
+    }
+
+    #[test]
+    fn mysql_analyze_slot_summary_shows_actual_metrics() {
+        let mut slot = sample_slot(SlotSource::AutoLatest, "plan");
+        slot.database_type = DatabaseType::MySQL;
+        slot.plan.is_analyze = true;
+        slot.plan.actual_start_ms = Some(0.01);
+        slot.plan.actual_end_ms = Some(0.5);
+        slot.plan.actual_rows = Some(95.0);
+        slot.plan.loops = Some(2);
+
+        let summary = slot_detail_text(Some(&slot));
+
+        assert!(summary.contains("Actual: time=0.010..0.500 ms rows=95 loops=2"));
+    }
+
+    #[test]
+    fn mysql_analyze_slot_summary_marks_missing_actual_metrics_unavailable() {
+        let mut slot = sample_slot(SlotSource::AutoLatest, "plan");
+        slot.database_type = DatabaseType::MySQL;
+        slot.plan.is_analyze = true;
+
+        assert!(slot_detail_text(Some(&slot)).contains("Actual: unavailable"));
     }
 }

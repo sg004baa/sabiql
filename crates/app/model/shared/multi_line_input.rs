@@ -1,6 +1,9 @@
-use crate::update::action::CursorMove;
+use crate::model::shared::cursor::CursorMove;
 
-use super::text_input::{TextInputLike, TextInputState, next_word_start, previous_word_start};
+use super::text_input::{
+    TextInputState, TextKillDirection, char_to_byte_index, next_word_start, previous_word_start,
+    readline_forward_word_end, readline_previous_whitespace_boundary, readline_previous_word_start,
+};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct LineSpan {
@@ -37,6 +40,18 @@ impl MultiLineInputState {
 
     pub fn scroll_row(&self) -> usize {
         self.scroll_row
+    }
+
+    pub fn content(&self) -> &str {
+        self.inner.content()
+    }
+
+    pub fn cursor(&self) -> usize {
+        self.inner.cursor()
+    }
+
+    pub fn char_count(&self) -> usize {
+        self.inner.char_count()
     }
 
     pub fn set_cursor(&mut self, pos: usize) {
@@ -82,6 +97,44 @@ impl MultiLineInputState {
         }
         self.preferred_col = None;
         self.rebuild_derived();
+    }
+
+    pub fn kill_to_line_end(&mut self) -> String {
+        let (line, _) = self.current_line_col();
+        let end = self.line_spans()[line].start + self.line_spans()[line].len;
+        self.remove_range(self.cursor(), end)
+    }
+
+    pub fn kill_to_line_start(&mut self) -> String {
+        let (line, _) = self.current_line_col();
+        self.remove_range(self.line_spans()[line].start, self.cursor())
+    }
+
+    pub fn kill_next_word(&mut self) -> String {
+        self.remove_range(
+            self.cursor(),
+            readline_forward_word_end(self.content(), self.cursor()),
+        )
+    }
+
+    pub fn kill_previous_word(&mut self) -> String {
+        self.remove_range(
+            readline_previous_whitespace_boundary(self.content(), self.cursor()),
+            self.cursor(),
+        )
+    }
+
+    pub fn kill(&mut self, direction: TextKillDirection) -> String {
+        match direction {
+            TextKillDirection::ToLineEnd => self.kill_to_line_end(),
+            TextKillDirection::ToLineStart => self.kill_to_line_start(),
+            TextKillDirection::ReadlineWordEnd => self.kill_next_word(),
+            TextKillDirection::ReadlinePreviousWhitespace => self.kill_previous_word(),
+        }
+    }
+
+    pub fn yank(&mut self, text: &str) {
+        self.insert_str(text);
     }
 
     pub fn set_content(&mut self, s: String) {
@@ -152,6 +205,16 @@ impl MultiLineInputState {
                 self.set_cursor_and_sync(previous);
                 self.preferred_col = None;
             }
+            CursorMove::ReadlineWordStart => {
+                let previous = readline_previous_word_start(self.content(), self.cursor());
+                self.set_cursor_and_sync(previous);
+                self.preferred_col = None;
+            }
+            CursorMove::ReadlineWordEnd => {
+                let next = readline_forward_word_end(self.content(), self.cursor());
+                self.set_cursor_and_sync(next);
+                self.preferred_col = None;
+            }
             CursorMove::BufferStart => {
                 self.set_cursor_from_line(0, 0);
                 self.preferred_col = None;
@@ -217,11 +280,20 @@ impl MultiLineInputState {
     }
 
     pub fn char_to_byte_index(&self, char_idx: usize) -> usize {
-        char_to_byte_index_impl(self.content(), char_idx)
+        char_to_byte_index(self.content(), char_idx)
     }
 
     fn rebuild_derived(&mut self) {
         self.derived = MultiLineDerivedState::new(self.content(), self.cursor());
+    }
+
+    fn remove_range(&mut self, start: usize, end: usize) -> String {
+        let removed = self.inner.remove_range(start, end);
+        if !removed.is_empty() {
+            self.preferred_col = None;
+            self.rebuild_derived();
+        }
+        removed
     }
 
     fn current_line_col(&self) -> (usize, usize) {
@@ -284,12 +356,6 @@ impl MultiLineInputState {
     }
 }
 
-impl TextInputLike for MultiLineInputState {
-    fn text_input(&self) -> &TextInputState {
-        &self.inner
-    }
-}
-
 impl MultiLineDerivedState {
     fn default_empty_line() -> Self {
         Self {
@@ -333,12 +399,6 @@ fn find_cursor_position(line_spans: &[LineSpan], cursor: usize) -> (usize, usize
         .saturating_sub(1);
     let span = line_spans.get(row).copied().unwrap_or_default();
     (row, cursor.saturating_sub(span.start).min(span.len))
-}
-
-fn char_to_byte_index_impl(s: &str, char_idx: usize) -> usize {
-    s.char_indices()
-        .nth(char_idx)
-        .map_or(s.len(), |(byte_idx, _)| byte_idx)
 }
 
 #[cfg(test)]
@@ -1001,6 +1061,21 @@ mod tests {
             assert_eq!(s.content(), "");
             assert_eq!(s.cursor(), 0);
             assert_eq!(s.scroll_row(), 0);
+        }
+    }
+
+    mod kill {
+        use super::*;
+
+        #[test]
+        fn to_line_end_preserves_following_lines() {
+            let mut input = ml("select\nfrom users", 2);
+
+            let killed = input.kill_to_line_end();
+
+            assert_eq!(killed, "lect");
+            assert_eq!(input.content(), "se\nfrom users");
+            assert_eq!(input.cursor_to_position(), (0, 2));
         }
     }
 

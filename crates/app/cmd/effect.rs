@@ -1,34 +1,37 @@
-use crate::domain::Table;
-use crate::domain::connection::{ConnectionId, DatabaseType, SslMode};
 use crate::model::connection::file_picker::WalkOptions;
-use crate::model::shared::theme_id::ThemeId;
-use crate::update::action::{Action, ExternalEditorTarget};
+use crate::update::action::ExternalEditorTarget;
+use std::sync::Arc;
+
+use crate::domain::connection::{ConnectionConfig, ConnectionId, DatabaseType};
+use crate::domain::query_history::QueryHistoryScope;
+use crate::domain::{DatabaseMetadata, QueryValue, Table, TableSignatureSnapshot};
+use crate::model::browse::session::ConnectionSaveGuard;
+use crate::ports::outbound::{AccessMode, AppSettings};
+use crate::update::action::{Action, ConnectionTarget};
 
 #[derive(Debug, Clone)]
 pub enum Effect {
-    Render,
-
-    /// Recursively scan for SQLite database files, streaming results back as
-    /// `FilePickerChunk` actions tagged with `generation`.
-    ///
-    /// `field` is the raw `File:` input; the walk root is resolved from it (and
-    /// `$HOME`) on the async side, keeping the reducer free of env access.
+    OpenExternalEditor {
+        target: ExternalEditorTarget,
+        content: String,
+    },
     StartFilePickerWalk {
         field: String,
         options: WalkOptions,
         generation: u64,
     },
+    Render,
 
     SaveAndConnect {
         id: Option<ConnectionId>,
         name: String,
-        host: String,
-        port: u16,
-        database: String,
-        user: String,
-        password: String,
-        ssl_mode: SslMode,
-        database_type: DatabaseType,
+        config: ConnectionConfig,
+        run_id: u64,
+        run_guard: Arc<ConnectionSaveGuard>,
+    },
+    ProbeMySqlConnection {
+        target: ConnectionTarget,
+        run_id: u64,
     },
     LoadConnectionForEdit {
         id: ConnectionId,
@@ -38,11 +41,13 @@ pub enum Effect {
         id: ConnectionId,
     },
 
-    CacheInvalidate {
-        dsn: String,
-    },
     FetchMetadata {
         dsn: String,
+        run_id: u64,
+    },
+    FetchEffectiveUser {
+        dsn: String,
+        run_id: u64,
     },
     // Updates state.table_detail on completion
     FetchTableDetail {
@@ -50,16 +55,20 @@ pub enum Effect {
         schema: String,
         table: String,
         generation: u64,
+        run_id: u64,
     },
     // Only caches in completion_engine, does NOT update state.table_detail
-    PrefetchTableDetail {
+    PrefetchTableColumnsAndFks {
         dsn: String,
+        run_id: u64,
         schema: String,
         table: String,
-        generation: u64,
     },
-    ProcessPrefetchQueue,
+    SchedulePrefetchQueueProcessing {
+        run_id: u64,
+    },
     DelayedProcessPrefetchQueue {
+        run_id: u64,
         delay_secs: u64,
     },
 
@@ -68,40 +77,50 @@ pub enum Effect {
         schema: String,
         table: String,
         generation: u64,
+        run_id: u64,
         limit: usize,
         offset: usize,
         target_page: usize,
-        read_only: bool,
     },
     ExecuteAdhoc {
         dsn: String,
+        run_id: u64,
         query: String,
-        read_only: bool,
+        access_mode: AccessMode,
     },
     ExecuteExplain {
         dsn: String,
+        database_type: DatabaseType,
+        database_generation: u64,
+        run_id: u64,
         query: String,
+        source_query: String,
         is_analyze: bool,
-        read_only: bool,
+        access_mode: AccessMode,
     },
     ExecuteWrite {
         dsn: String,
+        run_id: u64,
         query: String,
-        read_only: bool,
+        access_mode: AccessMode,
     },
-    CountRowsForExport {
-        dsn: String,
-        count_query: String,
-        export_query: String,
-        file_name: String,
-        read_only: bool,
-    },
+    CancelConnectionTask,
+    CancelMetadataTasks,
+    CancelSqliteDiagnostics,
+    CancelTrackedTasks,
     ExportCsv {
         dsn: String,
+        run_id: u64,
         query: String,
         file_name: String,
-        row_count: usize,
-        read_only: bool,
+    },
+    ExportCsvFromCache {
+        dsn: String,
+        run_id: u64,
+        file_name: String,
+        columns: Vec<String>,
+        values: Vec<Vec<QueryValue>>,
+        row_count: Option<usize>,
     },
 
     CacheTableInCompletionEngine {
@@ -118,6 +137,7 @@ pub enum Effect {
     TriggerCompletion,
 
     GenerateErDiagramFromCache {
+        run_id: u64,
         total_tables: usize,
         project_name: String,
         target_tables: Vec<String>,
@@ -126,39 +146,48 @@ pub enum Effect {
         failed_tables: Vec<(String, String)>,
     },
     ExtractFkNeighbors {
+        run_id: u64,
         seed_tables: Vec<String>,
     },
     SmartErRefresh {
         dsn: String,
         run_id: u64,
     },
+    SmartErRefreshCacheAndDiff {
+        dsn: String,
+        run_id: u64,
+        new_metadata: Arc<DatabaseMetadata>,
+        signature_snapshot: Arc<TableSignatureSnapshot>,
+    },
 
     CopyToClipboard {
         content: String,
-        on_success: Option<Action>,
-        on_failure: Option<Action>,
+        on_success: Box<Action>,
+        on_failure: Option<Box<Action>>,
     },
     OpenFolder {
         path: std::path::PathBuf,
     },
-    /// Hand the terminal to `$EDITOR` and load the edited text back into `target`.
-    OpenExternalEditor {
-        target: ExternalEditorTarget,
-        content: String,
-    },
 
     LoadQueryHistory {
         project_name: String,
-        connection_id: crate::domain::ConnectionId,
+        scope: QueryHistoryScope,
     },
 
     SaveSettings {
-        theme_id: ThemeId,
+        settings: AppSettings,
     },
 
-    // Executes effects in order (each awaits before the next),
-    // but spawned async tasks (e.g. FetchMetadata) may complete out of order.
-    Sequence(Vec<Self>),
+    FetchSqliteDiagnosticsCore {
+        dsn: String,
+        run_id: u64,
+    },
+
+    FetchSqliteDiagnosticsQuickCheck {
+        dsn: String,
+        run_id: u64,
+    },
+
     DispatchActions(Vec<Action>),
     SwitchConnection {
         connection_index: usize,

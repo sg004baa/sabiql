@@ -1,197 +1,140 @@
-use std::process::{ExitStatus, Stdio};
+use std::path::Path;
+use std::process::Stdio;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tokio::time::timeout;
 
-use crate::adapters::csv_record_counter::CsvRecordCounter;
+use crate::adapters::csv_export::CsvOutputError;
 use crate::app::ports::outbound::DbOperationError;
-use crate::domain::{QueryResult, QuerySource, WriteExecutionResult};
+use crate::domain::{CommandTag, QueryResult, QuerySource, RefreshScope, WriteExecutionResult};
 
 use super::super::PostgresAdapter;
-use super::error::classify_query_error;
+use super::error::{classify_cli_spawn_error, classify_query_error};
 use super::parser::{ParseCommandTagError, split_sql_statements};
 
-fn csv_field_count(line: &str) -> usize {
-    let mut count = 1;
-    let mut in_quotes = false;
-    for ch in line.chars() {
-        match ch {
-            '"' => in_quotes = !in_quotes,
-            ',' if !in_quotes => count += 1,
-            _ => {}
+async fn collect_csv_output(
+    mut child: tokio::process::Child,
+    path: &Path,
+    timeout_duration: Duration,
+) -> Result<(), DbOperationError> {
+    let mut stdout = child.stdout.take().expect("piped psql stdout");
+    let mut stderr_handle = child.stderr.take().expect("piped psql stderr");
+
+    let file = tokio::fs::File::create(path)
+        .await
+        .map_err(|e| DbOperationError::ExportIo(Arc::new(e)))?;
+    let mut writer = tokio::io::BufWriter::new(file);
+
+    let result = timeout(timeout_duration, async {
+        let ((), stderr, status) = tokio::try_join!(
+            async {
+                let mut buf = [0u8; 8192];
+                loop {
+                    let n = stdout.read(&mut buf).await?;
+                    if n == 0 {
+                        break;
+                    }
+                    writer
+                        .write_all(&buf[..n])
+                        .await
+                        .map_err(CsvOutputError::File)?;
+                }
+                writer.flush().await.map_err(CsvOutputError::File)?;
+                Ok::<_, CsvOutputError>(())
+            },
+            async {
+                let mut buf = Vec::new();
+                stderr_handle.read_to_end(&mut buf).await?;
+                Ok::<_, CsvOutputError>(String::from_utf8_lossy(&buf).into_owned())
+            },
+            async { Ok::<_, CsvOutputError>(child.wait().await?) },
+        )?;
+
+        Ok::<_, CsvOutputError>((status, stderr))
+    })
+    .await;
+
+    drop(writer);
+    match result {
+        Ok(Ok((status, _))) if status.success() => Ok(()),
+        Ok(Ok((status, stderr))) => {
+            let _ = tokio::fs::remove_file(path).await;
+            Err(classify_query_error(&stderr, status))
+        }
+        Ok(Err(e)) => {
+            let _ = tokio::fs::remove_file(path).await;
+            Err(e.into_db_operation_error())
+        }
+        Err(e) => {
+            let _ = tokio::fs::remove_file(path).await;
+            Err(DbOperationError::Timeout(e.to_string()))
         }
     }
-    count
 }
 
-fn first_keyword(stmt: &str) -> &str {
-    let bytes = stmt.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'-' if i + 1 < bytes.len() && bytes[i + 1] == b'-' => {
-                while i < bytes.len() && bytes[i] != b'\n' {
-                    i += 1;
-                }
-            }
-            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => {
-                i += 2;
-                while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
-                    i += 1;
-                }
-                if i + 1 < bytes.len() {
-                    i += 2;
-                }
-            }
-            b if b.is_ascii_alphabetic() => {
-                let start = i;
-                while i < bytes.len() && bytes[i].is_ascii_alphanumeric() {
-                    i += 1;
-                }
-                return &stmt[start..i];
-            }
-            _ => i += 1,
-        }
+// Keep user SQL server-side: stdin scripts would let psql interpret
+// line-leading backslash metacommands before the server sees them.
+
+fn boundary_marker() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    format!(
+        "__sabiql_boundary_{}_{}_{}__",
+        std::process::id(),
+        nanos,
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+// Match the implicit all-or-nothing behavior of a single multi-statement -c.
+fn segmented_query_args(statements: &[&str], marker: &str) -> Vec<String> {
+    let echo = format!("\\echo {marker}");
+    let mut args = Vec::with_capacity(statements.len() * 4 + 1);
+    args.push("--single-transaction".to_string());
+    for stmt in statements {
+        args.push("-c".to_string());
+        args.push(echo.clone());
+        args.push("-c".to_string());
+        args.push((*stmt).to_string());
     }
-    ""
+    args
 }
 
-fn count_select_statements(sql: &str) -> usize {
-    split_sql_statements(sql)
+fn split_marker_segments<'a>(stdout: &'a str, marker: &str) -> Vec<&'a str> {
+    let mut segments = Vec::new();
+    let mut seg_start: Option<usize> = None;
+    let mut offset = 0;
+    for line in stdout.split_inclusive('\n') {
+        if line.trim_end_matches(['\n', '\r']) == marker {
+            if let Some(start) = seg_start {
+                segments.push(stdout[start..offset].trim_matches(['\n', '\r']));
+            }
+            seg_start = Some(offset + line.len());
+        }
+        offset += line.len();
+    }
+    if let Some(start) = seg_start {
+        segments.push(stdout[start..].trim_matches(['\n', '\r']));
+    }
+    segments
+}
+
+fn select_result_segment<'a>(segments: &[&'a str]) -> Option<&'a str> {
+    segments
         .iter()
-        .filter(|s| {
-            let kw = first_keyword(s);
-            kw.eq_ignore_ascii_case("SELECT") || kw.eq_ignore_ascii_case("WITH")
-        })
-        .count()
-}
-
-// psql --csv concatenates multiple result sets without separators;
-// keep only the last one.
-fn extract_last_csv_block<'a>(stdout: &'a str, sql: &str) -> &'a str {
-    let lines: Vec<&str> = stdout.lines().collect();
-    if lines.len() <= 2 {
-        return stdout;
-    }
-
-    let expected_sets = count_select_statements(sql);
-    let first_header = lines[0];
-    let mut current_fc = csv_field_count(first_header);
-    let mut known_headers: Vec<&str> = vec![first_header];
-    let mut last_header_idx = 0;
-    let mut data_rows_since_header = 0usize;
-
-    for (i, &line) in lines.iter().enumerate().skip(1) {
-        let fc = csv_field_count(line);
-        if fc != current_fc {
-            last_header_idx = i;
-            current_fc = fc;
-            data_rows_since_header = 0;
-            if !known_headers.contains(&line) {
-                known_headers.push(line);
-            }
-        } else if known_headers.contains(&line) {
-            last_header_idx = i;
-            data_rows_since_header = 0;
-        } else if expected_sets > 1
-            && data_rows_since_header >= 1
-            && known_headers.len() < expected_sets
-        {
-            // Require at least one data row before accepting a new header
-            // candidate, bounded by SELECT/WITH count
-            last_header_idx = i;
-            known_headers.push(line);
-            data_rows_since_header = 0;
-        } else {
-            data_rows_since_header += 1;
-        }
-    }
-
-    if last_header_idx == 0 {
-        return stdout;
-    }
-
-    let byte_offset: usize = stdout
-        .lines()
-        .take(last_header_idx)
-        .map(|l| l.len() + 1) // +1 for '\n'
-        .sum();
-
-    &stdout[byte_offset..]
-}
-
-/// Split the percent-encoded password out of a `postgres://` /
-/// `postgresql://` URI so it can be handed to psql via `PGPASSWORD` instead
-/// of the argv, where it would be visible in the process list.
-///
-/// Keyword/value and `service=` DSNs carry no inline password and pass
-/// through unchanged.
-fn split_dsn_password(dsn: &str) -> Result<(String, Option<String>), DbOperationError> {
-    let Some((scheme, rest)) = dsn.split_once("://") else {
-        return Ok((dsn.to_string(), None));
-    };
-    let Some((userinfo, host_part)) = rest.split_once('@') else {
-        return Ok((dsn.to_string(), None));
-    };
-    let Some((user, encoded_password)) = userinfo.split_once(':') else {
-        return Ok((dsn.to_string(), None));
-    };
-    let password = urlencoding::decode(encoded_password)
-        .map_err(|e| DbOperationError::ConnectionFailed(e.to_string()))?
-        .into_owned();
-    Ok((format!("{scheme}://{user}@{host_part}"), Some(password)))
-}
-
-struct PsqlOutput {
-    status: ExitStatus,
-    stdout: String,
-    stderr: String,
+        .rev()
+        .find(|seg| !seg.trim().is_empty() && !PostgresAdapter::is_command_tags_only(seg))
+        .copied()
 }
 
 impl PostgresAdapter {
     const PGOPTIONS_READ_ONLY: &str = "-c default_transaction_read_only=on";
-
-    /// psql args for tabular data fetches (preview/adhoc/CSV export): CSV
-    /// output with NULLs rendered as the literal `NULL` sentinel so they stay
-    /// distinguishable from empty strings, matching the mysql adapter and the
-    /// `sql_literal_or_null` sentinel convention.
-    const CSV_DATA_ARGS: &[&str] = &["--csv", "-P", "null=NULL"];
-
-    fn build_psql_cmd(
-        dsn: &str,
-        extra_args: &[&str],
-        query: &str,
-        read_only: bool,
-    ) -> Result<Command, DbOperationError> {
-        let (dsn, password) = split_dsn_password(dsn)?;
-
-        let mut cmd = Command::new("psql");
-        if read_only {
-            Self::apply_read_only_pgoptions(&mut cmd);
-        }
-        // Pass the password via the environment so it never shows up in the
-        // process list as part of the connection URI.
-        if let Some(password) = password {
-            cmd.env("PGPASSWORD", password);
-        }
-        cmd.arg(dsn)
-            .arg("-X")
-            .arg("-v")
-            .arg("ON_ERROR_STOP=1")
-            .arg("-v")
-            .arg("VERBOSITY=verbose")
-            .arg("-v")
-            .arg("SHOW_CONTEXT=never");
-
-        for arg in extra_args {
-            cmd.arg(arg);
-        }
-
-        cmd.arg("-c").arg(query);
-        Ok(cmd)
-    }
 
     async fn run_psql(
         &self,
@@ -199,9 +142,36 @@ impl PostgresAdapter {
         extra_args: &[&str],
         query: &str,
         read_only: bool,
-    ) -> Result<PsqlOutput, DbOperationError> {
-        let mut cmd = Self::build_psql_cmd(dsn, extra_args, query, read_only)?;
+    ) -> Result<String, DbOperationError> {
+        self.run_psql_args(dsn, extra_args, &["-c", query], read_only)
+            .await
+    }
+
+    async fn run_psql_args(
+        &self,
+        dsn: &str,
+        extra_args: &[&str],
+        query_args: &[&str],
+        read_only: bool,
+    ) -> Result<String, DbOperationError> {
+        let mut cmd = Self::build_psql_command(dsn, extra_args, query_args, read_only);
+
         Self::collect_output(&mut cmd, self.timeout_secs).await
+    }
+
+    fn build_psql_command(
+        dsn: &str,
+        extra_args: &[&str],
+        query_args: &[&str],
+        read_only: bool,
+    ) -> Command {
+        let mut cmd = Command::new("psql");
+        if read_only {
+            Self::apply_read_only_pgoptions(&mut cmd);
+        }
+        Self::apply_psql_base_args(&mut cmd, dsn);
+        cmd.args(extra_args).args(query_args);
+        cmd
     }
 
     fn apply_read_only_pgoptions(cmd: &mut Command) {
@@ -212,34 +182,41 @@ impl PostgresAdapter {
         cmd.env("PGOPTIONS", merged);
     }
 
+    fn apply_psql_base_args(cmd: &mut Command, dsn: &str) {
+        cmd.arg(dsn)
+            .arg("-X")
+            .arg("-v")
+            .arg("ON_ERROR_STOP=1")
+            .arg("-v")
+            .arg("VERBOSITY=verbose")
+            .arg("-v")
+            .arg("SHOW_CONTEXT=never");
+    }
+
     async fn collect_output(
         cmd: &mut Command,
         timeout_secs: u64,
-    ) -> Result<PsqlOutput, DbOperationError> {
+    ) -> Result<String, DbOperationError> {
         let mut child = cmd
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
-            .map_err(|e| DbOperationError::CommandNotFound(e.to_string()))?;
+            .map_err(classify_cli_spawn_error)?;
 
-        let mut stdout_handle = child.stdout.take();
-        let mut stderr_handle = child.stderr.take();
+        let mut stdout_handle = child.stdout.take().expect("piped psql stdout");
+        let mut stderr_handle = child.stderr.take().expect("piped psql stderr");
 
         let result = timeout(Duration::from_secs(timeout_secs), async {
             let (stdout_result, stderr_result) = tokio::join!(
                 async {
                     let mut buf = Vec::new();
-                    if let Some(ref mut out) = stdout_handle {
-                        out.read_to_end(&mut buf).await?;
-                    }
+                    stdout_handle.read_to_end(&mut buf).await?;
                     Ok::<_, std::io::Error>(String::from_utf8_lossy(&buf).into_owned())
                 },
                 async {
                     let mut buf = Vec::new();
-                    if let Some(ref mut err) = stderr_handle {
-                        err.read_to_end(&mut buf).await?;
-                    }
+                    stderr_handle.read_to_end(&mut buf).await?;
                     Ok::<_, std::io::Error>(String::from_utf8_lossy(&buf).into_owned())
                 }
             );
@@ -255,47 +232,58 @@ impl PostgresAdapter {
         .map_err(|e| DbOperationError::QueryFailed(e.to_string()))?;
 
         let (status, stdout, stderr) = result;
-        Ok(PsqlOutput {
-            status,
-            stdout,
-            stderr,
-        })
+        if !status.success() {
+            return Err(classify_query_error(&stderr, status));
+        }
+        Ok(stdout)
     }
 
-    pub(in crate::adapters::postgres) async fn execute_query(
+    pub(in crate::adapters::postgres) async fn execute_raw_output(
         &self,
         dsn: &str,
         query: &str,
     ) -> Result<String, DbOperationError> {
-        let output = self.run_psql(dsn, &["-t", "-A"], query, false).await?;
-
-        if !output.status.success() {
-            return Err(Self::classify_psql_error(&output.stderr));
-        }
-
-        Ok(output.stdout)
+        self.run_psql(dsn, &["-t", "-A"], query, false).await
     }
 
-    pub(in crate::adapters::postgres) async fn execute_query_raw(
+    pub(in crate::adapters::postgres) async fn execute_query_result(
         &self,
         dsn: &str,
         query: &str,
         source: QuerySource,
         read_only: bool,
     ) -> Result<QueryResult, DbOperationError> {
+        let statements = split_sql_statements(query);
+        if statements.len() <= 1 {
+            return self
+                .execute_single_statement(dsn, query, source, read_only)
+                .await;
+        }
+        self.execute_segmented_statements(dsn, query, &statements, source, read_only)
+            .await
+    }
+
+    // Keep non-transaction-capable statements outside the segmented
+    // --single-transaction path.
+    async fn execute_single_statement(
+        &self,
+        dsn: &str,
+        query: &str,
+        source: QuerySource,
+        read_only: bool,
+    ) -> Result<QueryResult, DbOperationError> {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "infra measures psql execution time at the I/O boundary"
+        )]
         let start = Instant::now();
 
-        let output = self
-            .run_psql(dsn, Self::CSV_DATA_ARGS, query, read_only)
-            .await?;
+        let output = self.run_psql(dsn, &["--csv"], query, read_only).await?;
 
         let elapsed = start.elapsed().as_millis() as u64;
 
-        if !output.status.success() {
-            return Err(Self::classify_psql_error(&output.stderr));
-        }
-
-        if output.stdout.trim().is_empty() {
+        let stdout_trimmed = output.trim();
+        if stdout_trimmed.is_empty() {
             return Ok(QueryResult::success(
                 query.to_string(),
                 Vec::new(),
@@ -305,16 +293,83 @@ impl PostgresAdapter {
             ));
         }
 
-        let stdout_trimmed = output.stdout.trim();
         if let Some(tag) = Self::parse_aggregate_command_tag(stdout_trimmed, query) {
-            let row_count = tag.affected_rows().unwrap_or(0) as usize;
-            let mut result =
-                QueryResult::success(query.to_string(), Vec::new(), Vec::new(), elapsed, source);
-            result.row_count = row_count;
-            return Ok(result.with_command_tag(tag));
+            return Ok(Self::command_tag_result(query, tag, elapsed, source));
         }
 
-        let csv_block = extract_last_csv_block(stdout_trimmed, query);
+        Self::csv_result(query, stdout_trimmed, elapsed, source)
+    }
+
+    async fn execute_segmented_statements(
+        &self,
+        dsn: &str,
+        query: &str,
+        statements: &[&str],
+        source: QuerySource,
+        read_only: bool,
+    ) -> Result<QueryResult, DbOperationError> {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "infra measures psql execution time at the I/O boundary"
+        )]
+        let start = Instant::now();
+
+        let marker = boundary_marker();
+        let args = segmented_query_args(statements, &marker);
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let output = self
+            .run_psql_args(dsn, &["--csv"], &arg_refs, read_only)
+            .await?;
+
+        let elapsed = start.elapsed().as_millis() as u64;
+
+        let segments = split_marker_segments(&output, &marker);
+        // A mismatch implies a marker collision in data; guessing would
+        // reintroduce silent result-set misattribution.
+        if segments.len() != statements.len() {
+            return Err(DbOperationError::QueryFailed(format!(
+                "result-set boundary mismatch: expected {} segments, found {}",
+                statements.len(),
+                segments.len()
+            )));
+        }
+
+        if let Some(csv_block) = select_result_segment(&segments) {
+            return Self::csv_result(query, csv_block, elapsed, source);
+        }
+
+        let tags = segments.join("\n");
+        if let Some(tag) = Self::parse_aggregate_command_tag(tags.trim(), query) {
+            return Ok(Self::command_tag_result(query, tag, elapsed, source));
+        }
+
+        Ok(QueryResult::success(
+            query.to_string(),
+            Vec::new(),
+            Vec::new(),
+            elapsed,
+            source,
+        ))
+    }
+
+    fn command_tag_result(
+        query: &str,
+        tag: CommandTag,
+        elapsed: u64,
+        source: QuerySource,
+    ) -> QueryResult {
+        let row_count = tag.affected_rows().unwrap_or(0) as usize;
+        QueryResult::success(query.to_string(), Vec::new(), Vec::new(), elapsed, source)
+            .with_row_count(row_count)
+            .with_command_tag(tag)
+    }
+
+    fn csv_result(
+        query: &str,
+        csv_block: &str,
+        elapsed: u64,
+        source: QuerySource,
+    ) -> Result<QueryResult, DbOperationError> {
         let mut reader = csv::ReaderBuilder::new()
             .has_headers(true)
             .from_reader(csv_block.as_bytes());
@@ -343,40 +398,18 @@ impl PostgresAdapter {
         query: &str,
         read_only: bool,
     ) -> Result<WriteExecutionResult, DbOperationError> {
-        let start = Instant::now();
-
         let output = self.run_psql(dsn, &[], query, read_only).await?;
 
-        let elapsed = start.elapsed().as_millis() as u64;
-
-        if !output.status.success() {
-            return Err(Self::classify_psql_error(&output.stderr));
-        }
-
-        let affected_rows = Self::parse_affected_rows_with_source(&output.stdout).map_err(
-            |error: ParseCommandTagError| {
-                DbOperationError::CommandTagParseFailed(error.to_string())
+        let affected_rows = Self::parse_affected_rows_with_source(&output).map_err(
+            |error: ParseCommandTagError| DbOperationError::QueryFailedAfterChange {
+                source: Arc::new(DbOperationError::CommandTagParseFailed(error.to_string())),
+                refresh_scope: RefreshScope::Data,
             },
         )?;
 
         Ok(WriteExecutionResult {
             affected_rows,
-            execution_time_ms: elapsed,
-        })
-    }
-
-    pub(in crate::adapters::postgres) async fn count_rows(
-        &self,
-        dsn: &str,
-        query: &str,
-        read_only: bool,
-    ) -> Result<usize, DbOperationError> {
-        let output = self.run_psql(dsn, &["-t", "-A"], query, read_only).await?;
-        if !output.status.success() {
-            return Err(Self::classify_psql_error(&output.stderr));
-        }
-        output.stdout.trim().parse::<usize>().map_err(|e| {
-            DbOperationError::QueryFailed(format!("Failed to parse COUNT result: {e}"))
+            diagnostics: Vec::new(),
         })
     }
 
@@ -386,69 +419,19 @@ impl PostgresAdapter {
         query: &str,
         path: &std::path::Path,
         read_only: bool,
-    ) -> Result<usize, DbOperationError> {
-        let mut cmd = Self::build_psql_cmd(dsn, Self::CSV_DATA_ARGS, query, read_only)?;
+    ) -> Result<(), DbOperationError> {
+        let mut cmd = Self::build_psql_command(dsn, &["--csv"], &["-c", query], read_only);
 
-        let mut child = cmd
+        let child = cmd
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
-            .map_err(|e| DbOperationError::CommandNotFound(e.to_string()))?;
+            .map_err(classify_cli_spawn_error)?;
 
-        let stdout = child.stdout.take();
-        let mut stderr_handle = child.stderr.take();
+        collect_csv_output(child, path, Duration::from_secs(self.timeout_secs * 10)).await?;
 
-        let file = tokio::fs::File::create(path)
-            .await
-            .map_err(|e| DbOperationError::QueryFailed(format!("Failed to create file: {e}")))?;
-        let mut writer = tokio::io::BufWriter::new(file);
-
-        let result = timeout(Duration::from_secs(self.timeout_secs * 10), async {
-            let mut counter = CsvRecordCounter::new();
-            if let Some(mut out) = stdout {
-                let mut buf = [0u8; 8192];
-                loop {
-                    let n = out.read(&mut buf).await?;
-                    if n == 0 {
-                        break;
-                    }
-                    counter.feed(&buf[..n]);
-                    writer.write_all(&buf[..n]).await?;
-                }
-                writer.flush().await?;
-            }
-
-            let stderr = {
-                let mut buf = Vec::new();
-                if let Some(ref mut err) = stderr_handle {
-                    err.read_to_end(&mut buf).await?;
-                }
-                String::from_utf8_lossy(&buf).into_owned()
-            };
-
-            let status = child.wait().await?;
-            Ok::<_, std::io::Error>((status, stderr, counter.finish()))
-        })
-        .await;
-
-        let result = match result {
-            Ok(inner) => inner.map_err(|e| DbOperationError::QueryFailed(e.to_string()))?,
-            Err(e) => {
-                let _ = tokio::fs::remove_file(path).await;
-                return Err(DbOperationError::Timeout(e.to_string()));
-            }
-        };
-
-        let (status, stderr, record_count) = result;
-        if !status.success() {
-            let _ = tokio::fs::remove_file(path).await;
-            return Err(Self::classify_psql_error(&stderr));
-        }
-
-        // Subtract 1 for the CSV header record
-        let row_count = record_count.saturating_sub(1);
-        Ok(row_count)
+        Ok(())
     }
 
     pub(in crate::adapters::postgres) async fn fetch_preview_order_columns(
@@ -458,7 +441,7 @@ impl PostgresAdapter {
         table: &str,
     ) -> Result<Vec<String>, DbOperationError> {
         let query = Self::preview_pk_columns_query(schema, table);
-        let raw = self.execute_query(dsn, &query).await?;
+        let raw = self.execute_raw_output(dsn, &query).await?;
         let trimmed = raw.trim();
         if trimmed.is_empty() || trimmed == "null" {
             return Ok(vec![]);
@@ -475,521 +458,394 @@ impl PostgresAdapter {
                 input: format!("{tag:?}"),
             })
     }
-
-    #[cfg(test)]
-    pub(in crate::adapters::postgres) fn parse_affected_rows(stdout: &str) -> Option<usize> {
-        Self::parse_affected_rows_with_source(stdout).ok()
-    }
-
-    fn classify_psql_error(stderr: &str) -> DbOperationError {
-        classify_query_error(stderr)
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::adapters::postgres::PostgresAdapter;
-
-    mod extract_last_csv_block {
-        use super::super::extract_last_csv_block;
+    mod boundary_marker {
+        use super::super::boundary_marker;
 
         #[test]
-        fn single_result_set_returned_as_is() {
-            let input = "id,name\n1,alice\n2,bob";
-            assert_eq!(extract_last_csv_block(input, "SELECT * FROM t"), input);
+        fn consecutive_markers_are_unique() {
+            assert_ne!(boundary_marker(), boundary_marker());
+        }
+    }
+
+    mod segmented_query_args {
+        use super::super::segmented_query_args;
+
+        #[test]
+        fn interleaves_echo_markers_inside_single_transaction() {
+            let args = segmented_query_args(&["SELECT 1", "SELECT 2"], "M");
+
+            assert_eq!(
+                args,
+                vec![
+                    "--single-transaction",
+                    "-c",
+                    "\\echo M",
+                    "-c",
+                    "SELECT 1",
+                    "-c",
+                    "\\echo M",
+                    "-c",
+                    "SELECT 2",
+                ]
+            );
+        }
+    }
+
+    mod split_marker_segments {
+        use super::super::split_marker_segments;
+
+        #[test]
+        fn splits_segments_between_markers() {
+            let stdout = "M\na\n1\nM\nb,c\n2,3\n";
+            assert_eq!(split_marker_segments(stdout, "M"), vec!["a\n1", "b,c\n2,3"]);
         }
 
         #[test]
-        fn two_selects_same_header_returns_last() {
-            let input = "?column?\n1\n?column?\n2";
+        fn drops_text_before_first_marker() {
+            let stdout = "noise\nM\na\n1\n";
+            assert_eq!(split_marker_segments(stdout, "M"), vec!["a\n1"]);
+        }
+
+        #[test]
+        fn no_marker_returns_empty() {
+            assert!(split_marker_segments("a\n1\n", "M").is_empty());
+        }
+
+        #[test]
+        fn consecutive_markers_yield_empty_segment() {
+            let stdout = "M\nM\nb\n2\n";
+            assert_eq!(split_marker_segments(stdout, "M"), vec!["", "b\n2"]);
+        }
+
+        #[test]
+        fn crlf_marker_line_is_recognized() {
+            let stdout = "M\r\na\r\n1\r\nM\r\nb\r\n2\r\n";
+            assert_eq!(split_marker_segments(stdout, "M"), vec!["a\r\n1", "b\r\n2"]);
+        }
+
+        #[test]
+        fn data_line_containing_marker_substring_is_not_a_boundary() {
+            let stdout = "M\nx\nprefix M suffix\nM\ny\n1\n";
             assert_eq!(
-                extract_last_csv_block(input, "SELECT 1; SELECT 2"),
-                "?column?\n2"
+                split_marker_segments(stdout, "M"),
+                vec!["x\nprefix M suffix", "y\n1"]
+            );
+        }
+    }
+
+    mod select_result_segment {
+        use super::super::select_result_segment;
+
+        #[test]
+        fn tag_then_csv_returns_csv() {
+            let segments = vec!["UPDATE 3", "id,name\n1,Alice"];
+            assert_eq!(select_result_segment(&segments), Some("id,name\n1,Alice"));
+        }
+
+        #[test]
+        fn csv_then_tag_returns_csv() {
+            let segments = vec!["id,name\n1,Alice", "DELETE 2"];
+            assert_eq!(select_result_segment(&segments), Some("id,name\n1,Alice"));
+        }
+
+        #[test]
+        fn two_result_sets_returns_last() {
+            let segments = vec!["a\n1", "b\n2"];
+            assert_eq!(select_result_segment(&segments), Some("b\n2"));
+        }
+
+        #[test]
+        fn tags_only_returns_none() {
+            let segments = vec!["BEGIN", "UPDATE 1", "COMMIT"];
+            assert_eq!(select_result_segment(&segments), None);
+        }
+
+        #[test]
+        fn empty_leading_result_set_returns_last() {
+            let segments = vec!["id,name", "age,email\n30,alice@example.com"];
+            assert_eq!(
+                select_result_segment(&segments),
+                Some("age,email\n30,alice@example.com")
             );
         }
 
         #[test]
-        fn two_selects_different_column_count_returns_last() {
-            let input = "a\n1\nb,c\n2,3";
-            assert_eq!(
-                extract_last_csv_block(input, "SELECT 1 AS a; SELECT 2 AS b, 3 AS c"),
-                "b,c\n2,3"
-            );
+        fn empty_trailing_result_set_is_selected_over_earlier_data() {
+            let segments = vec!["id,name\n1,Alice", "age,email"];
+            assert_eq!(select_result_segment(&segments), Some("age,email"));
         }
 
         #[test]
-        fn three_selects_returns_last() {
-            let input = "?column?\n1\n?column?\n2\n?column?\n3";
-            assert_eq!(
-                extract_last_csv_block(input, "SELECT 1; SELECT 2; SELECT 3"),
-                "?column?\n3"
-            );
+        fn data_rows_identical_to_header_stay_in_segment() {
+            let segments = vec!["id,name\n1,Alice", "id,name\nid,name"];
+            assert_eq!(select_result_segment(&segments), Some("id,name\nid,name"));
         }
 
         #[test]
-        fn single_result_set_returns_unchanged() {
-            let input = "col\n42";
-            assert_eq!(extract_last_csv_block(input, "SELECT 1"), input);
-        }
-
-        #[test]
-        fn empty_input_returns_empty() {
-            assert_eq!(extract_last_csv_block("", "SELECT 1"), "");
-        }
-
-        #[test]
-        fn header_only_returns_unchanged() {
-            assert_eq!(extract_last_csv_block("col", "SELECT 1"), "col");
-        }
-
-        #[test]
-        fn same_field_count_different_headers_returns_last() {
-            let input = "id,name\n1,Alice\nage,email\n30,alice@example.com";
-            assert_eq!(
-                extract_last_csv_block(
-                    input,
-                    "SELECT id, name FROM users; SELECT age, email FROM contacts"
-                ),
-                "age,email\n30,alice@example.com"
-            );
-        }
-
-        #[test]
-        fn single_statement_falls_back() {
-            let input = "id,name\n1,Alice\n2,Bob";
-            assert_eq!(extract_last_csv_block(input, "SELECT * FROM t"), input);
-        }
-
-        #[test]
-        fn three_different_headers_same_field_count() {
-            let input = "x,y\n1,2\na,b\n3,4\np,q\n5,6";
-            assert_eq!(
-                extract_last_csv_block(
-                    input,
-                    "SELECT 1 AS x, 2 AS y; SELECT 3 AS a, 4 AS b; SELECT 5 AS p, 6 AS q"
-                ),
-                "p,q\n5,6"
-            );
-        }
-
-        #[test]
-        fn non_select_statements_excluded_from_hint() {
-            let input = "id,name\n1,Alice\nage,email\n30,bob@example.com";
-            assert_eq!(
-                extract_last_csv_block(
-                    input,
-                    "SET search_path TO public; SELECT id, name FROM users; SELECT age, email FROM contacts"
-                ),
-                "age,email\n30,bob@example.com"
-            );
-        }
-
-        #[test]
-        fn data_row_not_mistaken_when_single_select() {
-            let input = "x,y\na,b\n1,2";
-            assert_eq!(extract_last_csv_block(input, "SELECT * FROM t"), input);
-        }
-
-        #[test]
-        fn leading_line_comment_does_not_break_hint() {
-            let input = "id,name\n1,Alice\nage,email\n30,bob@example.com";
-            assert_eq!(
-                extract_last_csv_block(
-                    input,
-                    "-- note\nSELECT id, name FROM users; SELECT age, email FROM contacts"
-                ),
-                "age,email\n30,bob@example.com"
-            );
-        }
-
-        #[test]
-        fn leading_block_comment_does_not_break_hint() {
-            let input = "id,name\n1,Alice\nage,email\n30,bob@example.com";
-            assert_eq!(
-                extract_last_csv_block(
-                    input,
-                    "/* note */ SELECT id, name FROM users; SELECT age, email FROM contacts"
-                ),
-                "age,email\n30,bob@example.com"
-            );
-        }
-
-        // Known limitation: when the leading result set has 0 data rows,
-        // the data_rows_since_header guard prevents detecting the next header.
-        // Fixing this requires redesigning how boundary info flows from
-        // parse_aggregate_command_tag, which is out of scope here.
-        #[test]
-        #[ignore = "empty leading result set — needs boundary redesign"]
-        fn empty_leading_result_returns_last_block() {
-            let input = "id,name\nage,email\n30,alice@example.com";
-            let sql = "SELECT id, name FROM users WHERE false; SELECT age, email FROM contacts";
-            assert_eq!(
-                extract_last_csv_block(input, sql),
-                "age,email\n30,alice@example.com"
-            );
+        fn blank_segments_are_skipped() {
+            let segments = vec!["a\n1", ""];
+            assert_eq!(select_result_segment(&segments), Some("a\n1"));
         }
     }
 
     mod csv_parsing {
+        use crate::app::ports::outbound::DbOperationError;
+        use crate::domain::QuerySource;
+
         #[test]
-        fn null_sentinel_distinguishes_null_from_empty_string() {
-            // With `-P null=NULL`, psql emits SQL NULL as the bare sentinel
-            // while an empty string stays an empty field.
-            let csv_data = "id,note\n1,NULL\n2,\"\"\n";
-            let mut reader = csv::ReaderBuilder::new()
-                .has_headers(true)
-                .from_reader(csv_data.as_bytes());
+        fn empty_csv_returns_empty_query_result() {
+            let result = super::super::PostgresAdapter::csv_result(
+                "SELECT * FROM users",
+                "",
+                17,
+                QuerySource::Preview,
+            )
+            .unwrap();
 
-            let rows: Vec<_> = reader.records().map(|r| r.unwrap()).collect();
-
-            assert_eq!(rows[0].get(1), Some("NULL"));
-            assert_eq!(rows[1].get(1), Some(""));
+            assert!(result.columns.is_empty());
+            assert_eq!(result.data_row_count(), 0);
+            assert_eq!(result.row_count(), 0);
+            assert_eq!(result.execution_time_ms, 17);
+            assert_eq!(result.source, QuerySource::Preview);
         }
 
         #[test]
-        fn empty_csv_output_has_no_headers() {
-            let csv_data = "";
-            let mut reader = csv::ReaderBuilder::new()
-                .has_headers(false)
-                .from_reader(csv_data.as_bytes());
+        fn standard_csv_returns_columns_and_text_rows() {
+            let result = super::super::PostgresAdapter::csv_result(
+                "SELECT id, name FROM users",
+                "id,name\n1,alice\n2,bob",
+                23,
+                QuerySource::Adhoc,
+            )
+            .unwrap();
 
-            let records: Vec<_> = reader.records().collect();
-
-            assert_eq!(records.len(), 0);
+            assert_eq!(result.columns, ["id", "name"]);
+            assert_eq!(
+                result.display_row_at(0),
+                Some(vec!["1".into(), "alice".into()])
+            );
+            assert_eq!(
+                result.display_row_at(1),
+                Some(vec!["2".into(), "bob".into()])
+            );
+            assert_eq!(result.data_row_count(), 2);
+            assert_eq!(result.row_count(), 2);
+            assert_eq!(result.execution_time_ms, 23);
+            assert_eq!(result.source, QuerySource::Adhoc);
         }
 
         #[test]
-        fn valid_csv_parses_headers_and_rows() {
-            let csv_data = "id,name\n1,alice\n2,bob";
-            let mut reader = csv::ReaderBuilder::new()
-                .has_headers(true)
-                .from_reader(csv_data.as_bytes());
+        fn quoted_multibyte_csv_preserves_fields_and_rows() {
+            let result = super::super::PostgresAdapter::csv_result(
+                "SELECT name, description FROM users",
+                "名前,説明\n太郎,\"hello, 世界\"\n花子,\"line1\nline2\"",
+                31,
+                QuerySource::Preview,
+            )
+            .unwrap();
 
-            let headers: Vec<String> = reader
-                .headers()
-                .unwrap()
-                .iter()
-                .map(ToString::to_string)
-                .collect();
-            let rows: Vec<_> = reader.records().collect();
-
-            assert_eq!(headers.len(), 2);
-            assert_eq!(headers[0], "id");
-            assert_eq!(headers[1], "name");
-            assert_eq!(rows.len(), 2);
+            assert_eq!(result.columns, ["名前", "説明"]);
+            assert_eq!(
+                result.display_row_at(0),
+                Some(vec!["太郎".into(), "hello, 世界".into()])
+            );
+            assert_eq!(
+                result.display_row_at(1),
+                Some(vec!["花子".into(), "line1\nline2".into()])
+            );
+            assert_eq!(result.data_row_count(), 2);
         }
 
         #[test]
-        fn csv_with_multibyte_characters_parses_correctly() {
-            let csv_data = "名前,年齢\n太郎,25\n花子,30";
-            let mut reader = csv::ReaderBuilder::new()
-                .has_headers(true)
-                .from_reader(csv_data.as_bytes());
+        fn invalid_csv_returns_csv_parse_error() {
+            let error = super::super::PostgresAdapter::csv_result(
+                "SELECT id, name FROM users",
+                "id,name\n1,alice\n2,bob,extra",
+                41,
+                QuerySource::Adhoc,
+            )
+            .unwrap_err();
 
-            let headers: Vec<String> = reader
-                .headers()
-                .unwrap()
-                .iter()
-                .map(ToString::to_string)
-                .collect();
-            let first_row = reader.records().next().unwrap().unwrap();
+            assert!(matches!(error, DbOperationError::CsvParse(_)));
+        }
+    }
 
-            assert_eq!(headers[0], "名前");
-            assert_eq!(first_row.get(0), Some("太郎"));
+    #[cfg(unix)]
+    mod csv_export {
+        use std::process::Stdio;
+
+        use tempfile::tempdir;
+        use tokio::process::Command;
+
+        use crate::app::ports::outbound::DbOperationError;
+
+        use super::super::collect_csv_output;
+
+        #[tokio::test]
+        async fn reads_stderr_without_blocking_stdout() {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("export.csv");
+            let child = Command::new("sh")
+                .arg("-c")
+                .arg(
+                    "i=0; while [ \"$i\" -lt 20000 ]; do printf 'NOTICE: diagnostic\\n' >&2; i=$((i + 1)); done; printf 'id,name\\n1,Alice\\n'",
+                )
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap();
+
+            collect_csv_output(child, &path, std::time::Duration::from_secs(2))
+                .await
+                .unwrap();
+
+            assert_eq!(
+                tokio::fs::read_to_string(path).await.unwrap(),
+                "id,name\n1,Alice\n"
+            );
         }
 
-        #[test]
-        fn csv_with_quoted_fields_parses_correctly() {
-            let csv_data = "id,description\n1,\"hello, world\"\n2,\"line1\nline2\"";
-            let mut reader = csv::ReaderBuilder::new()
-                .has_headers(true)
-                .from_reader(csv_data.as_bytes());
+        #[tokio::test]
+        async fn nonzero_exit_removes_partial_file_and_returns_classified_error() {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("export.csv");
+            let child = Command::new("sh")
+                .arg("-c")
+                .arg(
+                    "printf 'id,name\\n1,Alice\\n'; printf 'ERROR:  42501: permission denied\\n' >&2; exit 1",
+                )
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap();
 
-            let rows: Vec<_> = reader.records().map(|r| r.unwrap()).collect();
+            let result = collect_csv_output(child, &path, std::time::Duration::from_secs(2)).await;
 
-            assert_eq!(rows[0].get(1), Some("hello, world"));
-            assert_eq!(rows[1].get(1), Some("line1\nline2"));
+            assert!(matches!(result, Err(DbOperationError::PermissionDenied(_))));
+            assert!(!path.exists());
         }
 
-        #[test]
-        fn csv_with_empty_values_parses_correctly() {
-            let csv_data = "id,name,email\n1,,alice@example.com\n2,bob,";
-            let mut reader = csv::ReaderBuilder::new()
-                .has_headers(true)
-                .from_reader(csv_data.as_bytes());
+        #[tokio::test]
+        async fn nonzero_exit_without_stderr_reports_status_and_removes_file() {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("export.csv");
+            let child = Command::new("sh")
+                .arg("-c")
+                .arg("exit 7")
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap();
 
-            let rows: Vec<_> = reader.records().map(|r| r.unwrap()).collect();
+            let result = collect_csv_output(child, &path, std::time::Duration::from_secs(2)).await;
 
-            assert_eq!(rows[0].get(1), Some(""));
-            assert_eq!(rows[1].get(2), Some(""));
+            assert!(matches!(
+                result,
+                Err(DbOperationError::QueryFailed(details))
+                    if details == "psql exited with status code 7"
+            ));
+            assert!(!path.exists());
+        }
+    }
+
+    #[cfg(unix)]
+    mod process_status {
+        use tokio::process::Command;
+
+        use crate::adapters::postgres::PostgresAdapter;
+        use crate::app::ports::outbound::DbOperationError;
+
+        #[tokio::test]
+        async fn nonzero_exit_without_stderr_reports_status() {
+            let mut command = Command::new("sh");
+            command.args(["-c", "exit 7"]);
+
+            let result = PostgresAdapter::collect_output(&mut command, 2).await;
+
+            assert!(matches!(
+                result,
+                Err(DbOperationError::QueryFailed(details))
+                    if details == "psql exited with status code 7"
+            ));
         }
 
-        #[test]
-        fn invalid_csv_returns_error() {
-            let csv_data = "id,name\n1,alice\n2,bob,extra";
-            let mut reader = csv::ReaderBuilder::new()
-                .has_headers(true)
-                .flexible(false)
-                .from_reader(csv_data.as_bytes());
+        #[tokio::test]
+        async fn nonzero_exit_with_stderr_keeps_existing_classification() {
+            let mut command = Command::new("sh");
+            command.args([
+                "-c",
+                "printf 'ERROR:  42501: permission denied\\n' >&2; exit 7",
+            ]);
 
-            reader.headers().unwrap();
-            let results: Vec<_> = reader.records().collect();
+            let result = PostgresAdapter::collect_output(&mut command, 2).await;
 
-            assert!(results[1].is_err());
+            assert!(matches!(
+                result,
+                Err(DbOperationError::PermissionDenied(details))
+                    if details == "ERROR:  42501: permission denied"
+            ));
         }
 
-        #[test]
-        fn non_csv_output_like_notice_parses_as_header() {
-            let non_csv = "NOTICE: some database notice\nNOTICE: another line";
-            let mut reader = csv::ReaderBuilder::new()
-                .has_headers(true)
-                .from_reader(non_csv.as_bytes());
+        #[tokio::test]
+        async fn zero_exit_keeps_empty_stdout_successful() {
+            let mut command = Command::new("sh");
+            command.args(["-c", "exit 0"]);
 
-            let headers = reader.headers();
-
-            assert!(headers.is_ok());
+            assert_eq!(
+                PostgresAdapter::collect_output(&mut command, 2)
+                    .await
+                    .unwrap(),
+                ""
+            );
         }
 
-        #[test]
-        fn mixed_notice_and_csv_parses_first_line_as_header() {
-            let mixed = "id,name\n1,alice";
-            let mut reader = csv::ReaderBuilder::new()
-                .has_headers(true)
-                .from_reader(mixed.as_bytes());
+        #[tokio::test]
+        async fn signal_exit_reports_signal_status() {
+            let mut command = Command::new("sh");
+            command.args(["-c", "kill -TERM $$"]);
 
-            let headers: Vec<String> = reader
-                .headers()
-                .unwrap()
-                .iter()
-                .map(ToString::to_string)
-                .collect();
+            let result = PostgresAdapter::collect_output(&mut command, 2).await;
 
-            assert_eq!(headers[0], "id");
-            assert_eq!(headers[1], "name");
+            assert!(matches!(
+                result,
+                Err(DbOperationError::QueryFailed(details))
+                    if details == "psql terminated by signal 15"
+            ));
         }
     }
 
     mod write_command_tag {
-        use super::*;
+        use rstest::rstest;
 
-        #[test]
-        fn parse_affected_rows_for_update() {
-            let out = "UPDATE 1\n";
-            assert_eq!(PostgresAdapter::parse_affected_rows(out), Some(1));
-        }
-
-        #[test]
-        fn parse_affected_rows_for_delete() {
-            let out = "DELETE 3\n";
-            assert_eq!(PostgresAdapter::parse_affected_rows(out), Some(3));
-        }
-
-        #[test]
-        fn parse_affected_rows_returns_count_for_select() {
-            let out = "SELECT 1\n";
-            assert_eq!(PostgresAdapter::parse_affected_rows(out), Some(1));
-        }
-
-        #[test]
-        fn update_zero_rows_returns_zero() {
-            assert_eq!(PostgresAdapter::parse_affected_rows("UPDATE 0"), Some(0));
-        }
-
-        #[test]
-        fn delete_large_number_returns_correct_value() {
+        #[rstest]
+        #[case::update("UPDATE 1\n", 1)]
+        #[case::delete("DELETE 3\n", 3)]
+        #[case::insert("INSERT 0 10\n", 10)]
+        #[case::select("SELECT 1\n", 1)]
+        #[case::zero_rows("UPDATE 0", 0)]
+        #[case::large_number("DELETE 1000000", 1_000_000)]
+        fn parse_affected_rows_returns_count(#[case] stdout: &str, #[case] expected: usize) {
             assert_eq!(
-                PostgresAdapter::parse_affected_rows("DELETE 1000000"),
-                Some(1_000_000)
+                super::super::PostgresAdapter::parse_affected_rows_with_source(stdout),
+                Ok(expected)
             );
         }
 
-        #[test]
-        fn invalid_format_returns_none() {
-            assert_eq!(PostgresAdapter::parse_affected_rows("FOOBAR"), None);
-            assert_eq!(PostgresAdapter::parse_affected_rows("UPDATE abc"), None);
-            assert_eq!(PostgresAdapter::parse_affected_rows(""), None);
-        }
-    }
-
-    mod execute_query_raw_command_tag {
-        use crate::adapters::postgres::PostgresAdapter;
-        use crate::domain::CommandTag;
-
-        fn dml_stdout_returns_command_tag(
-            stdout: &str,
-            expected_tag: CommandTag,
-            expected_rows: usize,
-        ) {
-            let tag = PostgresAdapter::extract_command_tag(stdout);
-            assert_eq!(tag.as_ref(), Some(&expected_tag));
-            let rows = tag
-                .as_ref()
-                .and_then(crate::domain::command_tag::CommandTag::affected_rows)
-                .unwrap_or(0) as usize;
-            assert_eq!(rows, expected_rows);
-        }
-
-        #[test]
-        fn update_stdout_yields_update_tag() {
-            dml_stdout_returns_command_tag("UPDATE 3\n", CommandTag::Update(3), 3);
-        }
-
-        #[test]
-        fn delete_stdout_yields_delete_tag() {
-            dml_stdout_returns_command_tag("DELETE 5\n", CommandTag::Delete(5), 5);
-        }
-
-        #[test]
-        fn insert_stdout_yields_insert_tag() {
-            dml_stdout_returns_command_tag("INSERT 0 7\n", CommandTag::Insert(7), 7);
-        }
-
-        #[test]
-        fn create_table_stdout_yields_create_tag_zero_rows() {
-            let tag = PostgresAdapter::extract_command_tag("CREATE TABLE\n");
-            assert_eq!(tag, Some(CommandTag::Create("TABLE".to_string())));
-            assert_eq!(tag.unwrap().affected_rows(), None);
-        }
-
-        #[test]
-        fn csv_stdout_is_not_mistaken_for_command_tag() {
-            // CSV data: last line "1,Alice" does not match any DML pattern
-            let csv = "id,name\n1,Alice\n2,Bob\n";
-            let tag = PostgresAdapter::extract_command_tag(csv);
-            // Should be Other or None, never a DML/DDL variant
-            let is_dml = tag
-                .as_ref()
-                .is_some_and(crate::domain::command_tag::CommandTag::is_data_modifying);
-            assert!(!is_dml, "CSV output should not be parsed as DML tag");
-        }
-
-        #[test]
-        fn select_csv_last_line_is_not_mistaken_for_select_tag() {
-            // psql --csv does NOT append "SELECT N" to output; last line is data
-            let csv = "count\n42\n";
-            let tag = PostgresAdapter::extract_command_tag(csv);
-            assert_ne!(tag, Some(CommandTag::Select(42)));
-        }
-
-        // psql returns "SELECT n" for CREATE TABLE AS SELECT
-        #[test]
-        fn select_tag_captured_for_ctas() {
-            let tag = PostgresAdapter::parse_command_tag("SELECT 5");
-            assert_eq!(tag, Ok(CommandTag::Select(5)));
-            let passes = tag
-                .ok()
-                .as_ref()
-                .is_some_and(|t| t.is_data_modifying() || matches!(t, CommandTag::Select(_)));
-            assert!(passes);
-        }
-
-        // 0-row SELECT header-only CSV parses as Other, which the filter rejects
-        #[test]
-        fn empty_select_header_not_captured_by_filter() {
-            let cases = ["id,name", "id,name,email", "count"];
-            for input in cases {
-                let tag = PostgresAdapter::parse_command_tag(input);
-                let passes = tag
-                    .ok()
-                    .as_ref()
-                    .is_some_and(|t| t.is_data_modifying() || matches!(t, CommandTag::Select(_)));
-                assert!(
-                    !passes,
-                    "header '{input}' must not pass the command-tag filter"
-                );
-            }
-        }
-    }
-
-    mod split_dsn_password {
-        use super::super::split_dsn_password;
-
-        #[test]
-        fn uri_password_removed_and_decoded() {
-            let (dsn, password) = split_dsn_password(
-                "postgres://user:p%40ss%3Aword@localhost:5432/db?sslmode=prefer",
-            )
-            .unwrap();
-            assert_eq!(dsn, "postgres://user@localhost:5432/db?sslmode=prefer");
-            assert_eq!(password.as_deref(), Some("p@ss:word"));
-        }
-
-        #[test]
-        fn empty_password_still_stripped_from_uri() {
-            let (dsn, password) = split_dsn_password("postgres://user:@localhost:5432/db").unwrap();
-            assert_eq!(dsn, "postgres://user@localhost:5432/db");
-            assert_eq!(password.as_deref(), Some(""));
-        }
-
-        #[test]
-        fn uri_without_password_passes_through() {
-            let (dsn, password) = split_dsn_password("postgres://user@localhost:5432/db").unwrap();
-            assert_eq!(dsn, "postgres://user@localhost:5432/db");
-            assert_eq!(password, None);
-        }
-
-        #[test]
-        fn uri_without_userinfo_passes_through() {
-            let (dsn, password) = split_dsn_password("postgres://localhost:5432/db").unwrap();
-            assert_eq!(dsn, "postgres://localhost:5432/db");
-            assert_eq!(password, None);
-        }
-
-        #[test]
-        fn service_dsn_passes_through() {
-            let (dsn, password) = split_dsn_password("service=mydb").unwrap();
-            assert_eq!(dsn, "service=mydb");
-            assert_eq!(password, None);
-        }
-    }
-
-    mod build_psql_cmd {
-        use crate::adapters::postgres::PostgresAdapter;
-
-        fn argv(cmd: &tokio::process::Command) -> Vec<String> {
-            cmd.as_std()
-                .get_args()
-                .map(|arg| arg.to_string_lossy().into_owned())
-                .collect()
-        }
-
-        #[test]
-        fn password_kept_out_of_argv_and_passed_via_env() {
-            let cmd = PostgresAdapter::build_psql_cmd(
-                "postgres://user:s3cret@localhost:5432/db?sslmode=prefer",
-                &[],
-                "SELECT 1",
-                false,
-            )
-            .unwrap();
-
-            let args = argv(&cmd);
-            assert!(args.iter().all(|arg| !arg.contains("s3cret")));
-            assert_eq!(args[0], "postgres://user@localhost:5432/db?sslmode=prefer");
-
-            let pgpassword = cmd
-                .as_std()
-                .get_envs()
-                .find(|(key, _)| *key == std::ffi::OsStr::new("PGPASSWORD"))
-                .and_then(|(_, value)| value)
-                .map(|value| value.to_string_lossy().into_owned());
-            assert_eq!(pgpassword.as_deref(), Some("s3cret"));
-        }
-
-        #[test]
-        fn data_query_args_render_null_as_sentinel() {
-            let cmd = PostgresAdapter::build_psql_cmd(
-                "postgres://user:pw@localhost:5432/db",
-                PostgresAdapter::CSV_DATA_ARGS,
-                "SELECT 1",
-                false,
-            )
-            .unwrap();
-
-            let args = argv(&cmd);
-            let pset_pos = args.iter().position(|arg| arg == "-P").unwrap();
-            assert_eq!(args[pset_pos + 1], "null=NULL");
-            assert!(args.contains(&"--csv".to_string()));
+        #[rstest]
+        #[case("FOOBAR")]
+        #[case("UPDATE abc")]
+        #[case("")]
+        fn parse_affected_rows_rejects_invalid_output(#[case] stdout: &str) {
+            assert!(
+                super::super::PostgresAdapter::parse_affected_rows_with_source(stdout).is_err()
+            );
         }
     }
 }

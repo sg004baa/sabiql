@@ -2,22 +2,82 @@ use std::time::{Duration, Instant};
 
 use super::error::ConnectionErrorInfo;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum ConnectionErrorSource {
+    #[default]
+    ActiveConnection,
+    SaveAndConnect,
+    ConnectionSwitch,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ConnectionErrorState {
-    pub error_info: Option<ConnectionErrorInfo>,
-    pub details_expanded: bool,
-    pub scroll_offset: usize,
+    error_info: Option<ConnectionErrorInfo>,
+    details_expanded: bool,
+    scroll_offset: usize,
     copied_feedback_expires: Option<Instant>,
+    source: ConnectionErrorSource,
 }
 
 impl ConnectionErrorState {
     const FEEDBACK_TIMEOUT_SECS: u64 = 3;
 
     pub fn set_error(&mut self, info: ConnectionErrorInfo) {
+        self.set_error_with_source(info, ConnectionErrorSource::ActiveConnection);
+    }
+
+    pub fn set_save_and_connect_error(&mut self, info: ConnectionErrorInfo) {
+        self.set_error_with_source(info, ConnectionErrorSource::SaveAndConnect);
+    }
+
+    pub fn set_connection_switch_error(&mut self, info: ConnectionErrorInfo) {
+        self.set_error_with_source(info, ConnectionErrorSource::ConnectionSwitch);
+    }
+
+    fn set_error_with_source(&mut self, info: ConnectionErrorInfo, source: ConnectionErrorSource) {
         self.error_info = Some(info);
         self.details_expanded = false;
         self.scroll_offset = 0;
         self.copied_feedback_expires = None;
+        self.source = source;
+    }
+
+    pub fn error_info(&self) -> Option<&ConnectionErrorInfo> {
+        self.error_info.as_ref()
+    }
+
+    pub fn has_error(&self) -> bool {
+        self.error_info.is_some()
+    }
+
+    pub fn is_save_and_connect_failure(&self) -> bool {
+        matches!(self.source, ConnectionErrorSource::SaveAndConnect)
+    }
+
+    pub fn has_destination(&self) -> bool {
+        matches!(
+            self.source,
+            ConnectionErrorSource::SaveAndConnect | ConnectionErrorSource::ConnectionSwitch
+        )
+    }
+
+    pub fn can_retry(&self) -> bool {
+        self.error_info
+            .as_ref()
+            .is_some_and(ConnectionErrorInfo::is_retryable)
+    }
+
+    pub fn details_expanded(&self) -> bool {
+        self.details_expanded
+    }
+
+    pub fn scroll_offset(&self) -> usize {
+        self.scroll_offset
+    }
+
+    pub fn reset_view(&mut self) {
+        self.details_expanded = false;
+        self.scroll_offset = 0;
     }
 
     pub fn clear(&mut self) {
@@ -25,6 +85,7 @@ impl ConnectionErrorState {
         self.details_expanded = false;
         self.scroll_offset = 0;
         self.copied_feedback_expires = None;
+        self.source = ConnectionErrorSource::ActiveConnection;
     }
 
     pub fn toggle_details(&mut self) {
@@ -48,16 +109,21 @@ impl ConnectionErrorState {
         self.copied_feedback_expires = Some(now + Duration::from_secs(Self::FEEDBACK_TIMEOUT_SECS));
     }
 
+    pub fn copied_feedback_expires_at(&self) -> Option<Instant> {
+        self.copied_feedback_expires
+    }
+
     pub fn is_copied_visible_at(&self, now: Instant) -> bool {
         self.copied_feedback_expires
             .is_some_and(|expires| now < expires)
     }
 
-    pub fn clear_expired_feedback_at(&mut self, now: Instant) {
-        if let Some(expires) = self.copied_feedback_expires
-            && expires <= now
+    pub fn clear_copied_feedback_if_expired(&mut self, now: Instant) {
+        if self
+            .copied_feedback_expires
+            .is_some_and(|expires| expires <= now)
         {
-            self.copied_feedback_expires = None;
+            self.clear_copied_feedback();
         }
     }
 
@@ -79,14 +145,25 @@ impl ConnectionErrorState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::connection::error::ConnectionErrorKind;
+    use crate::model::connection::error::test_support;
 
     fn sample_error() -> ConnectionErrorInfo {
-        ConnectionErrorInfo::with_kind(ConnectionErrorKind::Timeout, "connection timed out")
+        test_support::from_parts(
+            "Connection timed out",
+            "Check network connectivity",
+            true,
+            "connection timed out",
+        )
     }
 
     fn now() -> Instant {
         Instant::now()
+    }
+
+    fn scroll_to(state: &mut ConnectionErrorState, offset: usize) {
+        for _ in 0..offset {
+            state.scroll_down(usize::MAX);
+        }
     }
 
     mod set_error {
@@ -94,17 +171,56 @@ mod tests {
 
         #[test]
         fn stores_info_and_resets_ui() {
-            let mut state = ConnectionErrorState {
-                details_expanded: true,
-                scroll_offset: 5,
-                ..Default::default()
-            };
+            let mut state = ConnectionErrorState::default();
+            state.toggle_details();
+            scroll_to(&mut state, 5);
 
             state.set_error(sample_error());
 
-            assert!(state.error_info.is_some());
-            assert!(!state.details_expanded);
-            assert_eq!(state.scroll_offset, 0);
+            assert!(state.error_info().is_some());
+            assert!(!state.details_expanded());
+            assert_eq!(state.scroll_offset(), 0);
+            assert!(!state.is_copied_visible_at(now()));
+        }
+
+        #[test]
+        fn tracks_destination_presence_without_database_type() {
+            let mut state = ConnectionErrorState::default();
+            assert!(!state.has_destination());
+
+            state.set_save_and_connect_error(sample_error());
+            assert!(state.has_destination());
+
+            state.set_connection_switch_error(sample_error());
+            assert!(state.has_destination());
+        }
+
+        #[test]
+        fn can_retry_follows_the_classified_error() {
+            let mut state = ConnectionErrorState::default();
+            assert!(!state.can_retry());
+
+            state.set_error(sample_error());
+
+            assert!(state.can_retry());
+        }
+    }
+
+    mod reset_view {
+        use super::*;
+
+        #[test]
+        fn collapses_details_and_resets_scroll_without_clearing_error() {
+            let mut state = ConnectionErrorState::default();
+            state.set_error(sample_error());
+            state.toggle_details();
+            scroll_to(&mut state, 4);
+
+            state.reset_view();
+
+            assert!(state.error_info().is_some());
+            assert!(!state.details_expanded());
+            assert_eq!(state.scroll_offset(), 0);
         }
     }
 
@@ -115,14 +231,14 @@ mod tests {
         fn resets_all_fields() {
             let mut state = ConnectionErrorState::default();
             state.set_error(sample_error());
-            state.details_expanded = true;
-            state.scroll_offset = 3;
+            state.toggle_details();
+            scroll_to(&mut state, 3);
 
             state.clear();
 
-            assert!(state.error_info.is_none());
-            assert!(!state.details_expanded);
-            assert_eq!(state.scroll_offset, 0);
+            assert!(state.error_info().is_none());
+            assert!(!state.details_expanded());
+            assert_eq!(state.scroll_offset(), 0);
         }
     }
 
@@ -134,23 +250,21 @@ mod tests {
             let mut state = ConnectionErrorState::default();
 
             state.toggle_details();
-            assert!(state.details_expanded);
+            assert!(state.details_expanded());
 
             state.toggle_details();
-            assert!(!state.details_expanded);
+            assert!(!state.details_expanded());
         }
 
         #[test]
         fn resets_scroll_on_collapse() {
-            let mut state = ConnectionErrorState {
-                details_expanded: true,
-                scroll_offset: 5,
-                ..Default::default()
-            };
+            let mut state = ConnectionErrorState::default();
+            state.toggle_details();
+            scroll_to(&mut state, 5);
 
             state.toggle_details();
 
-            assert_eq!(state.scroll_offset, 0);
+            assert_eq!(state.scroll_offset(), 0);
         }
     }
 
@@ -159,14 +273,12 @@ mod tests {
 
         #[test]
         fn up_decrements_offset() {
-            let mut state = ConnectionErrorState {
-                scroll_offset: 5,
-                ..Default::default()
-            };
+            let mut state = ConnectionErrorState::default();
+            scroll_to(&mut state, 5);
 
             state.scroll_up();
 
-            assert_eq!(state.scroll_offset, 4);
+            assert_eq!(state.scroll_offset(), 4);
         }
 
         #[test]
@@ -175,7 +287,7 @@ mod tests {
 
             state.scroll_up();
 
-            assert_eq!(state.scroll_offset, 0);
+            assert_eq!(state.scroll_offset(), 0);
         }
 
         #[test]
@@ -184,19 +296,17 @@ mod tests {
 
             state.scroll_down(10);
 
-            assert_eq!(state.scroll_offset, 1);
+            assert_eq!(state.scroll_offset(), 1);
         }
 
         #[test]
         fn down_stops_at_max() {
-            let mut state = ConnectionErrorState {
-                scroll_offset: 10,
-                ..Default::default()
-            };
+            let mut state = ConnectionErrorState::default();
+            scroll_to(&mut state, 10);
 
             state.scroll_down(10);
 
-            assert_eq!(state.scroll_offset, 10);
+            assert_eq!(state.scroll_offset(), 10);
         }
     }
 
@@ -223,28 +333,6 @@ mod tests {
 
             assert!(!state.is_copied_visible_at(t + Duration::from_secs(4)));
         }
-
-        #[test]
-        fn clear_expired_removes_when_expired() {
-            let mut state = ConnectionErrorState::default();
-            let t = now();
-            state.mark_copied_at(t);
-
-            state.clear_expired_feedback_at(t + Duration::from_secs(4));
-
-            assert!(!state.is_copied_visible_at(t));
-        }
-
-        #[test]
-        fn clear_expired_keeps_when_not_expired() {
-            let mut state = ConnectionErrorState::default();
-            let t = now();
-            state.mark_copied_at(t);
-
-            state.clear_expired_feedback_at(t + Duration::from_secs(1));
-
-            assert!(state.is_copied_visible_at(t));
-        }
     }
 
     mod detail_line_count {
@@ -259,8 +347,10 @@ mod tests {
         #[test]
         fn counts_lines_of_error_details() {
             let mut state = ConnectionErrorState::default();
-            state.set_error(ConnectionErrorInfo::with_kind(
-                ConnectionErrorKind::Unknown,
+            state.set_error(test_support::from_parts(
+                "Connection failed",
+                "See details for more information",
+                false,
                 "line1\nline2\nline3",
             ));
             assert_eq!(state.detail_line_count(), 3);

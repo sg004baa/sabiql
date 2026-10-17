@@ -1,15 +1,13 @@
 use crate::update::action::Action;
 
 use super::actions;
-use super::types::{
-    BrowseVimContext, JsonbDetailVimContext, SqlModalVimContext, VimCommand, VimSurfaceContext,
-};
+use super::types::{BrowseVimContext, VimCommand, VimSurfaceContext};
 
-pub fn surface(command: VimCommand, ctx: VimSurfaceContext) -> Option<Action> {
+pub(super) fn surface(command: VimCommand, ctx: VimSurfaceContext) -> Option<Action> {
     match ctx {
         VimSurfaceContext::Browse(ctx) => browse(command, ctx),
-        VimSurfaceContext::SqlModal(ctx) => sql(command, ctx),
-        VimSurfaceContext::JsonbDetail(ctx) => jsonb(command, ctx),
+        VimSurfaceContext::SqlModal(ctx) => actions::sql::command(command, ctx),
+        VimSurfaceContext::JsonDetail(ctx) => actions::json::command(command, ctx),
     }
 }
 
@@ -22,12 +20,4 @@ fn browse(command: VimCommand, ctx: BrowseVimContext) -> Option<Action> {
         VimCommand::SearchContinuation(_) => None,
         VimCommand::Operator(operator) => actions::browse::operator(operator, ctx),
     }
-}
-
-fn sql(command: VimCommand, ctx: SqlModalVimContext) -> Option<Action> {
-    actions::sql::command(command, ctx)
-}
-
-fn jsonb(command: VimCommand, ctx: JsonbDetailVimContext) -> Option<Action> {
-    actions::jsonb::command(command, ctx)
 }

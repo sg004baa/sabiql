@@ -1,0 +1,249 @@
+use std::ffi::OsStr;
+
+use tokio::runtime::Handle;
+use uuid::Uuid;
+
+use crate::app::ports::outbound::{AccessMode, DbOperationError};
+
+use super::super::super::capability::MySqlServerCapabilities;
+use super::super::super::option_file::MySqlOptionFile;
+use super::super::args::{mysql_metadata_session_args, mysql_query_args};
+use super::super::policy::is_mysql_single_marker;
+use super::super::probe::{
+    mysql_server_capabilities, validate_lower_case_table_names, validate_server_product,
+};
+use super::super::xml::{MySqlResultSet, parse_mysql_preview_xml, parse_mysql_xml};
+use super::{
+    MySqlProcess, cleanup_mysql_process, configure_mysql_session, finish_mysql_session,
+    finish_mysql_session_after_preview_frame, read_one_mysql_resultset,
+    validate_mysql_session_exit, write_mysql_statement,
+};
+
+pub(in crate::adapters::mysql) struct MySqlMetadataSession {
+    process: Option<MySqlProcess>,
+    _option_file: MySqlOptionFile,
+}
+
+const MYSQL_PREVIEW_COMPLETION_MARKER_COLUMN: &str = "__sabiql_preview_completion";
+const MYSQL_INSPECTOR_COMPLETION_MARKER_COLUMN: &str = "__sabiql_inspector_completion";
+
+impl Drop for MySqlMetadataSession {
+    fn drop(&mut self) {
+        let Some(mut process) = self.process.take() else {
+            return;
+        };
+        if process.child.try_wait().ok().flatten().is_some() {
+            return;
+        }
+        // kill_on_drop alone can leave an orphan until another SIGCHLD wakes
+        // Tokio's reaper. Own the cancelled process until wait() completes.
+        let _ = process.child.start_kill();
+        if let Ok(runtime) = Handle::try_current() {
+            drop(runtime.spawn(async move {
+                cleanup_mysql_process(&mut process).await;
+            }));
+        }
+    }
+}
+
+impl MySqlMetadataSession {
+    fn process_mut(&mut self) -> &mut MySqlProcess {
+        self.process
+            .as_mut()
+            .expect("metadata session owns its process until drop")
+    }
+
+    pub(in crate::adapters::mysql) fn spawn_with_program(
+        program: &OsStr,
+        option_file: MySqlOptionFile,
+    ) -> Result<Self, DbOperationError> {
+        let args = mysql_query_args(&option_file.path);
+        Self::from_process(
+            MySqlProcess::spawn_with_preview_program(program, args),
+            option_file,
+        )
+    }
+
+    pub(in crate::adapters::mysql) fn spawn_with_metadata_program(
+        program: &OsStr,
+        option_file: MySqlOptionFile,
+    ) -> Result<Self, DbOperationError> {
+        let args = mysql_metadata_session_args(&option_file.path);
+        Self::from_process(MySqlProcess::spawn_with_args(program, args), option_file)
+    }
+
+    fn from_process(
+        process: Result<MySqlProcess, DbOperationError>,
+        option_file: MySqlOptionFile,
+    ) -> Result<Self, DbOperationError> {
+        process.map(|process| Self {
+            process: Some(process),
+            _option_file: option_file,
+        })
+    }
+
+    pub(in crate::adapters::mysql) async fn prepare_read_only_and_probe(
+        &mut self,
+    ) -> Result<MySqlServerCapabilities, DbOperationError> {
+        configure_mysql_session(self.process_mut(), AccessMode::ReadOnly).await?;
+        let marker = Uuid::new_v4().simple().to_string();
+        let query = format!(
+            "SELECT '{marker}' AS __sabiql_probe, VERSION() AS __sabiql_server_version, @@lower_case_table_names AS __sabiql_lower_case_table_names"
+        );
+        let result = self.execute(&query).await?;
+        validate_metadata_probe(&result, &marker)
+    }
+
+    pub(in crate::adapters::mysql) async fn execute(
+        &mut self,
+        query: &str,
+    ) -> Result<MySqlResultSet, DbOperationError> {
+        self.execute_with_expected_columns(query, &[]).await
+    }
+
+    pub(in crate::adapters::mysql) async fn execute_with_expected_columns(
+        &mut self,
+        query: &str,
+        expected_columns: &[&str],
+    ) -> Result<MySqlResultSet, DbOperationError> {
+        write_mysql_statement(self.process_mut(), query).await?;
+        let xml = read_one_mysql_resultset(self.process_mut()).await?;
+        let mut result = if self.process_mut().preview_byte_budget {
+            parse_mysql_preview_xml(&xml)?
+        } else {
+            parse_mysql_xml(&xml)?
+        };
+        normalize_empty_result_columns(&mut result, expected_columns);
+        Ok(result)
+    }
+
+    pub(in crate::adapters::mysql) async fn execute_show_create_with_completion_marker(
+        &mut self,
+        query: &str,
+        expected_columns: &[&str],
+    ) -> Result<MySqlResultSet, DbOperationError> {
+        let marker = Uuid::new_v4().simple().to_string();
+        let marker_query =
+            format!("SELECT '{marker}' AS {MYSQL_INSPECTOR_COMPLETION_MARKER_COLUMN}");
+
+        write_mysql_statement(self.process_mut(), query).await?;
+        write_mysql_statement(self.process_mut(), &marker_query).await?;
+
+        let source_xml = read_one_mysql_resultset(self.process_mut()).await?;
+        let mut source_result = parse_mysql_xml(&source_xml)?;
+        normalize_empty_result_columns(&mut source_result, expected_columns);
+        let marker_xml = read_one_mysql_resultset(self.process_mut()).await?;
+        let marker_result = parse_mysql_xml(&marker_xml)?;
+        if !is_mysql_single_marker(
+            &marker_result,
+            MYSQL_INSPECTOR_COMPLETION_MARKER_COLUMN,
+            &marker,
+        ) {
+            return Err(DbOperationError::QueryFailed(
+                "mysql inspector completion marker did not match".to_string(),
+            ));
+        }
+        let result = finish_mysql_session_after_preview_frame(self.process_mut()).await?;
+        validate_mysql_session_exit(&result, self.process_mut().client_packet_limit_bytes)?;
+        Ok(source_result)
+    }
+
+    pub(in crate::adapters::mysql) async fn finish(&mut self) -> Result<(), DbOperationError> {
+        let result = finish_mysql_session(self.process_mut()).await?;
+        validate_mysql_session_exit(&result, self.process_mut().client_packet_limit_bytes)?;
+        Ok(())
+    }
+
+    pub(in crate::adapters::mysql) async fn finish_preview(
+        &mut self,
+    ) -> Result<(), DbOperationError> {
+        let marker = Uuid::new_v4().simple().to_string();
+        let marker_result = self
+            .execute(&format!(
+                "SELECT '{marker}' AS {MYSQL_PREVIEW_COMPLETION_MARKER_COLUMN}"
+            ))
+            .await?;
+        if !is_mysql_single_marker(
+            &marker_result,
+            MYSQL_PREVIEW_COMPLETION_MARKER_COLUMN,
+            &marker,
+        ) {
+            return Err(DbOperationError::QueryFailed(
+                "mysql preview completion marker did not match".to_string(),
+            ));
+        }
+        let result = finish_mysql_session_after_preview_frame(self.process_mut()).await?;
+        validate_mysql_session_exit(&result, self.process_mut().client_packet_limit_bytes)?;
+        Ok(())
+    }
+
+    pub(in crate::adapters::mysql) async fn resolve_timed_result<T>(
+        &mut self,
+        result: Result<Result<T, DbOperationError>, tokio::time::error::Elapsed>,
+    ) -> Result<T, DbOperationError> {
+        let result = match result {
+            Ok(Ok(value)) => return Ok(value),
+            Ok(Err(error)) => Err(error),
+            Err(_) => Err(DbOperationError::Timeout(
+                "mysql query exceeded the execution timeout".to_string(),
+            )),
+        };
+        cleanup_mysql_process(self.process_mut()).await;
+        result
+    }
+}
+
+fn normalize_empty_result_columns(result: &mut MySqlResultSet, expected_columns: &[&str]) {
+    if result.columns.is_empty() && result.values.is_empty() {
+        result.columns = expected_columns
+            .iter()
+            .map(|column| (*column).to_string())
+            .collect();
+    }
+}
+
+fn validate_metadata_probe(
+    result: &MySqlResultSet,
+    marker: &str,
+) -> Result<MySqlServerCapabilities, DbOperationError> {
+    if result.values.len() != 1
+        || result.columns
+            != [
+                "__sabiql_probe",
+                "__sabiql_server_version",
+                "__sabiql_lower_case_table_names",
+            ]
+    {
+        return Err(DbOperationError::QueryFailed(
+            "mysql metadata probe returned an unexpected result".to_string(),
+        ));
+    }
+    let values = &result.values[0];
+    if values.len() != 3 || values[0].as_str() != Some(marker) {
+        return Err(DbOperationError::QueryFailed(
+            "mysql metadata probe returned an unexpected result".to_string(),
+        ));
+    }
+    let server_version = values[1].as_str().ok_or_else(|| {
+        DbOperationError::QueryFailed("mysql metadata probe returned no server version".to_string())
+    })?;
+    validate_server_product(server_version)?;
+    let lower_case_table_names = values[2]
+        .as_str()
+        .ok_or_else(|| {
+            DbOperationError::QueryFailed(
+                "mysql metadata probe returned no lower_case_table_names".to_string(),
+            )
+        })?
+        .parse::<u8>()
+        .map_err(|_| {
+            DbOperationError::MetadataParseFailed(
+                "invalid MySQL lower_case_table_names value".to_string(),
+            )
+        })?;
+    validate_lower_case_table_names(lower_case_table_names)?;
+    Ok(mysql_server_capabilities(
+        server_version,
+        lower_case_table_names,
+    ))
+}

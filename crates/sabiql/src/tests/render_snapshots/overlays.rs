@@ -1,22 +1,48 @@
 use super::*;
-use harness::connected_state;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
-use sabiql_app::model::shared::multi_line_input::MultiLineInputState;
+use sabiql_app::model::app_state::AppState;
+use sabiql_app::model::shared::help::HelpOrigin;
+use sabiql_app::model::shared::settings::KeymapPreset;
+use sabiql_app::policy::write::sql_risk::AcknowledgeReason;
 use sabiql_domain::query_history::{QueryHistoryEntry, QueryResultStatus};
-use sabiql_domain::{ConnectionId, QueryResult};
+use sabiql_domain::{
+    ConnectionId, DatabaseDiagnostic, DiagnosticField, DiagnosticLevel, QueryResult,
+    SqliteDiagnosticsSnapshot,
+};
+
+const POSTGRES_SEQ_SCAN_PLAN: &str =
+    "Seq Scan on users  (cost=0.00..1000.00 rows=2550 width=36)\n  Filter: (id > 10)";
+const POSTGRES_INDEX_SCAN_PLAN: &str = "Index Scan using idx_users_id on users  (cost=0.28..8.30 rows=1 width=36)\n  Index Cond: (id > 10)";
+const POSTGRES_PLAN_QUERY: &str = "SELECT * FROM users WHERE id > 10";
+
+fn baseline_sqlite_diagnostics_snapshot() -> SqliteDiagnosticsSnapshot {
+    SqliteDiagnosticsSnapshot {
+        db_file: DiagnosticField::ok("/tmp/app.db"),
+        sqlite_version: DiagnosticField::ok("3.45.0"),
+        feature_summary: DiagnosticField::ok(
+            "FTS5: available\nFTS4: not available\nRTree: available\nJSON: available",
+        ),
+        foreign_keys: DiagnosticField::ok("on"),
+        journal_mode: DiagnosticField::ok("wal"),
+        query_only: DiagnosticField::ok("off"),
+        busy_timeout: DiagnosticField::ok("5000"),
+        database_list: DiagnosticField::ok("0: main @ /tmp/app.db"),
+        quick_check: DiagnosticField::ok("ok"),
+    }
+}
 
 #[test]
 fn sql_modal_with_completion() {
-    let (mut state, _now) = connected_state();
+    let mut state = postgres_connected_state();
     let mut terminal = create_test_terminal();
 
     state.modal.set_mode(InputMode::SqlModal);
     state
         .sql_modal
-        .editor
+        .editor_mut_for_input()
         .set_content("SELECT * FROM us".to_string());
-    state.sql_modal.set_status_for_test(SqlModalStatus::Editing);
+    state.sql_modal.enter_editing();
 
     let output = render_to_string(&mut terminal, &mut state);
 
@@ -25,16 +51,17 @@ fn sql_modal_with_completion() {
 
 #[test]
 fn sql_modal_completion_popup_with_scroll() {
-    let (mut state, _now) = connected_state();
+    let mut state = postgres_connected_state();
     let mut terminal = create_test_terminal();
 
     state.modal.set_mode(InputMode::SqlModal);
-    state.sql_modal.editor.set_content("SELECT ".to_string());
-    state.sql_modal.set_status_for_test(SqlModalStatus::Editing);
+    state
+        .sql_modal
+        .editor_mut_for_input()
+        .set_content("SELECT ".to_string());
+    state.sql_modal.enter_editing();
 
-    state.sql_modal.completion_mut_for_test().visible = true;
-    state.sql_modal.completion_mut_for_test().selected_index = 5;
-    state.sql_modal.completion_mut_for_test().candidates = vec![
+    let candidates = vec![
         CompletionCandidate {
             text: "users".into(),
             kind: CompletionKind::Table,
@@ -86,6 +113,12 @@ fn sql_modal_completion_popup_with_scroll() {
             score: 10,
         },
     ];
+    state
+        .sql_modal
+        .apply_completion_update(&candidates, 7, true);
+    for _ in 0..5 {
+        state.sql_modal.completion_next();
+    }
 
     let output = render_to_string(&mut terminal, &mut state);
 
@@ -93,13 +126,18 @@ fn sql_modal_completion_popup_with_scroll() {
 }
 
 #[test]
-fn sql_modal_cursor_at_head() {
-    let mut state = create_test_state();
+fn sql_modal_unknown_risk_acknowledge() {
+    let mut state = postgres_connected_state();
     let mut terminal = create_test_terminal();
 
     state.modal.set_mode(InputMode::SqlModal);
-    state.sql_modal.editor = MultiLineInputState::new("SELECT 1", 0);
-    state.sql_modal.set_status_for_test(SqlModalStatus::Editing);
+    state
+        .sql_modal
+        .editor_mut_for_input()
+        .set_content("DO $$ BEGIN DELETE FROM users; END $$".to_string());
+    state
+        .sql_modal
+        .begin_confirming_risk(AcknowledgeReason::UnknownRisk, "DO".to_string());
 
     let output = render_to_string(&mut terminal, &mut state);
 
@@ -107,13 +145,18 @@ fn sql_modal_cursor_at_head() {
 }
 
 #[test]
-fn sql_modal_cursor_at_middle() {
-    let mut state = create_test_state();
+fn sql_modal_high_risk_without_target_acknowledge() {
+    let mut state = postgres_connected_state();
     let mut terminal = create_test_terminal();
 
     state.modal.set_mode(InputMode::SqlModal);
-    state.sql_modal.editor = MultiLineInputState::new("SELECT 1", 4);
-    state.sql_modal.set_status_for_test(SqlModalStatus::Editing);
+    state
+        .sql_modal
+        .editor_mut_for_input()
+        .set_content("DROP TABLE a, b".to_string());
+    state
+        .sql_modal
+        .begin_confirming_risk(AcknowledgeReason::TargetNameUnavailable, "DROP".to_string());
 
     let output = render_to_string(&mut terminal, &mut state);
 
@@ -121,13 +164,69 @@ fn sql_modal_cursor_at_middle() {
 }
 
 #[test]
-fn sql_modal_cursor_at_tail() {
+fn sql_modal_non_atomic_transaction_acknowledge() {
+    let mut state = postgres_connected_state();
+    let mut terminal = create_test_terminal();
+
+    state.modal.set_mode(InputMode::SqlModal);
+    state
+        .sql_modal
+        .editor_mut_for_input()
+        .set_content("PRAGMA foreign_keys = OFF; CREATE TABLE users(id INTEGER)".to_string());
+    state.sql_modal.begin_confirming_risk(
+        AcknowledgeReason::NonAtomicTransaction,
+        "SQLite transaction".to_string(),
+    );
+
+    let output = render_to_string(&mut terminal, &mut state);
+
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn sql_modal_analyze_unknown_risk_acknowledge() {
+    let mut state = postgres_connected_state();
+    let mut terminal = create_test_terminal();
+
+    state.modal.set_mode(InputMode::SqlModal);
+    state.sql_modal.begin_confirming_analyze_risk(
+        "MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN DELETE".to_string(),
+        AcknowledgeReason::UnknownRisk,
+    );
+
+    let output = render_to_string(&mut terminal, &mut state);
+
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn sql_modal_analyze_read_only_acknowledge() {
+    let mut state = postgres_connected_state();
+    let mut terminal = create_test_terminal();
+
+    state.modal.set_mode(InputMode::SqlModal);
+    state.sql_modal.begin_confirming_analyze_risk(
+        "SELECT * FROM users".to_string(),
+        AcknowledgeReason::AnalyzeExecution,
+    );
+
+    let output = render_to_string(&mut terminal, &mut state);
+
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn sql_modal_ide_editing() {
     let mut state = create_test_state();
     let mut terminal = create_test_terminal();
 
     state.modal.set_mode(InputMode::SqlModal);
-    state.sql_modal.editor.set_content("SELECT 1".to_string());
-    state.sql_modal.set_status_for_test(SqlModalStatus::Editing);
+    state
+        .sql_modal
+        .editor_mut_for_input()
+        .set_content("SELECT 1".to_string());
+    state.sql_modal.enter_editing();
+    state.settings.load_keymap_preset(KeymapPreset::Ide);
 
     let output = render_to_string(&mut terminal, &mut state);
 
@@ -140,8 +239,11 @@ fn sql_modal_normal_cursor_at_tail() {
     let mut terminal = create_test_terminal();
 
     state.modal.set_mode(InputMode::SqlModal);
-    state.sql_modal.editor.set_content("SELECT 1".to_string());
-    state.sql_modal.set_status_for_test(SqlModalStatus::Normal);
+    state
+        .sql_modal
+        .editor_mut_for_input()
+        .set_content("SELECT 1".to_string());
+    state.sql_modal.enter_normal();
 
     let output = render_to_string(&mut terminal, &mut state);
 
@@ -150,34 +252,32 @@ fn sql_modal_normal_cursor_at_tail() {
 
 #[test]
 fn sql_modal_success_select() {
-    let now = test_instant();
     let mut state = create_test_state();
     let mut terminal = create_test_terminal();
 
     state.modal.set_mode(InputMode::SqlModal);
     state
         .sql_modal
-        .editor
+        .editor_mut_for_input()
         .set_content("SELECT * FROM users".to_string());
     state.sql_modal.finish_adhoc_success(AdhocSuccessSnapshot {
         command_tag: None,
         row_count: 2,
         execution_time_ms: 15,
+        mysql_diagnostics: Vec::new(),
     });
-    state.query.set_current_result(Arc::new(QueryResult {
-        query: "SELECT * FROM users".to_string(),
-        columns: vec!["id".to_string(), "name".to_string()],
-        rows: vec![
-            vec!["1".to_string(), "Alice".to_string()],
-            vec!["2".to_string(), "Bob".to_string()],
-        ],
-        row_count: 2,
-        execution_time_ms: 15,
-        executed_at: now,
-        source: QuerySource::Adhoc,
-        error: None,
-        command_tag: None,
-    }));
+    state
+        .query
+        .set_current_result(Arc::new(QueryResult::success(
+            "SELECT * FROM users".to_string(),
+            vec!["id".to_string(), "name".to_string()],
+            vec![
+                vec!["1".to_string(), "Alice".to_string()],
+                vec!["2".to_string(), "Bob".to_string()],
+            ],
+            15,
+            QuerySource::Adhoc,
+        )));
 
     let output = render_to_string(&mut terminal, &mut state);
 
@@ -185,32 +285,81 @@ fn sql_modal_success_select() {
 }
 
 #[test]
-fn sql_modal_success_dml_with_command_tag() {
-    let now = test_instant();
+fn sql_modal_success_with_mysql_diagnostics() {
     let mut state = create_test_state();
     let mut terminal = create_test_terminal();
 
     state.modal.set_mode(InputMode::SqlModal);
     state
         .sql_modal
-        .editor
+        .editor_mut_for_input()
+        .set_content("INSERT IGNORE INTO users (id) VALUES (1)".to_string());
+    state.sql_modal.finish_adhoc_success(AdhocSuccessSnapshot {
+        command_tag: Some(CommandTag::Insert(1)),
+        row_count: 1,
+        execution_time_ms: 15,
+        mysql_diagnostics: vec![
+            DatabaseDiagnostic {
+                level: DiagnosticLevel::Warning,
+                code: 1062,
+                message: "Duplicate entry '1' for key 'users.PRIMARY'".to_string(),
+            },
+            DatabaseDiagnostic {
+                level: DiagnosticLevel::Note,
+                code: 1050,
+                message: "Table 'users' already exists".to_string(),
+            },
+        ],
+    });
+    state.query.set_current_result(Arc::new(
+        QueryResult::success(
+            "INSERT IGNORE INTO users (id) VALUES (1)".to_string(),
+            vec![],
+            vec![],
+            15,
+            QuerySource::Adhoc,
+        )
+        .with_command_tag(CommandTag::Insert(1))
+        .with_mysql_diagnostics(vec![DatabaseDiagnostic {
+            level: DiagnosticLevel::Warning,
+            code: 1062,
+            message: "Duplicate entry '1' for key 'users.PRIMARY'".to_string(),
+        }]),
+    ));
+
+    let output = trim_line_endings(&render_to_string(&mut terminal, &mut state));
+
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn sql_modal_success_dml_with_command_tag() {
+    let mut state = create_test_state();
+    let mut terminal = create_test_terminal();
+
+    state.modal.set_mode(InputMode::SqlModal);
+    state
+        .sql_modal
+        .editor_mut_for_input()
         .set_content("DELETE FROM users WHERE id = 1".to_string());
     state.sql_modal.finish_adhoc_success(AdhocSuccessSnapshot {
         command_tag: Some(CommandTag::Delete(3)),
         row_count: 3,
         execution_time_ms: 12,
+        mysql_diagnostics: Vec::new(),
     });
-    state.query.set_current_result(Arc::new(QueryResult {
-        query: "DELETE FROM users WHERE id = 1".to_string(),
-        columns: vec![],
-        rows: vec![],
-        row_count: 3,
-        execution_time_ms: 12,
-        executed_at: now,
-        source: QuerySource::Adhoc,
-        error: None,
-        command_tag: Some(CommandTag::Delete(3)),
-    }));
+    // DML: row_count carries affected rows, not result rows (executor's command-tag path)
+    state.query.set_current_result(Arc::new(
+        QueryResult::success(
+            "DELETE FROM users WHERE id = 1".to_string(),
+            vec![],
+            vec![],
+            12,
+            QuerySource::Adhoc,
+        )
+        .with_row_count(3)
+        .with_command_tag(CommandTag::Delete(3)),
+    ));
 
     let output = render_to_string(&mut terminal, &mut state);
 
@@ -219,31 +368,30 @@ fn sql_modal_success_dml_with_command_tag() {
 
 #[test]
 fn sql_modal_success_ddl_create_table() {
-    let now = test_instant();
     let mut state = create_test_state();
     let mut terminal = create_test_terminal();
 
     state.modal.set_mode(InputMode::SqlModal);
     state
         .sql_modal
-        .editor
+        .editor_mut_for_input()
         .set_content("CREATE TABLE backup AS SELECT * FROM users".to_string());
     state.sql_modal.finish_adhoc_success(AdhocSuccessSnapshot {
         command_tag: Some(CommandTag::Create("TABLE".to_string())),
         row_count: 0,
         execution_time_ms: 45,
+        mysql_diagnostics: Vec::new(),
     });
-    state.query.set_current_result(Arc::new(QueryResult {
-        query: "CREATE TABLE backup AS SELECT * FROM users".to_string(),
-        columns: vec![],
-        rows: vec![],
-        row_count: 0,
-        execution_time_ms: 45,
-        executed_at: now,
-        source: QuerySource::Adhoc,
-        error: None,
-        command_tag: Some(CommandTag::Create("TABLE".to_string())),
-    }));
+    state.query.set_current_result(Arc::new(
+        QueryResult::success(
+            "CREATE TABLE backup AS SELECT * FROM users".to_string(),
+            vec![],
+            vec![],
+            45,
+            QuerySource::Adhoc,
+        )
+        .with_command_tag(CommandTag::Create("TABLE".to_string())),
+    ));
 
     let output = render_to_string(&mut terminal, &mut state);
 
@@ -258,7 +406,7 @@ fn sql_modal_error_with_message() {
     state.modal.set_mode(InputMode::SqlModal);
     state
         .sql_modal
-        .editor
+        .editor_mut_for_input()
         .set_content("SELECT * FORM users".to_string());
     state.sql_modal.finish_adhoc_error(
         "ERROR:  syntax error at or near \"FORM\"\nLINE 1: SELECT * FORM users\n                 ^"
@@ -278,20 +426,18 @@ fn sql_modal_confirming_high_matched() {
     state.modal.set_mode(InputMode::SqlModal);
     state
         .sql_modal
-        .editor
+        .editor_mut_for_input()
         .set_content("DROP TABLE users".to_string());
     let mut input = TextInputState::default();
     input.set_content("users".to_string());
-    state
-        .sql_modal
-        .set_status_for_test(SqlModalStatus::ConfirmingHigh {
-            decision: AdhocRiskDecision {
-                risk_level: RiskLevel::High,
-                label: "DROP",
-            },
-            input,
-            target_name: Some("users".to_string()),
-        });
+    state.sql_modal.begin_confirming_high(
+        AdhocRiskDecision {
+            risk_level: RiskLevel::High,
+            label: "DROP",
+        },
+        "users".to_string(),
+    );
+    *state.sql_modal.confirming_high_input_mut().unwrap() = input;
 
     let output = render_to_string(&mut terminal, &mut state);
 
@@ -306,46 +452,18 @@ fn sql_modal_confirming_high_unmatched() {
     state.modal.set_mode(InputMode::SqlModal);
     state
         .sql_modal
-        .editor
+        .editor_mut_for_input()
         .set_content("DROP TABLE users".to_string());
     let mut input = TextInputState::default();
     input.set_content("use".to_string());
-    state
-        .sql_modal
-        .set_status_for_test(SqlModalStatus::ConfirmingHigh {
-            decision: AdhocRiskDecision {
-                risk_level: RiskLevel::High,
-                label: "DROP",
-            },
-            input,
-            target_name: Some("users".to_string()),
-        });
-
-    let output = render_to_string(&mut terminal, &mut state);
-
-    insta::assert_snapshot!(output);
-}
-
-#[test]
-fn sql_modal_confirming_high_no_target() {
-    let mut state = create_test_state();
-    let mut terminal = create_test_terminal();
-
-    state.modal.set_mode(InputMode::SqlModal);
-    state
-        .sql_modal
-        .editor
-        .set_content("DROP TABLE users".to_string());
-    state
-        .sql_modal
-        .set_status_for_test(SqlModalStatus::ConfirmingHigh {
-            decision: AdhocRiskDecision {
-                risk_level: RiskLevel::High,
-                label: "DROP",
-            },
-            input: TextInputState::default(),
-            target_name: None,
-        });
+    state.sql_modal.begin_confirming_high(
+        AdhocRiskDecision {
+            risk_level: RiskLevel::High,
+            label: "DROP",
+        },
+        "users".to_string(),
+    );
+    *state.sql_modal.confirming_high_input_mut().unwrap() = input;
 
     let output = render_to_string(&mut terminal, &mut state);
 
@@ -354,11 +472,29 @@ fn sql_modal_confirming_high_no_target() {
 
 #[test]
 fn help_overlay() {
-    let (mut state, _now) = connected_state();
-    // Wider terminal so the help modal has enough room to align all
-    // descriptions to a single column without forcing wraps.
-    let mut terminal = create_test_terminal_sized(120, 32);
+    let mut state = postgres_connected_state();
+    let mut terminal = create_test_terminal();
 
+    state.modal.set_mode(InputMode::Help);
+
+    let output = render_to_string(&mut terminal, &mut state);
+
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn help_overlay_filtered_current_result() {
+    let mut state = postgres_connected_state();
+    let mut terminal = create_test_terminal();
+
+    state.ui.set_focused_pane(FocusedPane::Result);
+    state.result_interaction.activate_cell(0, 0);
+    let origin = HelpOrigin::from_state(&state);
+    state.ui.help_mut().open(origin);
+    for ch in "copy".chars() {
+        state.ui.help_mut().insert_filter_char(ch);
+    }
+    state.ui.help_mut().enter_filter_editing();
     state.modal.set_mode(InputMode::Help);
 
     let output = render_to_string(&mut terminal, &mut state);
@@ -368,11 +504,11 @@ fn help_overlay() {
 
 #[test]
 fn help_overlay_long_key_rows() {
-    let (mut state, _now) = connected_state();
+    let mut state = postgres_connected_state();
     let mut terminal = create_test_terminal();
 
     state.modal.set_mode(InputMode::Help);
-    state.ui.help_scroll_offset = 58;
+    state.ui.help_mut().set_scroll_offset(58);
 
     let output = render_to_string(&mut terminal, &mut state);
 
@@ -381,28 +517,14 @@ fn help_overlay_long_key_rows() {
 
 #[test]
 fn help_overlay_narrow_horizontal_scroll() {
-    let (mut state, _now) = connected_state();
+    let mut state = postgres_connected_state();
     let mut terminal = create_test_terminal_sized(50, 24);
 
     state.modal.set_mode(InputMode::Help);
-    state.ui.terminal_width = 50;
-    state.ui.terminal_height = 24;
-    state.ui.help_scroll_offset = 58;
-    state.ui.help_horizontal_offset = 18;
-
-    let output = render_to_string(&mut terminal, &mut state);
-
-    insta::assert_snapshot!(output);
-}
-
-#[test]
-fn help_overlay_omits_scrollbars_when_content_fits() {
-    let (mut state, _now) = connected_state();
-    let mut terminal = create_test_terminal_sized(180, 300);
-
-    state.modal.set_mode(InputMode::Help);
-    state.ui.terminal_width = 180;
-    state.ui.terminal_height = 300;
+    state.ui.set_terminal_width(50);
+    state.ui.set_terminal_height(24);
+    state.ui.help_mut().set_scroll_offset(58);
+    state.ui.help_mut().set_horizontal_offset(18);
 
     let output = render_to_string(&mut terminal, &mut state);
 
@@ -411,7 +533,7 @@ fn help_overlay_omits_scrollbars_when_content_fits() {
 
 #[test]
 fn command_palette_overlay() {
-    let (mut state, _now) = connected_state();
+    let mut state = postgres_connected_state();
     let mut terminal = create_test_terminal();
 
     state.modal.set_mode(InputMode::CommandPalette);
@@ -422,21 +544,8 @@ fn command_palette_overlay() {
 }
 
 #[test]
-fn generate_sql_menu_overlay() {
-    let (mut state, _now) = connected_state();
-    let mut terminal = create_test_terminal();
-
-    state.modal.set_mode(InputMode::GenerateSqlMenu);
-    state.ui.generate_sql_menu.set_selection(2);
-
-    let output = render_to_string(&mut terminal, &mut state);
-
-    insta::assert_snapshot!(output);
-}
-
-#[test]
 fn settings_overlay() {
-    let (mut state, _now) = connected_state();
+    let mut state = postgres_connected_state();
     let mut terminal = create_test_terminal();
 
     state.settings.open(state.ui.theme_id());
@@ -448,12 +557,95 @@ fn settings_overlay() {
 }
 
 #[test]
+fn settings_overlay_keymap() {
+    let mut state = postgres_connected_state();
+    let mut terminal = create_test_terminal();
+
+    state.settings.open(state.ui.theme_id());
+    state.settings.switch_next_section();
+    state.modal.set_mode(InputMode::Settings);
+
+    let output = render_to_string(&mut terminal, &mut state);
+
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn settings_overlay_er_diagram() {
+    let mut state = postgres_connected_state();
+    let mut terminal = create_test_terminal();
+
+    state.settings.open(state.ui.theme_id());
+    state.settings.switch_next_section();
+    state.settings.switch_next_section();
+    state.modal.set_mode(InputMode::Settings);
+
+    let output = render_to_string(&mut terminal, &mut state);
+
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn settings_overlay_er_diagram_custom_browser() {
+    let mut state = postgres_connected_state();
+    let mut terminal = create_test_terminal();
+
+    state
+        .settings
+        .load_er_browser(Some("Brave Browser".to_string()));
+    state.settings.open(state.ui.theme_id());
+    state.settings.switch_next_section();
+    state.settings.switch_next_section();
+    state.modal.set_mode(InputMode::Settings);
+
+    let output = render_to_string(&mut terminal, &mut state);
+
+    insta::assert_snapshot!(output);
+}
+
+#[test]
 fn table_picker_overlay() {
-    let (mut state, _now) = connected_state();
+    let mut state = postgres_connected_state();
     let mut terminal = create_test_terminal();
 
     state.modal.set_mode(InputMode::TablePicker);
-    state.ui.table_picker.insert_filter_str("user");
+    state.ui.table_picker_mut().insert_filter_str("user");
+
+    let output = render_to_string(&mut terminal, &mut state);
+
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn mysql_table_picker_shows_table_names_without_database() {
+    let mut state = create_test_state();
+    state.session.activate_connection_with_target(
+        &ConnectionId::from_string("mysql-test"),
+        "mysql",
+        DatabaseType::MySQL,
+        "mysql://user@localhost:3306/app?ssl-mode=PREFERRED",
+        Some("app"),
+    );
+    state
+        .session
+        .mark_connected(Arc::new(fixtures::sample_metadata()));
+    let mut terminal = create_test_terminal();
+
+    state.modal.set_mode(InputMode::TablePicker);
+    state.ui.table_picker_mut().insert_filter_str("user");
+
+    let output = render_to_string(&mut terminal, &mut state);
+
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn sqlite_table_picker_shows_table_names_without_database() {
+    let mut state = sqlite_connected_state();
+    let mut terminal = create_test_terminal();
+
+    state.modal.set_mode(InputMode::TablePicker);
+    state.ui.table_picker_mut().insert_filter_str("user");
 
     let output = render_to_string(&mut terminal, &mut state);
 
@@ -462,7 +654,7 @@ fn table_picker_overlay() {
 
 #[test]
 fn command_line_input() {
-    let (mut state, _now) = connected_state();
+    let mut state = postgres_connected_state();
     let mut terminal = create_test_terminal();
 
     state.modal.set_mode(InputMode::CommandLine);
@@ -480,24 +672,27 @@ fn query_history_picker_with_entries() {
 
     state.modal.set_mode(InputMode::QueryHistoryPicker);
     state.query_history_picker.replace_entries(&[
-        QueryHistoryEntry::new(
+        QueryHistoryEntry::new_with_database(
             "SELECT * FROM users WHERE id = 1".to_string(),
             "2026-03-13T10:00:00Z".to_string(),
             ConnectionId::from_string("test-conn"),
+            None,
             QueryResultStatus::Success,
             None,
         ),
-        QueryHistoryEntry::new(
+        QueryHistoryEntry::new_with_database(
             "INSERT INTO orders (user_id, total) VALUES (1, 100)".to_string(),
             "2026-03-13T11:00:00Z".to_string(),
             ConnectionId::from_string("test-conn"),
+            None,
             QueryResultStatus::Success,
             Some(1),
         ),
-        QueryHistoryEntry::new(
+        QueryHistoryEntry::new_with_database(
             "SELECT count(*) FROM users".to_string(),
             "2026-03-13T12:00:00Z".to_string(),
             ConnectionId::from_string("test-conn"),
+            None,
             QueryResultStatus::Failed,
             None,
         ),
@@ -527,17 +722,19 @@ fn query_history_picker_filter_mode() {
 
     state.modal.set_mode(InputMode::QueryHistoryPicker);
     state.query_history_picker.replace_entries(&[
-        QueryHistoryEntry::new(
+        QueryHistoryEntry::new_with_database(
             "SELECT * FROM users".to_string(),
             "2026-03-13T10:00:00Z".to_string(),
             ConnectionId::from_string("test-conn"),
+            None,
             QueryResultStatus::Success,
             None,
         ),
-        QueryHistoryEntry::new(
+        QueryHistoryEntry::new_with_database(
             "SELECT * FROM orders".to_string(),
             "2026-03-13T11:00:00Z".to_string(),
             ConnectionId::from_string("test-conn"),
+            None,
             QueryResultStatus::Success,
             None,
         ),
@@ -571,9 +768,10 @@ fn sql_modal_plan_tab_with_plan_text() {
     state.sql_modal.set_active_tab(SqlModalTab::Plan);
     state.explain.set_plan(
         "Seq Scan on users  (cost=0.00..35.50 rows=2550 width=36)\n  Filter: (id > 10)".to_string(),
+        DatabaseType::PostgreSQL,
         false,
         42,
-        "SELECT * FROM users WHERE id > 10",
+        POSTGRES_PLAN_QUERY,
     );
 
     let output = render_to_string(&mut terminal, &mut state);
@@ -619,6 +817,7 @@ fn sql_modal_compare_tab_right_only() {
     state.explain.set_plan(
         "Seq Scan on users  (cost=0.00..10.20 rows=10 width=3273)\n  Filter: email_verified"
             .to_string(),
+        DatabaseType::PostgreSQL,
         false,
         40,
         "SELECT * FROM users WHERE email_verified",
@@ -639,19 +838,19 @@ fn sql_modal_compare_tab_with_verdict() {
     state.modal.set_mode(InputMode::SqlModal);
     // First EXPLAIN with high cost
     state.explain.set_plan(
-        "Seq Scan on users  (cost=0.00..1000.00 rows=2550 width=36)\n  Filter: (id > 10)"
-            .to_string(),
+        POSTGRES_SEQ_SCAN_PLAN.to_string(),
+        DatabaseType::PostgreSQL,
         false,
         100,
-        "SELECT * FROM users WHERE id > 10",
+        POSTGRES_PLAN_QUERY,
     );
     // Second EXPLAIN with low cost (Improved) — auto-advances first to left
     state.explain.set_plan(
-        "Index Scan using idx_users_id on users  (cost=0.28..8.30 rows=1 width=36)\n  Index Cond: (id > 10)"
-            .to_string(),
+        POSTGRES_INDEX_SCAN_PLAN.to_string(),
+        DatabaseType::PostgreSQL,
         false,
         5,
-        "SELECT * FROM users WHERE id > 10",
+        POSTGRES_PLAN_QUERY,
     );
     state.sql_modal.set_active_tab(SqlModalTab::Compare);
 
@@ -669,6 +868,7 @@ fn sql_modal_compare_tab_unavailable() {
     // First EXPLAIN with unparseable text
     state.explain.set_plan(
         "CREATE TABLE foo (id int)".to_string(),
+        DatabaseType::PostgreSQL,
         false,
         0,
         "CREATE TABLE foo",
@@ -676,6 +876,7 @@ fn sql_modal_compare_tab_unavailable() {
     // Second EXPLAIN with also unparseable text — auto-advances first to left
     state.explain.set_plan(
         "ALTER TABLE foo ADD COLUMN bar text".to_string(),
+        DatabaseType::PostgreSQL,
         false,
         0,
         "ALTER TABLE foo",
@@ -696,19 +897,19 @@ fn sql_modal_compare_tab_narrow_stacked() {
     state.modal.set_mode(InputMode::SqlModal);
     // First EXPLAIN
     state.explain.set_plan(
-        "Seq Scan on users  (cost=0.00..1000.00 rows=2550 width=36)\n  Filter: (id > 10)"
-            .to_string(),
+        POSTGRES_SEQ_SCAN_PLAN.to_string(),
+        DatabaseType::PostgreSQL,
         false,
         100,
-        "SELECT * FROM users WHERE id > 10",
+        POSTGRES_PLAN_QUERY,
     );
     // Second EXPLAIN — auto-advances first to left
     state.explain.set_plan(
-        "Index Scan using idx_users_id on users  (cost=0.28..8.30 rows=1 width=36)\n  Index Cond: (id > 10)"
-            .to_string(),
+        POSTGRES_INDEX_SCAN_PLAN.to_string(),
+        DatabaseType::PostgreSQL,
         false,
         5,
-        "SELECT * FROM users WHERE id > 10",
+        POSTGRES_PLAN_QUERY,
     );
     state.sql_modal.set_active_tab(SqlModalTab::Compare);
 
@@ -727,5 +928,162 @@ fn sql_modal_normal_initial() {
 
     let output = render_to_string(&mut terminal, &mut state);
 
+    insta::assert_snapshot!(output);
+}
+
+fn sqlite_connected_state() -> AppState {
+    let mut state = create_test_state();
+    state.session.activate_connection_with_dsn(
+        &ConnectionId::new(),
+        "local",
+        DatabaseType::SQLite,
+        "sqlite:///tmp/app.db",
+    );
+    state
+        .session
+        .mark_connected(Arc::new(fixtures::sample_metadata()));
+    state
+}
+
+#[test]
+fn sqlite_sql_modal_omits_compare_tab() {
+    let mut state = sqlite_connected_state();
+    let mut terminal = create_test_terminal();
+
+    state.modal.set_mode(InputMode::SqlModal);
+
+    let output = render_to_string(&mut terminal, &mut state);
+
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn sqlite_sql_modal_plan_tab_labels_query_plan() {
+    let mut state = sqlite_connected_state();
+    let mut terminal = create_test_terminal();
+
+    state.modal.set_mode(InputMode::SqlModal);
+    state.sql_modal.set_active_tab(SqlModalTab::Plan);
+    state.explain.set_plan(
+        "SEARCH users USING INDEX idx_users_name\n  - SCAN orders".to_string(),
+        DatabaseType::SQLite,
+        false,
+        42,
+        "DELETE FROM users WHERE name = 'alice'",
+    );
+
+    let output = render_to_string(&mut terminal, &mut state);
+
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn sqlite_diagnostics_overlay_loading() {
+    let mut state = sqlite_connected_state();
+    let mut terminal = create_test_terminal();
+
+    state.sqlite_diagnostics.begin_core_fetch();
+    state.modal.set_mode(InputMode::SqliteDiagnostics);
+
+    let output = render_to_string(&mut terminal, &mut state);
+
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn sqlite_diagnostics_overlay_loaded() {
+    let mut state = sqlite_connected_state();
+    let mut terminal = create_test_terminal();
+
+    let run_id = state.sqlite_diagnostics.begin_core_fetch();
+    state
+        .sqlite_diagnostics
+        .set_core_loaded(run_id, baseline_sqlite_diagnostics_snapshot());
+    state.modal.set_mode(InputMode::SqliteDiagnostics);
+
+    let output = render_to_string(&mut terminal, &mut state);
+
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn sqlite_diagnostics_overlay_partial_failure() {
+    let mut state = sqlite_connected_state();
+    let mut terminal = create_test_terminal();
+
+    let run_id = state.sqlite_diagnostics.begin_core_fetch();
+    let mut snapshot = baseline_sqlite_diagnostics_snapshot();
+    snapshot.feature_summary = DiagnosticField::Unavailable;
+    snapshot.foreign_keys = DiagnosticField::err("timeout");
+    snapshot.journal_mode = DiagnosticField::ok("delete");
+    snapshot.query_only = DiagnosticField::ok("on");
+    snapshot.quick_check = DiagnosticField::ok("row 1 missing from index idx_users");
+    state.sqlite_diagnostics.set_core_loaded(run_id, snapshot);
+    state.modal.set_mode(InputMode::SqliteDiagnostics);
+
+    let output = render_to_string(&mut terminal, &mut state);
+
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn sqlite_diagnostics_overlay_quick_check_pending() {
+    let mut state = sqlite_connected_state();
+    let mut terminal = create_test_terminal();
+
+    let run_id = state.sqlite_diagnostics.begin_core_fetch();
+    state
+        .sqlite_diagnostics
+        .set_core_loaded(run_id, baseline_sqlite_diagnostics_snapshot());
+    state.sqlite_diagnostics.begin_quick_check();
+    state.modal.set_mode(InputMode::SqliteDiagnostics);
+
+    let output = render_to_string(&mut terminal, &mut state);
+
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn sqlite_diagnostics_overlay_quick_check_not_run() {
+    let mut state = sqlite_connected_state();
+    let mut terminal = create_test_terminal();
+
+    let run_id = state.sqlite_diagnostics.begin_core_fetch();
+    let mut snapshot = baseline_sqlite_diagnostics_snapshot();
+    snapshot.quick_check = DiagnosticField::Pending;
+    state.sqlite_diagnostics.set_core_loaded(run_id, snapshot);
+    state.modal.set_mode(InputMode::SqliteDiagnostics);
+
+    let output = render_to_string(&mut terminal, &mut state);
+
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn sqlite_diagnostics_overlay_wrapped_scroll() {
+    let mut state = sqlite_connected_state();
+    let mut terminal = create_test_terminal_sized(50, 24);
+
+    let run_id = state.sqlite_diagnostics.begin_core_fetch();
+    let mut snapshot = baseline_sqlite_diagnostics_snapshot();
+    snapshot.db_file = DiagnosticField::ok(
+        "/tmp/very/long/database/path/that/will/wrap/in/a/narrow/viewport/app.db",
+    );
+    state.sqlite_diagnostics.set_core_loaded(run_id, snapshot);
+    state.sqlite_diagnostics.set_scroll_offset(8);
+    state.modal.set_mode(InputMode::SqliteDiagnostics);
+
+    let output = render_to_string(&mut terminal, &mut state);
+
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn generate_sql_menu_overlay() {
+    let mut state = postgres_connected_state();
+    let mut terminal = create_test_terminal();
+    state.modal.set_mode(InputMode::GenerateSqlMenu);
+    state.ui.generate_sql_menu.set_selection(2);
+    let output = render_to_string(&mut terminal, &mut state);
     insta::assert_snapshot!(output);
 }

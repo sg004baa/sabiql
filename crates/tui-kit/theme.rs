@@ -94,12 +94,12 @@ pub struct EditorTokens {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TableTokens {
+    pub marked_row_bg: Color,
     pub result_row_active_bg: Color,
     pub result_cell_active_bg: Color,
     pub cell_edit_fg: Color,
     pub staged_delete_bg: Color,
     pub staged_delete_fg: Color,
-    pub marked_row_bg: Color,
     pub striped_row_bg: Color,
 }
 
@@ -216,7 +216,7 @@ pub const DEFAULT_THEME: ThemePalette = ThemePalette {
         modal: ModalTokens {
             title: Color::Rgb(0xe9, 0xdb, 0xdb),
             hint: Color::Rgb(0xc0, 0xb8, 0xb0),
-            border: Color::Rgb(0x70, 0x68, 0x60),
+            border: Color::Rgb(0x76, 0x7a, 0x84),
             border_highlight: Color::Rgb(0xc0, 0xb8, 0xb8),
         },
         navigation: NavigationTokens {
@@ -234,12 +234,12 @@ pub const DEFAULT_THEME: ThemePalette = ThemePalette {
             completion_selected_bg: Color::Rgb(0x45, 0x47, 0x5a),
         },
         table: TableTokens {
+            marked_row_bg: Color::Rgb(0x1f, 0x3a, 0x42),
             result_row_active_bg: Color::Rgb(0x2e, 0x2e, 0x44),
             result_cell_active_bg: Color::Rgb(0x3a, 0x3a, 0x5a),
             cell_edit_fg: Color::Rgb(0xa8, 0xb8, 0xb5),
             staged_delete_bg: Color::Rgb(0x3d, 0x22, 0x22),
             staged_delete_fg: Color::Rgb(0xee, 0x77, 0x77),
-            marked_row_bg: Color::Rgb(0x1f, 0x3a, 0x42),
             striped_row_bg: Color::Rgb(0x1e, 0x1e, 0x23),
         },
         feedback: FeedbackTokens {
@@ -290,7 +290,7 @@ pub const LIGHT_THEME: ThemePalette = ThemePalette {
         modal: ModalTokens {
             title: Color::Rgb(0x2c, 0x28, 0x2d),
             hint: Color::Rgb(0x65, 0x5d, 0x61),
-            border: Color::Rgb(0x9d, 0x94, 0x8f),
+            border: Color::Rgb(0x96, 0x98, 0xa0),
             border_highlight: Color::Rgb(0x3f, 0x70, 0x6a),
         },
         navigation: NavigationTokens {
@@ -308,12 +308,12 @@ pub const LIGHT_THEME: ThemePalette = ThemePalette {
             completion_selected_bg: Color::Rgb(0xd4, 0xe5, 0xe2),
         },
         table: TableTokens {
+            marked_row_bg: Color::Rgb(0xd7, 0xec, 0xee),
             result_row_active_bg: Color::Rgb(0xe3, 0xed, 0xeb),
             result_cell_active_bg: Color::Rgb(0xd0, 0xe2, 0xdf),
             cell_edit_fg: Color::Rgb(0x4a, 0x78, 0x72),
             staged_delete_bg: Color::Rgb(0xf3, 0xdd, 0xdb),
             staged_delete_fg: Color::Rgb(0xb3, 0x26, 0x1e),
-            marked_row_bg: Color::Rgb(0xd7, 0xec, 0xee),
             striped_row_bg: Color::Rgb(0xf1, 0xf5, 0xf4),
         },
         feedback: FeedbackTokens {
@@ -328,82 +328,6 @@ pub const LIGHT_THEME: ThemePalette = ThemePalette {
             sql_comment: Color::Rgb(0x7a, 0x74, 0x8c),
             sql_operator: Color::Rgb(0x6d, 0x72, 0x88),
             sql_text: Color::Rgb(0x2c, 0x28, 0x2d),
-        },
-    },
-};
-
-#[cfg(any(test, feature = "test-support"))]
-#[doc(hidden)]
-pub const TEST_CONTRAST_THEME: ThemePalette = ThemePalette {
-    semantic: SemanticTokens {
-        surface: SurfaceTokens {
-            focus_border: Color::Rgb(0x2f, 0xc4, 0xb2),
-            unfocus_border: Color::Rgb(0x5d, 0x62, 0x74),
-            highlight_border: Color::Rgb(0xff, 0xc8, 0x57),
-        },
-        text: TextTokens {
-            primary: Color::Rgb(0xf6, 0xf0, 0xe8),
-            secondary: Color::Rgb(0xc9, 0xd6, 0xdf),
-            muted: Color::Rgb(0x92, 0xb3, 0xc2),
-            dim: Color::Rgb(0x6a, 0x85, 0x95),
-            accent: Color::Rgb(0xff, 0xc8, 0x57),
-            placeholder: Color::Rgb(0x92, 0xb3, 0xc2),
-        },
-        status: StatusTokens {
-            success: Color::Rgb(0x7b, 0xe0, 0x73),
-            error: Color::Rgb(0xff, 0x7a, 0x59),
-            warning: Color::Rgb(0xff, 0xc8, 0x57),
-            pending: Color::Rgb(0xff, 0x9f, 0x1c),
-            medium_risk: Color::Rgb(0xff, 0x9f, 0x1c),
-        },
-        cursor: CursorTokens {
-            fg: Color::Rgb(0xff, 0xf4, 0xe0),
-            bg: Color::Rgb(0xff, 0xf4, 0xe0),
-            text_fg: Color::Rgb(0x0d, 0x11, 0x18),
-        },
-    },
-    component: ComponentTokens {
-        modal: ModalTokens {
-            title: Color::Rgb(0xf6, 0xf0, 0xe8),
-            hint: Color::Rgb(0x7b, 0xe0, 0x73),
-            border: Color::Rgb(0xd8, 0x2a, 0x1f),
-            border_highlight: Color::Rgb(0xff, 0xe0, 0x66),
-        },
-        navigation: NavigationTokens {
-            key_chip_bg: Color::Rgb(0x1a, 0x45, 0x5e),
-            key_chip_fg: Color::Rgb(0xff, 0xe0, 0x66),
-            section_header: Color::Rgb(0x2f, 0xc4, 0xb2),
-            scrollbar_active: Color::Rgb(0x2f, 0xc4, 0xb2),
-            scrollbar_inactive: Color::Rgb(0x5d, 0x62, 0x74),
-            tab_active: Color::Rgb(0x2f, 0xc4, 0xb2),
-            tab_inactive: Color::Rgb(0x92, 0xb3, 0xc2),
-            active_indicator: Color::Rgb(0x2f, 0xc4, 0xb2),
-        },
-        editor: EditorTokens {
-            current_line_bg: Color::Rgb(0x1d, 0x2d, 0x3f),
-            completion_selected_bg: Color::Rgb(0x2d, 0x5d, 0x46),
-        },
-        table: TableTokens {
-            result_row_active_bg: Color::Rgb(0x2b, 0x32, 0x54),
-            result_cell_active_bg: Color::Rgb(0x3a, 0x44, 0x6e),
-            cell_edit_fg: Color::Rgb(0xff, 0xe0, 0x66),
-            staged_delete_bg: Color::Rgb(0x4a, 0x1f, 0x1f),
-            staged_delete_fg: Color::Rgb(0xff, 0x7a, 0x59),
-            marked_row_bg: Color::Rgb(0x18, 0x47, 0x50),
-            striped_row_bg: Color::Rgb(0x1d, 0x21, 0x2b),
-        },
-        feedback: FeedbackTokens {
-            yank_flash_bg: Color::Rgb(0xff, 0xc8, 0x57),
-            yank_flash_fg: Color::Rgb(0x14, 0x17, 0x21),
-            note_text: Color::Rgb(0x92, 0xb3, 0xc2),
-        },
-        syntax: SyntaxTokens {
-            sql_keyword: Color::Rgb(0x7d, 0xc4, 0xff),
-            sql_string: Color::Rgb(0x9b, 0xf0, 0x8f),
-            sql_number: Color::Rgb(0xff, 0xb8, 0x6b),
-            sql_comment: Color::Rgb(0x7c, 0x8a, 0xa5),
-            sql_operator: Color::Rgb(0x5e, 0xe0, 0xd5),
-            sql_text: Color::Rgb(0xf6, 0xf0, 0xe8),
         },
     },
 };

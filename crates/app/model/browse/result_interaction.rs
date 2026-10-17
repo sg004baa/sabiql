@@ -2,19 +2,20 @@ use std::collections::BTreeSet;
 use std::time::Instant;
 
 use super::cell_edit::CellEditState;
-use crate::model::shared::text_input::TextInputState;
+use crate::model::shared::cursor::CursorMove;
+use crate::model::shared::text_input::TextKillDirection;
 use crate::model::shared::ui_state::{ResultSelection, YankFlash};
-use crate::policy::write::write_guardrails::WritePreview;
+use crate::policy::write::write_guardrails::{WriteOperation, WritePreview};
 
 // Invariants:
-// - `reset_view` / `reset_interaction` clear staged deletes and marked rows too.
-// - `exit_cell_to_scroll()` preserves staged deletes and marked rows.
+// - `reset_view` / `reset_interaction` clear staged deletes too.
+// - `exit_cell_to_scroll()` preserves staged deletes so Esc does not drop a staged batch.
 // - Callers must restore `input_mode` themselves when leaving `CellEdit`.
 #[derive(Debug, Clone, Default)]
 pub struct ResultInteraction {
-    pub scroll_offset: usize,
-    pub horizontal_offset: usize,
-    pub yank_flash: Option<YankFlash>,
+    scroll_offset: usize,
+    horizontal_offset: usize,
+    yank_flash: Option<YankFlash>,
 
     delete_op_pending: bool,
     yank_op_pending: bool,
@@ -26,6 +27,17 @@ pub struct ResultInteraction {
 }
 
 impl ResultInteraction {
+    pub fn marked_rows(&self) -> &BTreeSet<usize> {
+        &self.marked_rows
+    }
+    pub fn toggle_marked_row(&mut self, row: usize) {
+        if !self.marked_rows.remove(&row) {
+            self.marked_rows.insert(row);
+        }
+    }
+    pub fn clear_marked_rows(&mut self) {
+        self.marked_rows.clear();
+    }
     fn clear_active_cell_state(&mut self) {
         self.selection.reset();
         self.cell_edit.clear();
@@ -44,12 +56,32 @@ impl ResultInteraction {
         &self.staged_delete_rows
     }
 
-    pub fn marked_rows(&self) -> &BTreeSet<usize> {
-        &self.marked_rows
-    }
-
     pub fn pending_write_preview(&self) -> Option<&WritePreview> {
         self.pending_write_preview.as_ref()
+    }
+
+    pub fn scroll_offset(&self) -> usize {
+        self.scroll_offset
+    }
+
+    pub fn horizontal_offset(&self) -> usize {
+        self.horizontal_offset
+    }
+
+    pub fn yank_flash(&self) -> Option<YankFlash> {
+        self.yank_flash
+    }
+
+    pub fn set_scroll_offset(&mut self, offset: usize) {
+        self.scroll_offset = offset;
+    }
+
+    pub fn set_horizontal_offset(&mut self, offset: usize) {
+        self.horizontal_offset = offset;
+    }
+
+    pub fn set_yank_flash(&mut self, flash: Option<YankFlash>) {
+        self.yank_flash = flash;
     }
 
     pub fn activate_cell(&mut self, row: usize, col: usize) {
@@ -72,8 +104,63 @@ impl ResultInteraction {
         self.cell_edit.begin(row, col, value);
     }
 
-    pub fn cell_edit_input_mut(&mut self) -> &mut TextInputState {
-        &mut self.cell_edit.input
+    pub fn ensure_cell_edit_at(&mut self, row: usize, col: usize, value: String) {
+        if self.cell_edit.row() != Some(row) || self.cell_edit.col() != Some(col) {
+            self.begin_cell_edit(row, col, value);
+            self.clear_write_preview();
+        }
+    }
+
+    pub fn cell_edit_insert_char(&mut self, ch: char) {
+        self.cell_edit.insert_char(ch);
+        self.clear_write_preview();
+    }
+
+    pub fn cell_edit_insert_str(&mut self, text: &str) {
+        self.cell_edit.insert_str(text);
+        self.clear_write_preview();
+    }
+
+    pub fn cell_edit_backspace(&mut self) {
+        self.cell_edit.backspace();
+        self.clear_write_preview();
+    }
+
+    pub fn cell_edit_delete(&mut self) {
+        self.cell_edit.delete();
+        self.clear_write_preview();
+    }
+
+    pub fn cell_edit_kill(&mut self, direction: TextKillDirection) -> String {
+        let killed = self.cell_edit.kill(direction);
+        self.clear_write_preview();
+        killed
+    }
+
+    pub fn cell_edit_yank(&mut self, text: &str) {
+        self.cell_edit.yank(text);
+        self.clear_write_preview();
+    }
+
+    pub fn cell_edit_move_cursor(&mut self, direction: CursorMove) {
+        self.cell_edit.move_cursor(direction);
+    }
+
+    pub fn replace_cell_edit_draft(&mut self, content: String) {
+        self.cell_edit.replace_draft(content);
+        self.clear_write_preview();
+    }
+
+    pub fn cell_edit_set_cursor(&mut self, cursor: usize) {
+        self.cell_edit.set_cursor(cursor);
+    }
+
+    pub fn leave_cell_edit(&mut self) {
+        if self.cell_edit.has_pending_draft() {
+            self.clear_write_preview();
+        } else {
+            self.discard_cell_edit();
+        }
     }
 
     pub fn clear_cell_edit(&mut self) {
@@ -92,15 +179,6 @@ impl ResultInteraction {
 
     pub fn clear_staged_deletes(&mut self) {
         self.staged_delete_rows.clear();
-    }
-
-    pub fn toggle_marked_row(&mut self, row: usize) {
-        if !self.marked_rows.remove(&row) {
-            self.marked_rows.insert(row);
-        }
-    }
-
-    pub fn clear_marked_rows(&mut self) {
         self.marked_rows.clear();
     }
 
@@ -110,6 +188,18 @@ impl ResultInteraction {
 
     pub fn clear_write_preview(&mut self) {
         self.pending_write_preview = None;
+    }
+
+    pub fn complete_write_failure(&mut self) -> WriteOperation {
+        let operation = self
+            .pending_write_preview
+            .as_ref()
+            .map_or(WriteOperation::Update, |preview| preview.operation);
+        self.clear_write_preview();
+        if operation == WriteOperation::Delete {
+            self.clear_staged_deletes();
+        }
+        operation
     }
 
     pub fn discard_cell_edit(&mut self) {
@@ -213,6 +303,44 @@ mod tests {
     }
 
     #[test]
+    fn leave_cell_edit_preserves_draft_when_changed() {
+        let mut ri = ResultInteraction::default();
+        ri.activate_cell(2, 4);
+        ri.begin_cell_edit(2, 4, "val".to_string());
+        ri.replace_cell_edit_draft("changed".to_string());
+        ri.set_write_preview(test_preview());
+
+        ri.leave_cell_edit();
+
+        assert!(ri.cell_edit().is_active());
+        assert_eq!(ri.cell_edit().draft_value(), "changed");
+        assert!(ri.pending_write_preview().is_none());
+    }
+
+    #[test]
+    fn cell_edit_mutation_clears_stale_write_preview() {
+        let mut ri = ResultInteraction::default();
+        ri.begin_cell_edit(0, 0, "val".to_string());
+        ri.set_write_preview(test_preview());
+
+        ri.cell_edit_insert_char('x');
+
+        assert_eq!(ri.cell_edit().draft_value(), "valx");
+        assert!(ri.pending_write_preview().is_none());
+    }
+
+    #[test]
+    fn leave_cell_edit_clears_session_when_unchanged() {
+        let mut ri = ResultInteraction::default();
+        ri.activate_cell(2, 4);
+        ri.begin_cell_edit(2, 4, "val".to_string());
+
+        ri.leave_cell_edit();
+
+        assert!(!ri.cell_edit().is_active());
+    }
+
+    #[test]
     fn discard_cell_edit_clears_edit_and_preview_only() {
         let mut ri = ResultInteraction::default();
         ri.activate_cell(2, 4);
@@ -226,6 +354,40 @@ mod tests {
         assert!(ri.pending_write_preview().is_none());
         assert_eq!(ri.selection().mode(), ResultNavMode::CellActive);
         assert!(ri.staged_delete_rows().contains(&0));
+    }
+
+    #[test]
+    fn complete_write_failure_for_update_preserves_selection_and_staging() {
+        let mut ri = ResultInteraction::default();
+        ri.activate_cell(2, 4);
+        ri.stage_row(0);
+        ri.set_write_preview(test_preview());
+
+        let operation = ri.complete_write_failure();
+
+        assert_eq!(operation, WriteOperation::Update);
+        assert!(ri.pending_write_preview().is_none());
+        assert_eq!(ri.selection().row(), Some(2));
+        assert_eq!(ri.selection().cell(), Some(4));
+        assert!(ri.staged_delete_rows().contains(&0));
+    }
+
+    #[test]
+    fn complete_write_failure_for_delete_clears_staging_and_preserves_selection() {
+        let mut ri = ResultInteraction::default();
+        ri.activate_cell(2, 4);
+        ri.stage_row(0);
+        let mut preview = test_preview();
+        preview.operation = WriteOperation::Delete;
+        ri.set_write_preview(preview);
+
+        let operation = ri.complete_write_failure();
+
+        assert_eq!(operation, WriteOperation::Delete);
+        assert!(ri.pending_write_preview().is_none());
+        assert_eq!(ri.selection().row(), Some(2));
+        assert_eq!(ri.selection().cell(), Some(4));
+        assert!(ri.staged_delete_rows().is_empty());
     }
 
     #[test]
@@ -418,8 +580,8 @@ mod tests {
         ri.begin_cell_edit(1, 2, "hello".to_string());
 
         assert!(ri.cell_edit().is_active());
-        assert_eq!(ri.cell_edit().row, Some(1));
-        assert_eq!(ri.cell_edit().col, Some(2));
+        assert_eq!(ri.cell_edit().row(), Some(1));
+        assert_eq!(ri.cell_edit().col(), Some(2));
     }
 
     #[test]

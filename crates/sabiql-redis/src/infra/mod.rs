@@ -964,7 +964,9 @@ fn parse_line_pairs(
     }
 
     Ok(lines
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|chunk| (chunk[0].clone(), chunk[1].clone()))
         .collect())
 }

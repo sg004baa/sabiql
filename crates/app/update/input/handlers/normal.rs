@@ -1,72 +1,24 @@
 use crate::model::app_state::AppState;
 use crate::model::shared::focused_pane::FocusedPane;
 use crate::model::shared::key_sequence::Prefix;
+use crate::policy::FeaturePolicy;
 use crate::update::action::{Action, ModalKind};
 use crate::update::input::keybindings::{self as kb, Key, KeyCombo, Modifiers};
 use crate::update::input::vim::{
-    BrowseVimContext, VimCommand, VimSurfaceContext, action_for_input, action_for_key,
-    classify_command,
+    BrowseVimContext, VimSurfaceContext, action_for_input, action_for_key,
 };
 
-#[cfg(test)]
-use crate::model::connection::error::ConnectionErrorInfo;
-#[cfg(test)]
-use crate::model::shared::ui_state::FocusMode;
-
-pub fn handle_normal_mode(combo: KeyCombo, state: &AppState) -> Action {
+pub(super) fn handle_normal_mode(combo: KeyCombo, state: &AppState) -> Action {
     let browse_ctx = BrowseVimContext::from(state);
     let result_navigation = browse_ctx.is_result();
     let inspector_navigation = browse_ctx.is_inspector();
-
-    // Ctrl combos
-    if combo.modifiers.contains(Modifiers::CTRL) {
-        match combo.key {
-            Key::Char('h') => {
-                return if state.query.is_history_mode() {
-                    Action::ExitResultHistory
-                } else {
-                    Action::OpenResultHistory
-                };
-            }
-            Key::Char('k') if !state.query.is_history_mode() => {
-                return Action::OpenModal(ModalKind::Settings);
-            }
-            Key::Char('r') => {
-                return Action::ToggleReadOnly;
-            }
-            Key::Char('o') if !state.query.is_history_mode() => {
-                return Action::OpenModal(ModalKind::QueryHistoryPicker);
-            }
-            Key::Char('e') if state.can_request_csv_export() => {
-                return Action::RequestCsvExport;
-            }
-            Key::Char('p') if !state.query.is_history_mode() => {
-                return Action::OpenModal(ModalKind::TablePicker);
-            }
-            // Ctrl+N/P navigation disabled on main screen; use j/k or arrows.
-            // Modals/pickers handle Ctrl+N/P via their own bindings.
-            // NOTE: vim/classify.rs still maps Ctrl+N/P → MoveDown/MoveUp for
-            // modal contexts (SQL Modal Plan/Compare). This catch-all prevents
-            // that mapping from reaching the main screen.
-            Key::Char('n' | 'p') => {
-                return Action::None;
-            }
-            _ => {
-                if let Some(action) = action_for_key(&combo, VimSurfaceContext::Browse(browse_ctx))
-                {
-                    return action;
-                }
-                if state.query.is_history_mode() {
-                    return Action::None;
-                }
-            }
-        }
-    }
+    let keymap_preset = state.settings.saved_keymap_preset();
+    let feature_policy = FeaturePolicy::new(&state.session.active_engine_feature_profile());
 
     // Key sequence FSM: two-key sequences (zz, zt, zb)
-    // Must be resolved before history whitelist and global actions so that
-    // the second key (t, b, z) is never swallowed and the sequence is always cleared.
-    if let Some(prefix) = state.ui.key_sequence.pending_prefix() {
+    // Must be resolved before Ctrl/global actions so that the second key is
+    // never swallowed and the sequence is always cleared.
+    if let Some(prefix) = state.ui.key_sequence().pending_prefix() {
         if combo.modifiers.intersects(Modifiers::CTRL | Modifiers::ALT) {
             return Action::CancelKeySequence;
         }
@@ -76,55 +28,120 @@ pub fn handle_normal_mode(combo: KeyCombo, state: &AppState) -> Action {
         };
     }
 
-    // History mode: whitelist — only history nav, help, and scroll allowed
-    if state.query.is_history_mode() {
+    if combo == KeyCombo::ctrl(Key::Char('k')) {
+        return Action::OpenModal(ModalKind::Settings);
+    }
+    if combo.modifiers.is_empty()
+        || (combo.modifiers == Modifiers::SHIFT
+            && matches!(combo.key, Key::BackTab | Key::Char('<' | '>')))
+    {
         match combo.key {
-            Key::Char('[') => return Action::HistoryOlder,
-            Key::Char(']') => return Action::HistoryNewer,
-            Key::Char('?') => return Action::ToggleModal(ModalKind::Help),
-            // Home/End/PageDown/PageUp are blocked in history mode
-            // (only char keys g/G and Ctrl+D/U/F/B are allowed for these motions)
-            Key::Home | Key::End | Key::PageDown | Key::PageUp => return Action::None,
-            // Scroll keys fall through to shared vim navigation handling
-            _ if matches!(classify_command(&combo), Some(VimCommand::Navigation(_))) => {}
-            Key::Char('z') => {}
-            _ => return Action::None,
+            Key::Tab | Key::Char('>') => {
+                if state.ui.is_focus_mode() {
+                    return Action::ToggleFocus;
+                }
+                return Action::SetFocusedPane(match state.ui.focused_pane() {
+                    FocusedPane::Explorer => FocusedPane::Inspector,
+                    FocusedPane::Inspector => FocusedPane::Result,
+                    FocusedPane::Result => FocusedPane::Explorer,
+                });
+            }
+            Key::BackTab | Key::Char('<') => {
+                if state.ui.is_focus_mode() {
+                    return Action::ToggleFocus;
+                }
+                return Action::SetFocusedPane(match state.ui.focused_pane() {
+                    FocusedPane::Explorer => FocusedPane::Result,
+                    FocusedPane::Inspector => FocusedPane::Explorer,
+                    FocusedPane::Result => FocusedPane::Inspector,
+                });
+            }
+            Key::Char('/') => return Action::OpenModal(ModalKind::TablePicker),
+            Key::Char(' ')
+                if state.ui.focused_pane() == FocusedPane::Result
+                    && state.result_interaction.selection().row().is_some() =>
+            {
+                return Action::ToggleMarkedRow;
+            }
+            Key::Char('S')
+                if state.ui.focused_pane() == FocusedPane::Result
+                    && (state.result_interaction.selection().row().is_some()
+                        || !state.result_interaction.marked_rows().is_empty()) =>
+            {
+                return Action::OpenModal(ModalKind::GenerateSqlMenu);
+            }
+            _ => {}
+        }
+    }
+    if combo.modifiers.is_empty() && inspector_navigation {
+        if combo.key == Key::Char(']') {
+            return Action::InspectorNextTab;
+        }
+        if combo.key == Key::Char('[') {
+            return Action::InspectorPrevTab;
+        }
+    }
+    // Ctrl combos
+    if combo.modifiers.contains(Modifiers::CTRL) {
+        match combo.key {
+            Key::Char('r') if kb::read_only(keymap_preset).combos.contains(&combo) => {
+                return Action::ToggleReadOnly;
+            }
+            Key::Char('o') if kb::query_history(keymap_preset).combos.contains(&combo) => {
+                return Action::OpenModal(ModalKind::QueryHistoryPicker);
+            }
+            Key::Char('p') if kb::table_picker(keymap_preset).combos.contains(&combo) => {
+                return Action::OpenModal(ModalKind::TablePicker);
+            }
+            // Ctrl+N/P navigation disabled on main screen; use j/k or arrows.
+            // Modals/pickers handle Ctrl+N/P via their own bindings.
+            // NOTE: vim/classify.rs still maps Ctrl+N/P → MoveDown/MoveUp for modal
+            // contexts (SQL Modal Plan/Compare). This catch-all prevents that
+            // mapping from reaching the main screen.
+            Key::Char('n' | 'p') => {
+                return Action::None;
+            }
+            _ => {
+                if let Some(action) = action_for_key(&combo, VimSurfaceContext::Browse(browse_ctx))
+                {
+                    return action;
+                }
+            }
         }
     }
 
     // Global actions (predicate-based, no modifiers)
-    if kb::is_quit(&combo) {
-        return Action::Quit;
-    }
-    if kb::is_help(&combo) {
-        return Action::ToggleModal(ModalKind::Help);
-    }
-    if kb::is_command_line(&combo) {
-        return Action::EnterCommandLine;
-    }
-    if kb::is_reload(&combo) {
-        return Action::ReloadMetadata;
-    }
-    if kb::is_focus_toggle(&combo) {
-        return Action::ToggleFocus;
-    }
-    if combo.key == Key::Enter
-        && combo.modifiers.is_empty()
-        && state.connection_error.error_info.is_some()
+    if let Some(action) = kb::global_action_for_with_policy(&combo, keymap_preset, &feature_policy)
     {
-        return Action::ConfirmSelection;
-    }
-    if inspector_navigation && combo.modifiers.is_empty() {
-        match combo.key {
-            Key::Left => return Action::InspectorPrevTab,
-            Key::Right => return Action::InspectorNextTab,
-            _ => {}
+        if matches!(action, Action::RequestCsvExport) && !state.can_request_csv_export() {
+            return Action::None;
         }
+        return action;
+    }
+    if combo.key == Key::Enter && combo.modifiers.is_empty() && state.connection_error.has_error() {
+        return Action::ConfirmSelection;
     }
 
     // Shared vim semantics (navigation, mode, operators)
     if let Some(action) = action_for_key(&combo, VimSurfaceContext::Browse(browse_ctx)) {
         return action;
+    }
+
+    let staged_delete_in_progress = !state.result_interaction.staged_delete_rows().is_empty();
+
+    if result_navigation
+        && !staged_delete_in_progress
+        && kb::result_active::ROW_DETAIL.combos.contains(&combo)
+        && state.result_interaction.selection().row().is_some()
+    {
+        return kb::result_active::ROW_DETAIL.action.clone();
+    }
+    if result_navigation
+        && !staged_delete_in_progress
+        && kb::result_active::YANK.combos.contains(&combo)
+        && state.result_interaction.selection().cell().is_some()
+    {
+        return kb::result_active::YANK.action.clone();
     }
 
     // Non-navigation context keys
@@ -153,49 +170,18 @@ pub fn handle_normal_mode(combo: KeyCombo, state: &AppState) -> Action {
             }
         }
 
-        // Pane cycling: Tab / Shift+Tab move focus forward / backward through panes
-        Key::Tab => {
-            if state.ui.is_focus_mode() {
-                Action::ToggleFocus
-            } else {
-                Action::FocusNextPane
-            }
-        }
-        Key::BackTab => {
-            if state.ui.is_focus_mode() {
-                Action::ToggleFocus
-            } else {
-                Action::FocusPrevPane
-            }
-        }
-
-        Key::Char('u')
-            if result_navigation && !state.result_interaction.staged_delete_rows().is_empty() =>
-        {
+        // Inspector sub-tab navigation (Tab/Shift+Tab, only when Inspector focused)
+        Key::Char('u') if result_navigation && staged_delete_in_progress => {
             Action::UnstageLastStagedRow
         }
-        Key::Char(' ')
-            if result_navigation && state.result_interaction.selection().row().is_some() =>
+        _ if kb::global::SQL.combos.contains(&combo) => kb::global::SQL.action.clone(),
+        _ if feature_policy.is_enabled(kb::global::ER_DIAGRAM.feature_requirement())
+            && kb::global::ER_DIAGRAM.combos.contains(&combo) =>
         {
-            Action::ToggleMarkedRow
+            kb::global::ER_DIAGRAM.action.clone()
         }
-        Key::Char('S')
-            if result_navigation
-                && (state.result_interaction.selection().row().is_some()
-                    || !state.result_interaction.marked_rows().is_empty()) =>
-        {
-            Action::OpenModal(ModalKind::GenerateSqlMenu)
-        }
-        Key::Char('Y')
-            if result_navigation && state.result_interaction.selection().cell().is_some() =>
-        {
-            Action::ResultCellYank
-        }
-        Key::Char('s') => Action::OpenModal(ModalKind::SqlModal),
-        Key::Char('e') => Action::OpenModal(ModalKind::ErTablePicker),
-        Key::Char('/') => Action::OpenModal(ModalKind::TablePicker),
-        Key::Char('c') if state.ui.focused_pane == FocusedPane::Explorer => {
-            Action::OpenModal(ModalKind::ConnectionSelector)
+        _ if kb::global::CONNECTIONS.combos.contains(&combo) => {
+            kb::global::CONNECTIONS.action.clone()
         }
 
         Key::Char('z') => Action::BeginKeySequence(Prefix::Z),
@@ -207,11 +193,18 @@ pub fn handle_normal_mode(combo: KeyCombo, state: &AppState) -> Action {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use crate::domain::{ConnectionId, DatabaseType, QueryResult, QuerySource};
+    use crate::model::connection::error::test_support;
     use crate::model::shared::key_sequence::KeySequenceState;
+    use crate::model::shared::settings::KeymapPreset;
+    use crate::model::shared::ui_state::FocusMode;
     use crate::update::action::{
         CursorPosition, ScrollAmount, ScrollDirection, ScrollTarget, ScrollToCursorTarget,
         SelectMotion,
     };
+    use crate::update::input::keybindings::test_support::same_payload_free_action;
     use crate::update::input::keybindings::{Key, KeyCombo};
     use rstest::rstest;
 
@@ -223,26 +216,53 @@ mod tests {
         KeyCombo::ctrl(k)
     }
 
+    fn combo_ctrl_shift(k: Key) -> KeyCombo {
+        KeyCombo::ctrl_shift(k)
+    }
+
     fn browse_state() -> AppState {
         AppState::new("test".to_string())
     }
 
+    fn sqlite_connected_state() -> AppState {
+        connected_state(DatabaseType::SQLite)
+    }
+
+    fn browse_state_with_preset(preset: KeymapPreset) -> AppState {
+        let mut state = browse_state();
+        state.settings.load_keymap_preset(preset);
+        state
+    }
+
+    fn connected_state(database_type: DatabaseType) -> AppState {
+        let mut state = browse_state();
+        state.session.activate_connection_with_dsn(
+            &ConnectionId::new(),
+            "database",
+            database_type,
+            "test://database",
+        );
+        state
+    }
+
     fn focus_mode_state() -> AppState {
         let mut state = browse_state();
-        state.ui.focus_mode = FocusMode::focused(FocusedPane::Explorer);
-        state.ui.focused_pane = FocusedPane::Result;
+        state
+            .ui
+            .set_focus_mode(FocusMode::focused(FocusedPane::Explorer));
+        state.ui.set_focused_pane(FocusedPane::Result);
         state
     }
 
     fn result_focused_state() -> AppState {
         let mut state = browse_state();
-        state.ui.focused_pane = FocusedPane::Result;
+        state.ui.set_focused_pane(FocusedPane::Result);
         state
     }
 
     fn inspector_focused_state() -> AppState {
         let mut state = browse_state();
-        state.ui.focused_pane = FocusedPane::Inspector;
+        state.ui.set_focused_pane(FocusedPane::Inspector);
         state
     }
 
@@ -253,20 +273,25 @@ mod tests {
         mod global_actions {
             use super::*;
 
+            fn state_with_csv_result(preset: KeymapPreset) -> AppState {
+                let mut state = browse_state_with_preset(preset);
+                state
+                    .query
+                    .set_current_result(Arc::new(QueryResult::success(
+                        "SELECT 1".to_string(),
+                        vec!["col".to_string()],
+                        vec![vec!["value".to_string()]],
+                        1,
+                        QuerySource::Preview,
+                    )));
+                state
+            }
+
             #[test]
             fn ctrl_p_opens_table_picker() {
                 let state = browse_state();
 
                 let result = handle_normal_mode(combo_ctrl(Key::Char('p')), &state);
-
-                assert!(matches!(result, Action::OpenModal(ModalKind::TablePicker)));
-            }
-
-            #[test]
-            fn slash_opens_table_picker() {
-                let state = browse_state();
-
-                let result = handle_normal_mode(combo(Key::Char('/')), &state);
 
                 assert!(matches!(result, Action::OpenModal(ModalKind::TablePicker)));
             }
@@ -281,12 +306,168 @@ mod tests {
             }
 
             #[test]
-            fn ctrl_k_opens_settings() {
+            fn comma_opens_settings() {
+                let state = browse_state();
+
+                let result = handle_normal_mode(combo(Key::Char(',')), &state);
+
+                assert!(matches!(result, Action::OpenModal(ModalKind::Settings)));
+            }
+
+            #[test]
+            fn default_s_no_longer_opens_settings() {
+                let state = browse_state();
+
+                let result = handle_normal_mode(combo(Key::Char('S')), &state);
+
+                assert!(matches!(result, Action::None));
+            }
+
+            #[test]
+            fn default_ctrl_k_preserves_fork_settings_alias() {
                 let state = browse_state();
 
                 let result = handle_normal_mode(combo_ctrl(Key::Char('k')), &state);
 
                 assert!(matches!(result, Action::OpenModal(ModalKind::Settings)));
+            }
+
+            #[rstest]
+            #[case(combo_ctrl(Key::Char('p')), Action::OpenModal(ModalKind::TablePicker))]
+            #[case(combo(Key::Char(',')), Action::OpenModal(ModalKind::Settings))]
+            #[case(combo(Key::F(1)), Action::OpenModal(ModalKind::CommandPalette))]
+            #[case(combo_ctrl(Key::Char('r')), Action::ToggleReadOnly)]
+            #[case(
+                combo_ctrl(Key::Char('o')),
+                Action::OpenModal(ModalKind::QueryHistoryPicker)
+            )]
+            fn default_preset_uses_declared_global_keys(
+                #[case] input: KeyCombo,
+                #[case] expected: Action,
+            ) {
+                let state = browse_state_with_preset(KeymapPreset::Default);
+
+                let result = handle_normal_mode(input, &state);
+
+                assert!(same_payload_free_action(&result, &expected));
+            }
+
+            #[rstest]
+            #[case(combo(Key::Char('T')), Action::OpenModal(ModalKind::TablePicker))]
+            #[case(combo(Key::Char(',')), Action::OpenModal(ModalKind::Settings))]
+            #[case(combo(Key::Char('P')), Action::OpenModal(ModalKind::CommandPalette))]
+            #[case(combo(Key::Char('R')), Action::ToggleReadOnly)]
+            #[case(
+                combo(Key::Char('O')),
+                Action::OpenModal(ModalKind::QueryHistoryPicker)
+            )]
+            fn ide_preset_uses_declared_replacement_keys(
+                #[case] input: KeyCombo,
+                #[case] expected: Action,
+            ) {
+                let state = browse_state_with_preset(KeymapPreset::Ide);
+
+                let result = handle_normal_mode(input, &state);
+
+                assert!(same_payload_free_action(&result, &expected));
+            }
+
+            #[test]
+            fn er_key_opens_picker_for_postgresql() {
+                let state = connected_state(DatabaseType::PostgreSQL);
+
+                let result = handle_normal_mode(combo(Key::Char('e')), &state);
+
+                assert!(matches!(
+                    result,
+                    Action::OpenModal(ModalKind::ErTablePicker)
+                ));
+            }
+
+            #[test]
+            fn er_key_is_ignored_for_sqlite() {
+                let state = connected_state(DatabaseType::SQLite);
+
+                let result = handle_normal_mode(combo(Key::Char('e')), &state);
+
+                assert!(matches!(result, Action::None));
+            }
+
+            #[rstest]
+            #[case(KeymapPreset::Default, Key::Char('s'), ModalKind::SqlModal)]
+            #[case(KeymapPreset::Ide, Key::Char('s'), ModalKind::SqlModal)]
+            #[case(KeymapPreset::Default, Key::Char('e'), ModalKind::ErTablePicker)]
+            #[case(KeymapPreset::Ide, Key::Char('e'), ModalKind::ErTablePicker)]
+            #[case(KeymapPreset::Default, Key::Char('c'), ModalKind::ConnectionSelector)]
+            #[case(KeymapPreset::Ide, Key::Char('c'), ModalKind::ConnectionSelector)]
+            fn shortcuts_use_declared_bindings(
+                #[case] preset: KeymapPreset,
+                #[case] key: Key,
+                #[case] modal: ModalKind,
+            ) {
+                let mut state = connected_state(DatabaseType::PostgreSQL);
+                state.settings.load_keymap_preset(preset);
+
+                let result = handle_normal_mode(combo(key), &state);
+
+                assert!(matches!(result, Action::OpenModal(actual) if actual == modal));
+            }
+
+            #[rstest]
+            #[case(KeymapPreset::Default, KeyCombo::ctrl(Key::Char('s')))]
+            #[case(KeymapPreset::Default, KeyCombo::alt(Key::Char('s')))]
+            #[case(KeymapPreset::Default, KeyCombo::shift(Key::Char('s')))]
+            #[case(KeymapPreset::Default, KeyCombo::alt(Key::Char('e')))]
+            #[case(KeymapPreset::Default, KeyCombo::shift(Key::Char('e')))]
+            #[case(KeymapPreset::Default, KeyCombo::ctrl(Key::Char('c')))]
+            #[case(KeymapPreset::Default, KeyCombo::alt(Key::Char('c')))]
+            #[case(KeymapPreset::Default, KeyCombo::shift(Key::Char('c')))]
+            #[case(KeymapPreset::Ide, KeyCombo::ctrl(Key::Char('e')))]
+            fn undeclared_shortcuts_are_ignored(
+                #[case] preset: KeymapPreset,
+                #[case] input: KeyCombo,
+            ) {
+                let state = browse_state_with_preset(preset);
+
+                let result = handle_normal_mode(input, &state);
+
+                assert!(matches!(result, Action::None));
+            }
+
+            #[rstest]
+            #[case(KeymapPreset::Default, combo_ctrl(Key::Char('e')))]
+            #[case(KeymapPreset::Ide, combo(Key::Char('E')))]
+            fn csv_export_binding_takes_priority_over_normal_shortcuts(
+                #[case] preset: KeymapPreset,
+                #[case] input: KeyCombo,
+            ) {
+                let state = state_with_csv_result(preset);
+
+                let result = handle_normal_mode(input, &state);
+
+                assert!(matches!(result, Action::RequestCsvExport));
+            }
+
+            #[rstest]
+            #[case(combo(Key::F(1)))]
+            #[case(combo_ctrl(Key::Char('r')))]
+            #[case(combo_ctrl(Key::Char('o')))]
+            #[case(combo(Key::Char('S')))]
+            fn ide_preset_disables_replaced_keys(#[case] input: KeyCombo) {
+                let state = browse_state_with_preset(KeymapPreset::Ide);
+
+                let result = handle_normal_mode(input, &state);
+
+                assert!(matches!(result, Action::None));
+            }
+
+            #[test]
+            fn ide_preset_ctrl_p_does_not_open_table_picker() {
+                let state = browse_state_with_preset(KeymapPreset::Ide);
+
+                let result = handle_normal_mode(combo_ctrl(Key::Char('p')), &state);
+
+                assert!(!matches!(result, Action::OpenModal(ModalKind::TablePicker)));
             }
 
             #[test]
@@ -314,6 +495,18 @@ mod tests {
                 let result = handle_normal_mode(combo(Key::Char(':')), &state);
 
                 assert!(matches!(result, Action::EnterCommandLine));
+            }
+
+            #[test]
+            fn f1_opens_command_palette() {
+                let state = browse_state();
+
+                let result = handle_normal_mode(combo(Key::F(1)), &state);
+
+                assert!(matches!(
+                    result,
+                    Action::OpenModal(ModalKind::CommandPalette)
+                ));
             }
 
             #[test]
@@ -416,7 +609,7 @@ mod tests {
             #[test]
             fn enter_confirms_selection_when_explorer_focused() {
                 let mut state = browse_state();
-                state.ui.focused_pane = FocusedPane::Explorer;
+                state.ui.set_focused_pane(FocusedPane::Explorer);
 
                 let result = handle_normal_mode(combo(Key::Enter), &state);
 
@@ -424,11 +617,16 @@ mod tests {
             }
 
             #[test]
-            fn ctrl_enter_noop_when_connection_error_is_open() {
+            fn alt_enter_noop_when_connection_error_is_open() {
                 let mut state = browse_state();
-                state.connection_error.error_info = Some(ConnectionErrorInfo::new("boom"));
+                state.connection_error.set_error(test_support::from_parts(
+                    "Connection failed",
+                    "See details for more information",
+                    false,
+                    "boom",
+                ));
 
-                let result = handle_normal_mode(KeyCombo::ctrl(Key::Enter), &state);
+                let result = handle_normal_mode(KeyCombo::alt(Key::Enter), &state);
 
                 assert!(matches!(result, Action::None));
             }
@@ -436,7 +634,12 @@ mod tests {
             #[test]
             fn plain_enter_confirms_connection_error() {
                 let mut state = browse_state();
-                state.connection_error.error_info = Some(ConnectionErrorInfo::new("boom"));
+                state.connection_error.set_error(test_support::from_parts(
+                    "Connection failed",
+                    "See details for more information",
+                    false,
+                    "boom",
+                ));
 
                 let result = handle_normal_mode(KeyCombo::plain(Key::Enter), &state);
 
@@ -446,7 +649,7 @@ mod tests {
             #[test]
             fn enter_noop_when_inspector_focused() {
                 let mut state = browse_state();
-                state.ui.focused_pane = FocusedPane::Inspector;
+                state.ui.set_focused_pane(FocusedPane::Inspector);
 
                 let result = handle_normal_mode(combo(Key::Enter), &state);
 
@@ -456,11 +659,22 @@ mod tests {
             #[test]
             fn enter_activates_cell_when_result_focused() {
                 let mut state = browse_state();
-                state.ui.focused_pane = FocusedPane::Result;
+                state.ui.set_focused_pane(FocusedPane::Result);
 
                 let result = handle_normal_mode(combo(Key::Enter), &state);
 
                 assert!(matches!(result, Action::ResultActivateCell));
+            }
+
+            #[test]
+            fn enter_opens_cell_detail_when_result_cell_is_active() {
+                let mut state = browse_state();
+                state.ui.set_focused_pane(FocusedPane::Result);
+                state.result_interaction.activate_cell(0, 0);
+
+                let result = handle_normal_mode(combo(Key::Enter), &state);
+
+                assert!(matches!(result, Action::ResultOpenCellDetail));
             }
         }
 
@@ -479,81 +693,85 @@ mod tests {
                 assert!(matches!(result, Action::SetFocusedPane(pane) if pane == expected_pane));
             }
 
-            #[test]
-            fn right_switches_to_next_inspector_tab_when_inspector_focused() {
-                let mut state = browse_state();
-                state.ui.focused_pane = FocusedPane::Inspector;
-
-                let result = handle_normal_mode(combo(Key::Right), &state);
-
-                assert!(matches!(result, Action::InspectorNextTab));
-            }
-
-            #[test]
-            fn left_switches_to_previous_inspector_tab_when_inspector_focused() {
-                let mut state = browse_state();
-                state.ui.focused_pane = FocusedPane::Inspector;
-
-                let result = handle_normal_mode(combo(Key::Left), &state);
-
-                assert!(matches!(result, Action::InspectorPrevTab));
-            }
-
             #[rstest]
-            #[case(FocusedPane::Explorer)]
-            #[case(FocusedPane::Inspector)]
-            #[case(FocusedPane::Result)]
-            fn tab_cycles_focus_forward(#[case] from: FocusedPane) {
+            #[case(KeyCombo::plain(Key::Char('>')), FocusedPane::Inspector)]
+            #[case(KeyCombo::shift(Key::Char('>')), FocusedPane::Inspector)]
+            #[case(KeyCombo::plain(Key::Char('<')), FocusedPane::Result)]
+            #[case(KeyCombo::shift(Key::Char('<')), FocusedPane::Result)]
+            fn angle_brackets_cycle_panes_with_terminal_shift(
+                #[case] combo: KeyCombo,
+                #[case] expected: FocusedPane,
+            ) {
                 let mut state = browse_state();
-                state.ui.focused_pane = from;
+                state.ui.set_focused_pane(FocusedPane::Explorer);
+                assert!(
+                    matches!(handle_normal_mode(combo, &state), Action::SetFocusedPane(pane) if pane == expected)
+                );
+            }
+
+            #[test]
+            fn tab_focuses_result_from_inspector() {
+                let mut state = browse_state();
+                state.ui.set_focused_pane(FocusedPane::Inspector);
 
                 let result = handle_normal_mode(combo(Key::Tab), &state);
 
-                assert!(matches!(result, Action::FocusNextPane));
-            }
-
-            #[rstest]
-            #[case(FocusedPane::Explorer)]
-            #[case(FocusedPane::Inspector)]
-            #[case(FocusedPane::Result)]
-            fn shift_tab_cycles_focus_backward(#[case] from: FocusedPane) {
-                let mut state = browse_state();
-                state.ui.focused_pane = from;
-
-                let result = handle_normal_mode(combo(Key::BackTab), &state);
-
-                assert!(matches!(result, Action::FocusPrevPane));
+                assert!(matches!(
+                    result,
+                    Action::SetFocusedPane(FocusedPane::Result)
+                ));
             }
 
             #[test]
-            fn tab_toggles_focus_mode_when_focus_mode_active() {
+            fn shift_tab_focuses_explorer_from_inspector() {
                 let mut state = browse_state();
-                state.ui.focus_mode = FocusMode::focused(FocusedPane::Explorer);
+                state.ui.set_focused_pane(FocusedPane::Inspector);
+
+                let result = handle_normal_mode(KeyCombo::shift(Key::BackTab), &state);
+
+                assert!(matches!(
+                    result,
+                    Action::SetFocusedPane(FocusedPane::Explorer)
+                ));
+            }
+
+            #[test]
+            fn tab_focuses_inspector_from_explorer() {
+                let mut state = browse_state();
+                state.ui.set_focused_pane(FocusedPane::Explorer);
 
                 let result = handle_normal_mode(combo(Key::Tab), &state);
 
-                assert!(matches!(result, Action::ToggleFocus));
+                assert!(matches!(
+                    result,
+                    Action::SetFocusedPane(FocusedPane::Inspector)
+                ));
             }
 
             #[test]
-            fn shift_tab_toggles_focus_mode_when_focus_mode_active() {
+            fn tab_focuses_explorer_from_result() {
                 let mut state = browse_state();
-                state.ui.focus_mode = FocusMode::focused(FocusedPane::Explorer);
+                state.ui.set_focused_pane(FocusedPane::Result);
 
-                let result = handle_normal_mode(combo(Key::BackTab), &state);
+                let result = handle_normal_mode(combo(Key::Tab), &state);
 
-                assert!(matches!(result, Action::ToggleFocus));
+                assert!(matches!(
+                    result,
+                    Action::SetFocusedPane(FocusedPane::Explorer)
+                ));
             }
 
-            #[rstest]
-            #[case('<')]
-            #[case('>')]
-            fn angle_brackets_are_unbound(#[case] key: char) {
-                let state = browse_state();
+            #[test]
+            fn backtab_focuses_result_from_explorer() {
+                let mut state = browse_state();
+                state.ui.set_focused_pane(FocusedPane::Explorer);
 
-                let result = handle_normal_mode(combo(Key::Char(key)), &state);
+                let result = handle_normal_mode(KeyCombo::shift(Key::BackTab), &state);
 
-                assert!(matches!(result, Action::None));
+                assert!(matches!(
+                    result,
+                    Action::SetFocusedPane(FocusedPane::Result)
+                ));
             }
         }
     }
@@ -683,12 +901,15 @@ mod tests {
             }
 
             #[test]
-            fn c_noop() {
+            fn c_opens_connection_selector() {
                 let state = inspector_focused_state();
 
                 let result = handle_normal_mode(combo(Key::Char('c')), &state);
 
-                assert!(matches!(result, Action::None));
+                assert!(matches!(
+                    result,
+                    Action::OpenModal(ModalKind::ConnectionSelector)
+                ));
             }
         }
 
@@ -785,24 +1006,85 @@ mod tests {
             }
 
             #[test]
-            fn c_noop() {
+            fn uppercase_k_opens_row_detail_with_active_row() {
+                let mut state = result_focused_state();
+                state.result_interaction.activate_cell(0, 0);
+
+                let result = handle_normal_mode(combo(Key::Char('K')), &state);
+
+                assert!(matches!(result, Action::OpenModal(ModalKind::RowDetail)));
+            }
+
+            #[test]
+            fn uppercase_k_noop_without_active_row() {
                 let state = result_focused_state();
 
-                let result = handle_normal_mode(combo(Key::Char('c')), &state);
+                let result = handle_normal_mode(combo(Key::Char('K')), &state);
 
                 assert!(matches!(result, Action::None));
             }
 
             #[test]
-            fn capital_s_with_marked_rows_opens_generate_sql_menu() {
-                let mut state = result_focused_state();
-                state.result_interaction.toggle_marked_row(0);
+            fn uppercase_k_noop_when_not_result_focused() {
+                let mut state = browse_state();
+                state.ui.set_focused_pane(FocusedPane::Explorer);
+                state.result_interaction.activate_cell(0, 0);
 
-                let result = handle_normal_mode(combo(Key::Char('S')), &state);
+                let result = handle_normal_mode(combo(Key::Char('K')), &state);
+
+                assert!(matches!(result, Action::None));
+            }
+
+            #[rstest]
+            #[case(KeyCombo::alt(Key::Char('K')))]
+            #[case(KeyCombo::alt(Key::Char('Y')))]
+            fn modified_uppercase_shortcut_does_not_trigger_action(#[case] input: KeyCombo) {
+                let mut state = result_focused_state();
+                state.result_interaction.activate_cell(0, 0);
+
+                let result = handle_normal_mode(input, &state);
+
+                assert!(matches!(result, Action::None));
+            }
+
+            #[rstest]
+            #[case(Key::Char('K'))]
+            #[case(Key::Char('Y'))]
+            fn staged_delete_suppresses_result_active_shortcuts(#[case] key: Key) {
+                let mut state = result_focused_state();
+                state.result_interaction.activate_cell(0, 0);
+                state.result_interaction.stage_row(0);
+
+                let result = handle_normal_mode(combo(key), &state);
+
+                assert!(matches!(result, Action::None));
+            }
+
+            #[test]
+            fn c_opens_connection_selector() {
+                let state = result_focused_state();
+
+                let result = handle_normal_mode(combo(Key::Char('c')), &state);
 
                 assert!(matches!(
                     result,
-                    Action::OpenModal(ModalKind::GenerateSqlMenu)
+                    Action::OpenModal(ModalKind::ConnectionSelector)
+                ));
+            }
+        }
+
+        mod focus_mode {
+            use super::*;
+
+            #[test]
+            fn c_opens_connection_selector() {
+                let state = focus_mode_state();
+
+                let result = handle_normal_mode(combo(Key::Char('c')), &state);
+
+                assert!(matches!(
+                    result,
+                    Action::OpenModal(ModalKind::ConnectionSelector)
                 ));
             }
         }
@@ -917,6 +1199,77 @@ mod tests {
                 let result = handle_normal_mode(combo_ctrl(Key::Char('d')), &state);
 
                 assert!(matches!(result, Action::Select(SelectMotion::HalfPageDown)));
+            }
+
+            mod sqlite_connected {
+                use super::*;
+
+                #[test]
+                fn ctrl_d_result_half_page_down() {
+                    let mut state = sqlite_connected_state();
+                    state.ui.set_focused_pane(FocusedPane::Result);
+
+                    let result = handle_normal_mode(combo_ctrl(Key::Char('d')), &state);
+
+                    assert!(matches!(
+                        result,
+                        Action::Scroll {
+                            target: ScrollTarget::Result,
+                            direction: ScrollDirection::Down,
+                            amount: ScrollAmount::HalfPage
+                        }
+                    ));
+                }
+
+                #[test]
+                fn ctrl_d_inspector_half_page_down() {
+                    let mut state = sqlite_connected_state();
+                    state.ui.set_focused_pane(FocusedPane::Inspector);
+
+                    let result = handle_normal_mode(combo_ctrl(Key::Char('d')), &state);
+
+                    assert!(matches!(
+                        result,
+                        Action::Scroll {
+                            target: ScrollTarget::Inspector,
+                            direction: ScrollDirection::Down,
+                            amount: ScrollAmount::HalfPage
+                        }
+                    ));
+                }
+
+                #[test]
+                fn ctrl_d_explorer_half_page_down() {
+                    let state = sqlite_connected_state();
+
+                    let result = handle_normal_mode(combo_ctrl(Key::Char('d')), &state);
+
+                    assert!(matches!(result, Action::Select(SelectMotion::HalfPageDown)));
+                }
+
+                #[test]
+                fn ctrl_shift_d_opens_diagnostics() {
+                    let state = sqlite_connected_state();
+
+                    let result = handle_normal_mode(combo_ctrl_shift(Key::Char('d')), &state);
+
+                    assert!(matches!(
+                        result,
+                        Action::OpenModal(ModalKind::SqliteDiagnostics)
+                    ));
+                }
+
+                #[test]
+                fn normalized_ctrl_uppercase_d_opens_diagnostics() {
+                    let state = sqlite_connected_state();
+
+                    let result = handle_normal_mode(combo_ctrl(Key::Char('D')), &state);
+
+                    assert!(matches!(
+                        result,
+                        Action::OpenModal(ModalKind::SqliteDiagnostics)
+                    ));
+                }
             }
 
             #[test]
@@ -1136,27 +1489,6 @@ mod tests {
             }
 
             #[test]
-            fn space_toggles_current_row_mark() {
-                let state = active_cell_state();
-
-                let result = handle_normal_mode(combo(Key::Char(' ')), &state);
-
-                assert!(matches!(result, Action::ToggleMarkedRow));
-            }
-
-            #[test]
-            fn capital_s_opens_generate_sql_menu() {
-                let state = active_cell_state();
-
-                let result = handle_normal_mode(combo(Key::Char('S')), &state);
-
-                assert!(matches!(
-                    result,
-                    Action::OpenModal(ModalKind::GenerateSqlMenu)
-                ));
-            }
-
-            #[test]
             fn esc_with_draft_discards_edit() {
                 let mut state = result_focused_state();
                 state.result_interaction.activate_cell(0, 1);
@@ -1165,8 +1497,7 @@ mod tests {
                     .begin_cell_edit(0, 1, "original".to_string());
                 state
                     .result_interaction
-                    .cell_edit_input_mut()
-                    .set_content("modified".to_string());
+                    .replace_cell_edit_draft("modified".to_string());
 
                 let result = handle_normal_mode(combo(Key::Esc), &state);
 
@@ -1206,229 +1537,8 @@ mod tests {
             }
         }
 
-        mod history_mode {
-            use super::*;
-            use crate::domain::{QueryResult, QuerySource};
-            use std::sync::Arc;
-
-            fn make_result(query: &str) -> Arc<QueryResult> {
-                Arc::new(QueryResult::success(
-                    query.to_string(),
-                    vec!["col".to_string()],
-                    vec![vec!["val".to_string()]],
-                    10,
-                    QuerySource::Adhoc,
-                ))
-            }
-
-            fn state_with_history(count: usize) -> AppState {
-                let mut state = AppState::new("test".to_string());
-                for i in 0..count {
-                    state
-                        .query
-                        .push_history(make_result(&format!("SELECT {}", i + 1)));
-                }
-                state.query.set_current_result(make_result("SELECT latest"));
-                state
-            }
-
-            mod open_close {
-                use super::*;
-
-                #[test]
-                fn ctrl_h_opens_result_history() {
-                    let state = AppState::new("test".to_string());
-
-                    let result = handle_normal_mode(combo_ctrl(Key::Char('h')), &state);
-
-                    assert!(matches!(result, Action::OpenResultHistory));
-                }
-
-                #[test]
-                fn ctrl_h_exits_when_active() {
-                    let mut state = state_with_history(3);
-                    state.query.enter_history(1);
-
-                    let result = handle_normal_mode(combo_ctrl(Key::Char('h')), &state);
-
-                    assert!(matches!(result, Action::ExitResultHistory));
-                }
-
-                #[test]
-                fn bracket_left_navigates_history_older() {
-                    let mut state = state_with_history(3);
-                    state.query.enter_history(2);
-
-                    let result = handle_normal_mode(combo(Key::Char('[')), &state);
-
-                    assert!(matches!(result, Action::HistoryOlder));
-                }
-
-                #[test]
-                fn bracket_right_navigates_history_newer() {
-                    let mut state = state_with_history(3);
-                    state.query.enter_history(0);
-
-                    let result = handle_normal_mode(combo(Key::Char(']')), &state);
-
-                    assert!(matches!(result, Action::HistoryNewer));
-                }
-
-                #[test]
-                fn bracket_nav_falls_through_when_not_in_history() {
-                    let mut state = AppState::new("test".to_string());
-                    state.ui.focus_mode = FocusMode::focused(FocusedPane::Explorer);
-
-                    let next = handle_normal_mode(combo(Key::Char(']')), &state);
-                    let prev = handle_normal_mode(combo(Key::Char('[')), &state);
-
-                    assert!(matches!(next, Action::ResultNextPage));
-                    assert!(matches!(prev, Action::ResultPrevPage));
-                }
-            }
-
-            mod blocked_keys {
-                use super::*;
-
-                #[test]
-                fn help_allowed() {
-                    let mut state = state_with_history(3);
-                    state.query.enter_history(1);
-
-                    let result = handle_normal_mode(combo(Key::Char('?')), &state);
-
-                    assert!(matches!(result, Action::ToggleModal(ModalKind::Help)));
-                }
-
-                #[rstest]
-                #[case(Key::Char('q'))]
-                #[case(Key::Char('s'))]
-                #[case(Key::Char('f'))]
-                #[case(Key::Char('r'))]
-                #[case(Key::Char(':'))]
-                #[case(Key::Enter)]
-                #[case(Key::Esc)]
-                fn are_noop(#[case] key: Key) {
-                    let mut state = state_with_history(3);
-                    state.query.enter_history(1);
-
-                    let result = handle_normal_mode(combo(key), &state);
-
-                    assert!(matches!(result, Action::None));
-                }
-            }
-
-            mod scroll_keys {
-                use super::*;
-
-                #[rstest]
-                #[case(Key::Char('j'), ScrollDirection::Down, ScrollAmount::Line)]
-                #[case(Key::Char('k'), ScrollDirection::Up, ScrollAmount::Line)]
-                #[case(Key::Char('h'), ScrollDirection::Left, ScrollAmount::Line)]
-                #[case(Key::Char('l'), ScrollDirection::Right, ScrollAmount::Line)]
-                #[case(Key::Char('g'), ScrollDirection::Up, ScrollAmount::ToStart)]
-                #[case(Key::Char('G'), ScrollDirection::Down, ScrollAmount::ToEnd)]
-                #[case(Key::Char('H'), ScrollDirection::Up, ScrollAmount::ViewportTop)]
-                #[case(Key::Char('M'), ScrollDirection::Up, ScrollAmount::ViewportMiddle)]
-                #[case(Key::Char('L'), ScrollDirection::Down, ScrollAmount::ViewportBottom)]
-                fn are_allowed(
-                    #[case] key: Key,
-                    #[case] direction: ScrollDirection,
-                    #[case] amount: ScrollAmount,
-                ) {
-                    let mut state = state_with_history(3);
-                    state.query.enter_history(1);
-                    state.ui.focus_mode = FocusMode::focused(FocusedPane::Explorer);
-
-                    let result = handle_normal_mode(combo(key), &state);
-
-                    assert!(matches!(
-                        result,
-                        Action::Scroll {
-                            target: ScrollTarget::Result,
-                            direction: actual_direction,
-                            amount: actual_amount,
-                        } if actual_direction == direction && actual_amount == amount
-                    ));
-                }
-
-                #[test]
-                fn ctrl_p_and_ctrl_n_are_noop_in_history() {
-                    let mut state = state_with_history(3);
-                    state.query.enter_history(1);
-                    state.ui.focus_mode = FocusMode::focused(FocusedPane::Explorer);
-
-                    let prev = handle_normal_mode(combo_ctrl(Key::Char('p')), &state);
-                    let next = handle_normal_mode(combo_ctrl(Key::Char('n')), &state);
-
-                    assert!(matches!(prev, Action::None));
-                    assert!(matches!(next, Action::None));
-                }
-
-                #[test]
-                fn ctrl_scroll_is_allowed() {
-                    let mut state = state_with_history(3);
-                    state.query.enter_history(1);
-                    state.ui.focus_mode = FocusMode::focused(FocusedPane::Explorer);
-
-                    assert!(matches!(
-                        handle_normal_mode(combo_ctrl(Key::Char('d')), &state),
-                        Action::Scroll {
-                            target: ScrollTarget::Result,
-                            direction: ScrollDirection::Down,
-                            amount: ScrollAmount::HalfPage
-                        }
-                    ));
-                    assert!(matches!(
-                        handle_normal_mode(combo_ctrl(Key::Char('u')), &state),
-                        Action::Scroll {
-                            target: ScrollTarget::Result,
-                            direction: ScrollDirection::Up,
-                            amount: ScrollAmount::HalfPage
-                        }
-                    ));
-                }
-            }
-
-            mod ctrl_keys {
-                use super::*;
-
-                #[rstest]
-                #[case(Key::Char('o'))]
-                #[case(Key::Char('k'))]
-                #[case(Key::Char('e'))]
-                fn ctrl_overlay_keys_are_blocked(#[case] key: Key) {
-                    let mut state = state_with_history(3);
-                    state.query.enter_history(1);
-
-                    let result = handle_normal_mode(combo_ctrl(key), &state);
-
-                    assert!(matches!(result, Action::None));
-                }
-            }
-        }
-
         mod key_sequence {
             use super::*;
-
-            fn history_mode_state_with_key_sequence() -> AppState {
-                use crate::domain::{QueryResult, QuerySource};
-                use std::sync::Arc;
-
-                let mut state = browse_state();
-                let qr = Arc::new(QueryResult::success(
-                    "SELECT 1".to_string(),
-                    vec!["col".to_string()],
-                    vec![vec!["val".to_string()]],
-                    10,
-                    QuerySource::Adhoc,
-                ));
-                state.query.push_history(qr.clone());
-                state.query.set_current_result(qr);
-                state.query.enter_history(0);
-                state.ui.key_sequence = KeySequenceState::WaitingSecondKey(Prefix::Z);
-                state
-            }
 
             mod begin {
                 use super::*;
@@ -1461,7 +1571,9 @@ mod tests {
                 #[case(Key::Char('b'), CursorPosition::Bottom)]
                 fn z_prefix_scrolls_cursor(#[case] key: Key, #[case] position: CursorPosition) {
                     let mut state = browse_state();
-                    state.ui.key_sequence = KeySequenceState::WaitingSecondKey(Prefix::Z);
+                    state
+                        .ui
+                        .set_key_sequence(KeySequenceState::WaitingSecondKey(Prefix::Z));
 
                     let result = handle_normal_mode(combo(key), &state);
 
@@ -1484,7 +1596,9 @@ mod tests {
                 #[case(Key::Char('b'), CursorPosition::Bottom)]
                 fn z_prefix_scrolls_cursor(#[case] key: Key, #[case] position: CursorPosition) {
                     let mut state = result_focused_state();
-                    state.ui.key_sequence = KeySequenceState::WaitingSecondKey(Prefix::Z);
+                    state
+                        .ui
+                        .set_key_sequence(KeySequenceState::WaitingSecondKey(Prefix::Z));
 
                     let result = handle_normal_mode(combo(key), &state);
 
@@ -1504,7 +1618,9 @@ mod tests {
                 #[test]
                 fn zz_cancels_sequence() {
                     let mut state = inspector_focused_state();
-                    state.ui.key_sequence = KeySequenceState::WaitingSecondKey(Prefix::Z);
+                    state
+                        .ui
+                        .set_key_sequence(KeySequenceState::WaitingSecondKey(Prefix::Z));
 
                     let result = handle_normal_mode(combo(Key::Char('z')), &state);
 
@@ -1518,7 +1634,9 @@ mod tests {
                 #[test]
                 fn zz_scrolls_cursor_to_center() {
                     let mut state = focus_mode_state();
-                    state.ui.key_sequence = KeySequenceState::WaitingSecondKey(Prefix::Z);
+                    state
+                        .ui
+                        .set_key_sequence(KeySequenceState::WaitingSecondKey(Prefix::Z));
 
                     let result = handle_normal_mode(combo(Key::Char('z')), &state);
 
@@ -1532,47 +1650,34 @@ mod tests {
                 }
             }
 
-            mod history_mode {
-                use super::*;
-
-                #[test]
-                fn zt_works() {
-                    let state = history_mode_state_with_key_sequence();
-
-                    let result = handle_normal_mode(combo(Key::Char('t')), &state);
-
-                    assert!(matches!(
-                        result,
-                        Action::ScrollToCursor {
-                            target: ScrollToCursorTarget::Explorer,
-                            position: CursorPosition::Top
-                        }
-                    ));
-                }
-
-                #[test]
-                fn zb_works() {
-                    let state = history_mode_state_with_key_sequence();
-
-                    let result = handle_normal_mode(combo(Key::Char('b')), &state);
-
-                    assert!(matches!(
-                        result,
-                        Action::ScrollToCursor {
-                            target: ScrollToCursorTarget::Explorer,
-                            position: CursorPosition::Bottom
-                        }
-                    ));
-                }
-            }
-
             mod cancel_and_precedence {
                 use super::*;
 
+                fn state_waiting_z_prefix() -> AppState {
+                    let mut state = browse_state();
+                    state
+                        .ui
+                        .set_key_sequence(KeySequenceState::WaitingSecondKey(Prefix::Z));
+                    state
+                }
+
+                fn state_waiting_z_prefix_with_result() -> AppState {
+                    let mut state = state_waiting_z_prefix();
+                    state
+                        .query
+                        .set_current_result(Arc::new(QueryResult::success(
+                            "SELECT 1".to_string(),
+                            vec!["col".to_string()],
+                            vec![vec!["value".to_string()]],
+                            1,
+                            QuerySource::Preview,
+                        )));
+                    state
+                }
+
                 #[test]
                 fn unknown_key_cancels_sequence() {
-                    let mut state = browse_state();
-                    state.ui.key_sequence = KeySequenceState::WaitingSecondKey(Prefix::Z);
+                    let state = state_waiting_z_prefix();
 
                     let result = handle_normal_mode(combo(Key::Char('x')), &state);
 
@@ -1581,28 +1686,42 @@ mod tests {
 
                 #[test]
                 fn takes_priority_over_global_actions() {
-                    let mut state = browse_state();
-                    state.ui.key_sequence = KeySequenceState::WaitingSecondKey(Prefix::Z);
+                    let state = state_waiting_z_prefix();
 
                     let result = handle_normal_mode(combo(Key::Char('?')), &state);
 
                     assert!(matches!(result, Action::CancelKeySequence));
                 }
 
-                #[test]
-                fn ctrl_modifier_cancels_sequence() {
-                    let mut state = browse_state();
-                    state.ui.key_sequence = KeySequenceState::WaitingSecondKey(Prefix::Z);
+                #[rstest]
+                #[case(Key::Char('k'))]
+                #[case(Key::Char('o'))]
+                #[case(Key::Char('p'))]
+                #[case(Key::Char('r'))]
+                #[case(Key::Char('n'))]
+                #[case(Key::Char('k'))]
+                #[case(Key::Char('t'))]
+                fn ctrl_modifier_cancels_sequence(#[case] key: Key) {
+                    let state = state_waiting_z_prefix();
 
-                    let result = handle_normal_mode(combo_ctrl(Key::Char('t')), &state);
+                    let result = handle_normal_mode(combo_ctrl(key), &state);
+
+                    assert!(matches!(result, Action::CancelKeySequence));
+                }
+
+                #[test]
+                fn ctrl_e_cancels_sequence_even_when_export_is_available() {
+                    let state = state_waiting_z_prefix_with_result();
+                    assert!(state.can_request_csv_export());
+
+                    let result = handle_normal_mode(combo_ctrl(Key::Char('e')), &state);
 
                     assert!(matches!(result, Action::CancelKeySequence));
                 }
 
                 #[test]
                 fn alt_modifier_cancels_sequence() {
-                    let mut state = browse_state();
-                    state.ui.key_sequence = KeySequenceState::WaitingSecondKey(Prefix::Z);
+                    let state = state_waiting_z_prefix();
 
                     let result = handle_normal_mode(KeyCombo::alt(Key::Char('b')), &state);
 
@@ -1614,8 +1733,6 @@ mod tests {
 
     mod navigation_matrix {
         use super::*;
-        use crate::domain::{QueryResult, QuerySource};
-        use std::sync::Arc;
 
         fn assert_action(actual: Action, expected: Action, ctx: &str, key: &str) {
             assert_eq!(
@@ -1643,27 +1760,6 @@ mod tests {
             inspector_focused_state()
         }
 
-        fn make_result() -> Arc<QueryResult> {
-            Arc::new(QueryResult::success(
-                "SELECT 1".to_string(),
-                vec!["col".to_string()],
-                vec![vec!["val".to_string()]],
-                10,
-                QuerySource::Adhoc,
-            ))
-        }
-
-        fn history_focus_ctx() -> AppState {
-            let mut state = browse_state();
-            let qr = make_result();
-            state.query.push_history(qr.clone());
-            state.query.set_current_result(qr);
-            state.query.enter_history(0);
-            state.ui.focus_mode = FocusMode::focused(FocusedPane::Explorer);
-            state.ui.focused_pane = FocusedPane::Result;
-            state
-        }
-
         fn focus_mode_ctx() -> AppState {
             focus_mode_state()
         }
@@ -1687,8 +1783,6 @@ mod tests {
         #[case("result_cell_active", Key::Char('k'), Action::Scroll { target: ScrollTarget::Result, direction: ScrollDirection::Up, amount: ScrollAmount::Line })]
         #[case("inspector", Key::Char('j'), Action::Scroll { target: ScrollTarget::Inspector, direction: ScrollDirection::Down, amount: ScrollAmount::Line })]
         #[case("inspector", Key::Char('k'), Action::Scroll { target: ScrollTarget::Inspector, direction: ScrollDirection::Up, amount: ScrollAmount::Line })]
-        #[case("history_focus", Key::Char('j'), Action::Scroll { target: ScrollTarget::Result, direction: ScrollDirection::Down, amount: ScrollAmount::Line })]
-        #[case("history_focus", Key::Char('k'), Action::Scroll { target: ScrollTarget::Result, direction: ScrollDirection::Up, amount: ScrollAmount::Line })]
         #[case("focus_mode", Key::Char('j'), Action::Scroll { target: ScrollTarget::Result, direction: ScrollDirection::Down, amount: ScrollAmount::Line })]
         #[case("focus_mode", Key::Char('k'), Action::Scroll { target: ScrollTarget::Result, direction: ScrollDirection::Up, amount: ScrollAmount::Line })]
         fn vertical_jk(#[case] ctx_name: &str, #[case] key: Key, #[case] expected: Action) {
@@ -1697,7 +1791,6 @@ mod tests {
                 "result_scroll" => result_scroll_ctx(),
                 "result_cell_active" => result_cell_active_ctx(),
                 "inspector" => inspector_ctx(),
-                "history_focus" => history_focus_ctx(),
                 "focus_mode" => focus_mode_ctx(),
                 _ => unreachable!(),
             };
@@ -1715,8 +1808,6 @@ mod tests {
         #[case("result_cell_active", Key::Char('G'), Action::Scroll { target: ScrollTarget::Result, direction: ScrollDirection::Down, amount: ScrollAmount::ToEnd })]
         #[case("inspector", Key::Char('g'), Action::Scroll { target: ScrollTarget::Inspector, direction: ScrollDirection::Up, amount: ScrollAmount::ToStart })]
         #[case("inspector", Key::Char('G'), Action::Scroll { target: ScrollTarget::Inspector, direction: ScrollDirection::Down, amount: ScrollAmount::ToEnd })]
-        #[case("history_focus", Key::Char('g'), Action::Scroll { target: ScrollTarget::Result, direction: ScrollDirection::Up, amount: ScrollAmount::ToStart })]
-        #[case("history_focus", Key::Char('G'), Action::Scroll { target: ScrollTarget::Result, direction: ScrollDirection::Down, amount: ScrollAmount::ToEnd })]
         #[case("focus_mode", Key::Char('g'), Action::Scroll { target: ScrollTarget::Result, direction: ScrollDirection::Up, amount: ScrollAmount::ToStart })]
         #[case("focus_mode", Key::Char('G'), Action::Scroll { target: ScrollTarget::Result, direction: ScrollDirection::Down, amount: ScrollAmount::ToEnd })]
         fn ends_g_shift_g(#[case] ctx_name: &str, #[case] key: Key, #[case] expected: Action) {
@@ -1725,7 +1816,6 @@ mod tests {
                 "result_scroll" => result_scroll_ctx(),
                 "result_cell_active" => result_cell_active_ctx(),
                 "inspector" => inspector_ctx(),
-                "history_focus" => history_focus_ctx(),
                 "focus_mode" => focus_mode_ctx(),
                 _ => unreachable!(),
             };
@@ -1763,9 +1853,6 @@ mod tests {
         #[case("inspector", Key::Char('H'), Action::None)]
         #[case("inspector", Key::Char('M'), Action::None)]
         #[case("inspector", Key::Char('L'), Action::None)]
-        #[case("history_focus", Key::Char('H'), Action::Scroll { target: ScrollTarget::Result, direction: ScrollDirection::Up, amount: ScrollAmount::ViewportTop })]
-        #[case("history_focus", Key::Char('M'), Action::Scroll { target: ScrollTarget::Result, direction: ScrollDirection::Up, amount: ScrollAmount::ViewportMiddle })]
-        #[case("history_focus", Key::Char('L'), Action::Scroll { target: ScrollTarget::Result, direction: ScrollDirection::Down, amount: ScrollAmount::ViewportBottom })]
         #[case("focus_mode", Key::Char('H'), Action::Scroll { target: ScrollTarget::Result, direction: ScrollDirection::Up, amount: ScrollAmount::ViewportTop })]
         #[case("focus_mode", Key::Char('M'), Action::Scroll { target: ScrollTarget::Result, direction: ScrollDirection::Up, amount: ScrollAmount::ViewportMiddle })]
         #[case("focus_mode", Key::Char('L'), Action::Scroll { target: ScrollTarget::Result, direction: ScrollDirection::Down, amount: ScrollAmount::ViewportBottom })]
@@ -1775,7 +1862,6 @@ mod tests {
                 "result_scroll" => result_scroll_ctx(),
                 "result_cell_active" => result_cell_active_ctx(),
                 "inspector" => inspector_ctx(),
-                "history_focus" => history_focus_ctx(),
                 "focus_mode" => focus_mode_ctx(),
                 _ => unreachable!(),
             };
@@ -1797,9 +1883,6 @@ mod tests {
         #[case("inspector", Key::Char('z'), Action::CancelKeySequence)]
         #[case("inspector", Key::Char('t'), Action::CancelKeySequence)]
         #[case("inspector", Key::Char('b'), Action::CancelKeySequence)]
-        #[case("history_focus", Key::Char('z'), Action::ScrollToCursor { target: ScrollToCursorTarget::Result, position: CursorPosition::Center })]
-        #[case("history_focus", Key::Char('t'), Action::ScrollToCursor { target: ScrollToCursorTarget::Result, position: CursorPosition::Top })]
-        #[case("history_focus", Key::Char('b'), Action::ScrollToCursor { target: ScrollToCursorTarget::Result, position: CursorPosition::Bottom })]
         #[case("focus_mode", Key::Char('z'), Action::ScrollToCursor { target: ScrollToCursorTarget::Result, position: CursorPosition::Center })]
         #[case("focus_mode", Key::Char('t'), Action::ScrollToCursor { target: ScrollToCursorTarget::Result, position: CursorPosition::Top })]
         #[case("focus_mode", Key::Char('b'), Action::ScrollToCursor { target: ScrollToCursorTarget::Result, position: CursorPosition::Bottom })]
@@ -1813,11 +1896,12 @@ mod tests {
                 "result_scroll" => result_scroll_ctx(),
                 "result_cell_active" => result_cell_active_ctx(),
                 "inspector" => inspector_ctx(),
-                "history_focus" => history_focus_ctx(),
                 "focus_mode" => focus_mode_ctx(),
                 _ => unreachable!(),
             };
-            state.ui.key_sequence = KeySequenceState::WaitingSecondKey(Prefix::Z);
+            state
+                .ui
+                .set_key_sequence(KeySequenceState::WaitingSecondKey(Prefix::Z));
             let key_label = format!("{key:?}");
             let actual = handle_normal_mode(combo(key), &state);
             assert_action(actual, expected, ctx_name, &key_label);
@@ -1828,173 +1912,10 @@ mod tests {
         #[case("result_scroll", result_scroll_ctx())]
         #[case("result_cell_active", result_cell_active_ctx())]
         #[case("inspector", inspector_ctx())]
-        #[case("history_focus", history_focus_ctx())]
         #[case("focus_mode", focus_mode_ctx())]
         fn z_prefix_returns_begin_key_sequence(#[case] ctx_name: &str, #[case] state: AppState) {
             let actual = handle_normal_mode(combo(Key::Char('z')), &state);
             assert_action(actual, Action::BeginKeySequence(Prefix::Z), ctx_name, "z");
-        }
-
-        mod history_pane_edges {
-            use super::*;
-
-            fn history_explorer_ctx() -> AppState {
-                let mut state = history_focus_ctx();
-                state.ui.focused_pane = FocusedPane::Explorer;
-                state.ui.focus_mode = FocusMode::Normal;
-                state
-            }
-
-            fn history_inspector_ctx() -> AppState {
-                let mut state = history_focus_ctx();
-                state.ui.focused_pane = FocusedPane::Inspector;
-                state.ui.focus_mode = FocusMode::Normal;
-                state
-            }
-
-            #[test]
-            fn history_explorer_j_selects_next() {
-                let state = history_explorer_ctx();
-                let actual = handle_normal_mode(combo(Key::Char('j')), &state);
-                assert_action(
-                    actual,
-                    Action::Select(SelectMotion::Next),
-                    "history+explorer",
-                    "j",
-                );
-            }
-
-            #[test]
-            fn history_explorer_h_selects_viewport_top() {
-                let state = history_explorer_ctx();
-                let actual = handle_normal_mode(combo(Key::Char('H')), &state);
-                assert_action(
-                    actual,
-                    Action::Select(SelectMotion::ViewportTop),
-                    "history+explorer",
-                    "H",
-                );
-            }
-
-            #[test]
-            fn history_inspector_j_scrolls_down() {
-                let state = history_inspector_ctx();
-                let actual = handle_normal_mode(combo(Key::Char('j')), &state);
-                assert_action(
-                    actual,
-                    Action::Scroll {
-                        target: ScrollTarget::Inspector,
-                        direction: ScrollDirection::Down,
-                        amount: ScrollAmount::Line,
-                    },
-                    "history+inspector",
-                    "j",
-                );
-            }
-
-            #[test]
-            fn history_inspector_h_is_noop() {
-                let state = history_inspector_ctx();
-                let actual = handle_normal_mode(combo(Key::Char('H')), &state);
-                assert_action(actual, Action::None, "history+inspector", "H");
-            }
-
-            #[test]
-            fn history_zz_explorer_scrolls_cursor() {
-                let mut state = history_explorer_ctx();
-                state.ui.key_sequence = KeySequenceState::WaitingSecondKey(Prefix::Z);
-                let actual = handle_normal_mode(combo(Key::Char('z')), &state);
-                assert_action(
-                    actual,
-                    Action::ScrollToCursor {
-                        target: ScrollToCursorTarget::Explorer,
-                        position: CursorPosition::Center,
-                    },
-                    "history+explorer+key_sequence",
-                    "z",
-                );
-            }
-
-            #[test]
-            fn history_zz_inspector_clears() {
-                let mut state = history_inspector_ctx();
-                state.ui.key_sequence = KeySequenceState::WaitingSecondKey(Prefix::Z);
-                let actual = handle_normal_mode(combo(Key::Char('z')), &state);
-                assert_action(
-                    actual,
-                    Action::CancelKeySequence,
-                    "history+inspector+key_sequence",
-                    "z",
-                );
-            }
-        }
-
-        mod history_whitelist_asymmetry {
-            use super::*;
-
-            fn history_result_ctx() -> AppState {
-                history_focus_ctx()
-            }
-
-            #[test]
-            fn home_blocked_in_history() {
-                let state = history_result_ctx();
-                let actual = handle_normal_mode(combo(Key::Home), &state);
-                assert_action(actual, Action::None, "history+result", "Home");
-            }
-
-            #[test]
-            fn end_blocked_in_history() {
-                let state = history_result_ctx();
-                let actual = handle_normal_mode(combo(Key::End), &state);
-                assert_action(actual, Action::None, "history+result", "End");
-            }
-
-            #[test]
-            fn pagedown_blocked_in_history() {
-                let state = history_result_ctx();
-                let actual = handle_normal_mode(combo(Key::PageDown), &state);
-                assert_action(actual, Action::None, "history+result", "PageDown");
-            }
-
-            #[test]
-            fn pageup_blocked_in_history() {
-                let state = history_result_ctx();
-                let actual = handle_normal_mode(combo(Key::PageUp), &state);
-                assert_action(actual, Action::None, "history+result", "PageUp");
-            }
-
-            #[test]
-            fn up_allowed_in_history() {
-                let state = history_result_ctx();
-                let actual = handle_normal_mode(combo(Key::Up), &state);
-                assert_action(
-                    actual,
-                    Action::Scroll {
-                        target: ScrollTarget::Result,
-                        direction: ScrollDirection::Up,
-                        amount: ScrollAmount::Line,
-                    },
-                    "history+result",
-                    "Up",
-                );
-            }
-
-            #[test]
-            fn down_allowed_in_history() {
-                let state = history_result_ctx();
-                let actual = handle_normal_mode(combo(Key::Down), &state);
-                assert_action(
-                    actual,
-                    Action::Scroll {
-                        target: ScrollTarget::Result,
-                        direction: ScrollDirection::Down,
-                        amount: ScrollAmount::Line,
-                    },
-                    "history+result",
-                    "Down",
-                );
-            }
         }
     }
 }

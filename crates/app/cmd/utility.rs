@@ -1,18 +1,17 @@
 use std::sync::Arc;
 
-use color_eyre::eyre::Result;
 use tokio::sync::mpsc;
 
 use crate::cmd::effect::Effect;
 use crate::ports::outbound::{ClipboardWriter, FolderOpener};
 use crate::update::action::Action;
 
-pub(crate) async fn run(
+pub(in crate::cmd) async fn run(
     effect: Effect,
     action_tx: &mpsc::Sender<Action>,
     clipboard: &Arc<dyn ClipboardWriter>,
     folder_opener: &Arc<dyn FolderOpener>,
-) -> Result<()> {
+) {
     match effect {
         Effect::CopyToClipboard {
             content,
@@ -23,13 +22,11 @@ pub(crate) async fn run(
             let tx = action_tx.clone();
             tokio::task::spawn_blocking(move || match clipboard.copy_text(&content) {
                 Ok(()) => {
-                    if let Some(action) = on_success {
-                        tx.blocking_send(action).ok();
-                    }
+                    tx.blocking_send(*on_success).ok();
                 }
                 Err(e) => {
                     if let Some(action) = on_failure {
-                        tx.blocking_send(action).ok();
+                        tx.blocking_send(*action).ok();
                     } else {
                         tx.blocking_send(Action::CopyFailed(e)).ok();
                     }
@@ -38,12 +35,14 @@ pub(crate) async fn run(
         }
         Effect::OpenFolder { path } => {
             if let Err(e) = folder_opener.open(&path) {
-                action_tx.send(Action::OpenFolderFailed(e)).await.ok();
+                action_tx
+                    .send(Action::OpenFolderFailed(Arc::new(e)))
+                    .await
+                    .ok();
             }
         }
         _ => unreachable!("utility::run called with non-utility effect"),
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -53,7 +52,6 @@ mod tests {
     use std::sync::Mutex;
 
     use crate::ports::outbound::clipboard::ClipboardError;
-    use crate::ports::outbound::folder_opener::FolderOpenError;
 
     struct MockClipboard {
         result: Result<(), ClipboardError>,
@@ -67,7 +65,7 @@ mod tests {
 
     struct MockFolderOpener {
         opened: Mutex<Vec<PathBuf>>,
-        result: Result<(), FolderOpenError>,
+        result: Result<(), String>,
     }
 
     impl MockFolderOpener {
@@ -81,17 +79,18 @@ mod tests {
         fn failing(error: &str) -> Self {
             Self {
                 opened: Mutex::new(vec![]),
-                result: Err(FolderOpenError::Spawn(Arc::new(std::io::Error::other(
-                    error,
-                )))),
+                result: Err(error.to_owned()),
             }
         }
     }
 
     impl FolderOpener for MockFolderOpener {
-        fn open(&self, path: &Path) -> Result<(), FolderOpenError> {
+        fn open(&self, path: &Path) -> Result<(), std::io::Error> {
             self.opened.lock().unwrap().push(path.to_path_buf());
-            self.result.clone()
+            match &self.result {
+                Ok(()) => Ok(()),
+                Err(error) => Err(std::io::Error::other(error.as_str())),
+            }
         }
     }
 
@@ -107,15 +106,14 @@ mod tests {
             run(
                 Effect::CopyToClipboard {
                     content: "hello".to_string(),
-                    on_success: Some(Action::Render),
+                    on_success: Box::new(Action::Render),
                     on_failure: None,
                 },
                 &tx,
                 &clipboard,
                 &folder_opener,
             )
-            .await
-            .unwrap();
+            .await;
 
             let action = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
                 .await
@@ -135,15 +133,14 @@ mod tests {
             run(
                 Effect::CopyToClipboard {
                     content: "hello".to_string(),
-                    on_success: None,
-                    on_failure: Some(Action::Render),
+                    on_success: Box::new(Action::None),
+                    on_failure: Some(Box::new(Action::Render)),
                 },
                 &tx,
                 &clipboard,
                 &folder_opener,
             )
-            .await
-            .unwrap();
+            .await;
 
             let action = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
                 .await
@@ -163,15 +160,14 @@ mod tests {
             run(
                 Effect::CopyToClipboard {
                     content: "hello".to_string(),
-                    on_success: None,
+                    on_success: Box::new(Action::Render),
                     on_failure: None,
                 },
                 &tx,
                 &clipboard,
                 &folder_opener,
             )
-            .await
-            .unwrap();
+            .await;
 
             let action = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
                 .await
@@ -202,8 +198,7 @@ mod tests {
                 &clipboard,
                 &folder_opener,
             )
-            .await
-            .unwrap();
+            .await;
 
             let opened = opener.opened.lock().unwrap();
             assert_eq!(opened.len(), 1);
@@ -225,8 +220,7 @@ mod tests {
                 &clipboard,
                 &folder_opener,
             )
-            .await
-            .unwrap();
+            .await;
 
             let action = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
                 .await

@@ -4,10 +4,11 @@ use ratatui::style::Style;
 use ratatui::widgets::{List, ListItem};
 
 use crate::app::model::app_state::AppState;
+use crate::app::update::input::keybindings::command_palette;
 use crate::app::update::input::palette::palette_commands;
 use crate::theme::ThemePalette;
 
-use crate::primitives::molecules::render_modal;
+use crate::primitives::molecules::{FooterHintBar, render_modal};
 
 pub struct CommandPalette;
 
@@ -18,22 +19,28 @@ impl CommandPalette {
             Constraint::Percentage(50),
             Constraint::Percentage(50),
             " Command Palette ",
-            " Enter Select │ Esc/q Close ",
+            FooterHintBar::new([
+                command_palette::ENTER_EXECUTE.as_hint(),
+                command_palette::ESC_CLOSE.as_hint(),
+            ]),
             theme,
         );
 
-        let items: Vec<ListItem> = palette_commands()
-            .enumerate()
-            .map(|(i, kb)| {
-                let style = if i == state.ui.table_picker.selected() {
-                    theme.picker_selected_style()
-                } else {
-                    Style::default().fg(theme.semantic.text.secondary)
-                };
-                let content = format!("  {:<18} {}", kb.key, kb.description);
-                ListItem::new(content).style(style)
-            })
-            .collect();
+        let items: Vec<ListItem> = palette_commands(
+            state.settings.saved_keymap_preset(),
+            &state.session.active_engine_feature_profile(),
+        )
+        .enumerate()
+        .map(|(i, kb)| {
+            let style = if i == state.ui.table_picker().selected() {
+                theme.picker_selected_style()
+            } else {
+                Style::default().fg(theme.semantic.text.secondary)
+            };
+            let content = format!("  {:<18} {}", kb.key, kb.description);
+            ListItem::new(content).style(style)
+        })
+        .collect();
 
         let list = List::new(items);
         frame.render_widget(list, inner);

@@ -1,3 +1,6 @@
+use crate::ports::outbound::ExternalEditor;
+use crate::ports::outbound::ExternalEditorError;
+use crate::ports::outbound::FileSystemWalker;
 // RefCell Borrow Safety: when effects need data from `completion_engine`,
 // the borrow MUST be dropped before any await point.
 
@@ -9,54 +12,53 @@ use color_eyre::eyre::Result;
 use tokio::sync::mpsc;
 
 use crate::cmd::browse as cmd_browse;
-use crate::cmd::cache::TtlCache;
 use crate::cmd::completion_engine::CompletionEngine;
 use crate::cmd::connection as cmd_connection;
 use crate::cmd::effect::Effect;
 use crate::cmd::er::handler as cmd_er;
-use crate::cmd::file_picker as cmd_file_picker;
+use crate::cmd::metadata_task::MetadataTaskRegistry;
 use crate::cmd::settings as cmd_settings;
+use crate::cmd::single_task_owner::SingleTaskOwner;
 use crate::cmd::sql_editor::completion as cmd_completion;
-use crate::cmd::sql_editor::query_history as cmd_query_history;
+use crate::cmd::sql_editor::query_history::spawn_query_history_load;
+use crate::cmd::sqlite_diagnostics;
 use crate::cmd::utility as cmd_utility;
-use crate::domain::DatabaseMetadata;
-use crate::domain::connection::DatabaseType;
 use crate::model::app_state::AppState;
-use crate::model::shared::ui_state::scroll_max_offset;
 use crate::ports::outbound::{
-    ClipboardWriter, ConfigWriter, ConnectionStore, DsnBuilder, ErDiagramExporter, ErLogWriter,
-    ExternalEditor, ExternalEditorError, FileSystemWalker, FolderOpener, MetadataProvider,
+    CachedResultExporter, ClipboardWriter, ConfigWriter, ConnectionStore, DsnBuilder,
+    ErDiagramExporter, ErLogWriter, FolderOpener, MetadataProvider, MySqlConnectionProbe,
     PgServiceEntryReader, QueryExecutor, QueryHistoryStore, Renderer, SettingsStore,
+    SqliteDiagnosticsProvider, SqlitePathValidator,
 };
 use crate::services::AppServices;
 use crate::update::action::Action;
 
-struct ConnectionDeps {
-    dsn_builder: Arc<dyn DsnBuilder>,
-    connection_store: Arc<dyn ConnectionStore>,
-    pg_service_entry_reader: Option<Arc<dyn PgServiceEntryReader>>,
+pub struct ConnectionDeps {
+    pub dsn_builder: Arc<dyn DsnBuilder>,
+    pub mysql_connection_probe: Arc<dyn MySqlConnectionProbe>,
+    pub connection_store: Arc<dyn ConnectionStore>,
+    pub pg_service_entry_reader: Arc<dyn PgServiceEntryReader>,
+    pub sqlite_path_validator: Arc<dyn SqlitePathValidator>,
 }
 
-struct QueryDeps {
-    query_executor: Arc<dyn QueryExecutor>,
-    query_history_store: Arc<dyn QueryHistoryStore>,
+pub struct QueryDeps {
+    pub query_executor: Arc<dyn QueryExecutor>,
+    pub query_history_store: Arc<dyn QueryHistoryStore>,
+    pub sqlite_diagnostics: Arc<dyn SqliteDiagnosticsProvider>,
+    pub cached_result_exporter: Arc<dyn CachedResultExporter>,
 }
 
-struct ErDeps {
-    er_exporter: Arc<dyn ErDiagramExporter>,
-    config_writer: Arc<dyn ConfigWriter>,
-    er_log_writer: Arc<dyn ErLogWriter>,
+pub struct ErDeps {
+    pub er_exporter: Arc<dyn ErDiagramExporter>,
+    pub config_writer: Arc<dyn ConfigWriter>,
+    pub er_log_writer: Arc<dyn ErLogWriter>,
 }
 
-struct UtilityDeps {
-    clipboard: Arc<dyn ClipboardWriter>,
-    folder_opener: Arc<dyn FolderOpener>,
-    external_editor: Arc<dyn ExternalEditor>,
-    file_system_walker: Arc<dyn FileSystemWalker>,
-}
-
-struct SettingsDeps {
-    settings_store: Arc<dyn SettingsStore>,
+pub struct UtilityDeps {
+    pub external_editor: Arc<dyn ExternalEditor>,
+    pub file_walker: Arc<dyn FileSystemWalker>,
+    pub clipboard: Arc<dyn ClipboardWriter>,
+    pub folder_opener: Arc<dyn FolderOpener>,
 }
 
 pub struct EffectRunner {
@@ -65,186 +67,48 @@ pub struct EffectRunner {
     query: QueryDeps,
     er: ErDeps,
     utility: UtilityDeps,
-    settings: SettingsDeps,
-    metadata_cache: TtlCache<String, Arc<DatabaseMetadata>>,
+    settings_store: Arc<dyn SettingsStore>,
     action_tx: mpsc::Sender<Action>,
-    on_database_type_change: Option<Box<dyn Fn(DatabaseType) + Send + Sync>>,
-}
-
-pub struct EffectRunnerBuilder {
-    metadata_provider: Option<Arc<dyn MetadataProvider>>,
-    query_executor: Option<Arc<dyn QueryExecutor>>,
-    dsn_builder: Option<Arc<dyn DsnBuilder>>,
-    er_exporter: Option<Arc<dyn ErDiagramExporter>>,
-    config_writer: Option<Arc<dyn ConfigWriter>>,
-    er_log_writer: Option<Arc<dyn ErLogWriter>>,
-    connection_store: Option<Arc<dyn ConnectionStore>>,
-    pg_service_entry_reader: Option<Arc<dyn PgServiceEntryReader>>,
-    clipboard: Option<Arc<dyn ClipboardWriter>>,
-    folder_opener: Option<Arc<dyn FolderOpener>>,
-    external_editor: Option<Arc<dyn ExternalEditor>>,
-    file_system_walker: Option<Arc<dyn FileSystemWalker>>,
-    query_history_store: Option<Arc<dyn QueryHistoryStore>>,
-    settings_store: Option<Arc<dyn SettingsStore>>,
-    metadata_cache: Option<TtlCache<String, Arc<DatabaseMetadata>>>,
-    action_tx: Option<mpsc::Sender<Action>>,
-    on_database_type_change: Option<Box<dyn Fn(DatabaseType) + Send + Sync>>,
-}
-
-impl EffectRunnerBuilder {
-    #[must_use]
-    pub fn metadata_provider(mut self, v: Arc<dyn MetadataProvider>) -> Self {
-        self.metadata_provider = Some(v);
-        self
-    }
-    #[must_use]
-    pub fn query_executor(mut self, v: Arc<dyn QueryExecutor>) -> Self {
-        self.query_executor = Some(v);
-        self
-    }
-    #[must_use]
-    pub fn dsn_builder(mut self, v: Arc<dyn DsnBuilder>) -> Self {
-        self.dsn_builder = Some(v);
-        self
-    }
-    #[must_use]
-    pub fn er_exporter(mut self, v: Arc<dyn ErDiagramExporter>) -> Self {
-        self.er_exporter = Some(v);
-        self
-    }
-    #[must_use]
-    pub fn config_writer(mut self, v: Arc<dyn ConfigWriter>) -> Self {
-        self.config_writer = Some(v);
-        self
-    }
-    #[must_use]
-    pub fn er_log_writer(mut self, v: Arc<dyn ErLogWriter>) -> Self {
-        self.er_log_writer = Some(v);
-        self
-    }
-    #[must_use]
-    pub fn connection_store(mut self, v: Arc<dyn ConnectionStore>) -> Self {
-        self.connection_store = Some(v);
-        self
-    }
-    #[must_use]
-    pub fn pg_service_entry_reader(mut self, v: Arc<dyn PgServiceEntryReader>) -> Self {
-        self.pg_service_entry_reader = Some(v);
-        self
-    }
-    #[must_use]
-    pub fn clipboard(mut self, v: Arc<dyn ClipboardWriter>) -> Self {
-        self.clipboard = Some(v);
-        self
-    }
-    #[must_use]
-    pub fn folder_opener(mut self, v: Arc<dyn FolderOpener>) -> Self {
-        self.folder_opener = Some(v);
-        self
-    }
-    #[must_use]
-    pub fn external_editor(mut self, v: Arc<dyn ExternalEditor>) -> Self {
-        self.external_editor = Some(v);
-        self
-    }
-    #[must_use]
-    pub fn file_system_walker(mut self, v: Arc<dyn FileSystemWalker>) -> Self {
-        self.file_system_walker = Some(v);
-        self
-    }
-    #[must_use]
-    pub fn query_history_store(mut self, v: Arc<dyn QueryHistoryStore>) -> Self {
-        self.query_history_store = Some(v);
-        self
-    }
-    #[must_use]
-    pub fn settings_store(mut self, v: Arc<dyn SettingsStore>) -> Self {
-        self.settings_store = Some(v);
-        self
-    }
-    #[must_use]
-    pub fn metadata_cache(mut self, v: TtlCache<String, Arc<DatabaseMetadata>>) -> Self {
-        self.metadata_cache = Some(v);
-        self
-    }
-    #[must_use]
-    pub fn action_tx(mut self, v: mpsc::Sender<Action>) -> Self {
-        self.action_tx = Some(v);
-        self
-    }
-    #[must_use]
-    pub fn on_database_type_change(mut self, v: Box<dyn Fn(DatabaseType) + Send + Sync>) -> Self {
-        self.on_database_type_change = Some(v);
-        self
-    }
-
-    pub fn build(self) -> EffectRunner {
-        EffectRunner {
-            metadata_provider: self
-                .metadata_provider
-                .expect("metadata_provider is required"),
-            connection: ConnectionDeps {
-                dsn_builder: self.dsn_builder.expect("dsn_builder is required"),
-                connection_store: self.connection_store.expect("connection_store is required"),
-                pg_service_entry_reader: self.pg_service_entry_reader,
-            },
-            query: QueryDeps {
-                query_executor: self.query_executor.expect("query_executor is required"),
-                query_history_store: self
-                    .query_history_store
-                    .expect("query_history_store is required"),
-            },
-            er: ErDeps {
-                er_exporter: self.er_exporter.expect("er_exporter is required"),
-                config_writer: self.config_writer.expect("config_writer is required"),
-                er_log_writer: self.er_log_writer.expect("er_log_writer is required"),
-            },
-            utility: UtilityDeps {
-                clipboard: self.clipboard.expect("clipboard is required"),
-                folder_opener: self.folder_opener.expect("folder_opener is required"),
-                external_editor: self.external_editor.expect("external_editor is required"),
-                file_system_walker: self
-                    .file_system_walker
-                    .unwrap_or_else(|| Arc::new(crate::cmd::file_picker::NoopFileSystemWalker)),
-            },
-            settings: SettingsDeps {
-                settings_store: self.settings_store.expect("settings_store is required"),
-            },
-            metadata_cache: self.metadata_cache.expect("metadata_cache is required"),
-            action_tx: self.action_tx.expect("action_tx is required"),
-            on_database_type_change: self.on_database_type_change,
-        }
-    }
+    query_tasks: SingleTaskOwner,
+    table_detail_tasks: SingleTaskOwner,
+    metadata_tasks: Arc<MetadataTaskRegistry>,
+    connection_task: SingleTaskOwner,
+    sqlite_diagnostics_task: sqlite_diagnostics::SqliteDiagnosticsTaskOwner,
+    smart_er_refresh_task: SingleTaskOwner,
 }
 
 impl EffectRunner {
+    pub fn new(
+        metadata_provider: Arc<dyn MetadataProvider>,
+        connection: ConnectionDeps,
+        query: QueryDeps,
+        er: ErDeps,
+        utility: UtilityDeps,
+        settings_store: Arc<dyn SettingsStore>,
+        action_tx: mpsc::Sender<Action>,
+    ) -> Self {
+        Self {
+            metadata_provider,
+            connection,
+            query,
+            er,
+            utility,
+            settings_store,
+            action_tx,
+            query_tasks: SingleTaskOwner::default(),
+            table_detail_tasks: SingleTaskOwner::default(),
+            metadata_tasks: Arc::new(MetadataTaskRegistry::default()),
+            connection_task: SingleTaskOwner::default(),
+            sqlite_diagnostics_task: sqlite_diagnostics::SqliteDiagnosticsTaskOwner::default(),
+            smart_er_refresh_task: SingleTaskOwner::default(),
+        }
+    }
+
     pub fn action_tx(&self) -> &mpsc::Sender<Action> {
         &self.action_tx
     }
 
-    pub fn builder() -> EffectRunnerBuilder {
-        EffectRunnerBuilder {
-            metadata_provider: None,
-            query_executor: None,
-            dsn_builder: None,
-            er_exporter: None,
-            config_writer: None,
-            er_log_writer: None,
-            connection_store: None,
-            pg_service_entry_reader: None,
-            clipboard: None,
-            folder_opener: None,
-            external_editor: None,
-            file_system_walker: None,
-            query_history_store: None,
-            settings_store: None,
-            metadata_cache: None,
-            action_tx: None,
-            on_database_type_change: None,
-        }
-    }
-
-    pub async fn run<T: Renderer>(
+    pub async fn execute_effects<T: Renderer>(
         &self,
         effects: Vec<Effect>,
         tui: &mut T,
@@ -254,27 +118,15 @@ impl EffectRunner {
     ) -> Result<Vec<Action>> {
         let mut dispatched = Vec::new();
         for effect in effects {
-            match effect {
-                Effect::Sequence(seq_effects) => {
-                    for seq_effect in seq_effects {
-                        dispatched.extend(
-                            self.run_normal(seq_effect, tui, state, completion_engine, services)
-                                .await?,
-                        );
-                    }
-                }
-                single_effect => {
-                    dispatched.extend(
-                        self.run_normal(single_effect, tui, state, completion_engine, services)
-                            .await?,
-                    );
-                }
-            }
+            dispatched.extend(
+                self.execute_single_effect(effect, tui, state, completion_engine, services)
+                    .await?,
+            );
         }
         Ok(dispatched)
     }
 
-    async fn run_normal<T: Renderer>(
+    async fn execute_single_effect<T: Renderer>(
         &self,
         effect: Effect,
         tui: &mut T,
@@ -284,75 +136,46 @@ impl EffectRunner {
     ) -> Result<Vec<Action>> {
         match effect {
             Effect::Render => {
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "the effect runner is the runtime boundary that reads the clock for rendering"
+                )]
                 let now = Instant::now();
                 let output = tui.draw(state, services, now)?;
-                if !state.ui.is_focus_mode() {
-                    state.ui.inspector_viewport_plan = output.inspector_viewport_plan;
-                }
-                state.ui.result_viewport_plan = output.result_viewport_plan;
-                state.ui.result_widths_cache = output.result_widths_cache;
-                state.ui.explorer_pane_height = output.explorer_pane_height;
-                state.ui.explorer_content_width = output.explorer_content_width;
-                let max_name_width = state
-                    .tables()
-                    .iter()
-                    .map(|table| table.qualified_name().chars().count())
-                    .max()
-                    .unwrap_or(0);
-                let max_offset = scroll_max_offset(max_name_width, state.ui.explorer_content_width);
-                state.ui.explorer_horizontal_offset =
-                    state.ui.explorer_horizontal_offset.min(max_offset);
-                state.ui.inspector_pane_height = output.inspector_pane_height;
-                state.ui.result_pane_height = output.result_pane_height;
-                if let Some(width) = output.command_line_visible_width {
-                    state.command_line_visible_width = width;
-                }
-                if let Some(height) = output.connection_list_pane_height {
-                    state.ui.connection_list_pane_height = height;
-                }
-                if let Some(height) = output.table_picker_pane_height {
-                    state.ui.table_picker.pane_height = height;
-                }
-                if let Some(width) = output.table_picker_filter_visible_width {
-                    state.ui.table_picker.filter_visible_width = width;
-                }
-                if let Some(height) = output.er_picker_pane_height {
-                    state.ui.er_picker.pane_height = height;
-                }
-                if let Some(width) = output.er_picker_filter_visible_width {
-                    state.ui.er_picker.filter_visible_width = width;
-                }
-                if let Some(height) = output.query_history_picker_pane_height {
-                    state.query_history_picker.pane_height = height;
-                }
-                if let Some(width) = output.query_history_picker_filter_visible_width {
-                    state.query_history_picker.filter_visible_width = width;
-                }
-                if let Some(height) = output.file_picker_pane_height {
-                    state.file_picker.picker_mut().pane_height = height;
-                }
-                if let Some(width) = output.file_picker_filter_visible_width {
-                    state.file_picker.picker_mut().filter_visible_width = width;
-                }
-                if let Some(visible_rows) = output.jsonb_detail_editor_visible_rows {
-                    state.ui.jsonb_detail_editor_visible_rows = visible_rows;
-                    state.jsonb_detail.editor_mut().update_scroll(visible_rows);
-                }
-                state.confirm_dialog.preview_viewport_height =
-                    output.confirm_preview_viewport_height;
-                state.confirm_dialog.preview_content_height = output.confirm_preview_content_height;
-                state.confirm_dialog.preview_scroll = output.confirm_preview_scroll;
-                if let Some(height) = output.explain_compare_viewport_height {
-                    state.explain.compare_viewport_height = Some(height);
-                }
+                state.apply_render_output(output);
                 Ok(vec![])
             }
 
-            Effect::Sequence(_) => {
-                // Handled in run()
+            Effect::DispatchActions(actions) => Ok(actions),
+            Effect::StartFilePickerWalk {
+                field,
+                options,
+                generation,
+            } => {
+                self.utility.file_walker.spawn_walk(
+                    field,
+                    options,
+                    generation,
+                    self.action_tx.clone(),
+                );
                 Ok(vec![])
             }
-            Effect::DispatchActions(actions) => Ok(actions),
+            Effect::OpenExternalEditor { target, content } => {
+                tui.suspend()?;
+                let editor = Arc::clone(&self.utility.external_editor);
+                let result = tokio::task::spawn_blocking(move || {
+                    editor.edit(&content, target.file_extension())
+                })
+                .await;
+                tui.resume()?;
+                Ok(vec![match result {
+                    Ok(Ok(content)) => Action::ExternalEditorFinished { target, content },
+                    Ok(Err(error)) => Action::ExternalEditorFailed(error),
+                    Err(error) => Action::ExternalEditorFailed(ExternalEditorError::EditorFailed(
+                        error.to_string(),
+                    )),
+                }])
+            }
 
             e @ (Effect::CopyToClipboard { .. } | Effect::OpenFolder { .. }) => {
                 cmd_utility::run(
@@ -361,76 +184,84 @@ impl EffectRunner {
                     &self.utility.clipboard,
                     &self.utility.folder_opener,
                 )
-                .await?;
+                .await;
                 Ok(vec![])
             }
 
-            Effect::OpenExternalEditor { target, content } => {
-                tui.suspend()?;
-                let editor = Arc::clone(&self.utility.external_editor);
-                let extension = target.file_extension();
-                let result =
-                    tokio::task::spawn_blocking(move || editor.edit(&content, extension)).await;
-                tui.resume()?;
-                Ok(vec![match result {
-                    Ok(Ok(edited)) => Action::ExternalEditorFinished {
-                        target,
-                        content: edited,
-                    },
-                    Ok(Err(error)) => Action::ExternalEditorFailed(error),
-                    Err(join_error) => Action::ExternalEditorFailed(
-                        ExternalEditorError::EditorFailed(join_error.to_string()),
-                    ),
-                }])
-            }
-
             e @ (Effect::SaveAndConnect { .. }
+            | Effect::ProbeMySqlConnection { .. }
             | Effect::LoadConnectionForEdit { .. }
             | Effect::LoadConnections
             | Effect::DeleteConnection { .. }
             | Effect::SwitchConnection { .. }
             | Effect::SwitchToService { .. }) => {
-                if let Some(ref setter) = self.on_database_type_change {
-                    match &e {
-                        Effect::SaveAndConnect { database_type, .. } => setter(*database_type),
-                        Effect::SwitchConnection { connection_index } => {
-                            if let Some(profile) = state.connections().get(*connection_index) {
-                                setter(profile.database_type);
-                            }
-                        }
-                        Effect::SwitchToService { .. } => setter(DatabaseType::PostgreSQL),
-                        _ => {}
-                    }
+                if matches!(
+                    &e,
+                    Effect::SaveAndConnect { .. }
+                        | Effect::ProbeMySqlConnection { .. }
+                        | Effect::SwitchConnection { .. }
+                        | Effect::SwitchToService { .. }
+                ) {
+                    self.metadata_tasks.cancel().await;
                 }
-                cmd_connection::run(
+                if matches!(
+                    &e,
+                    Effect::SwitchConnection { .. } | Effect::SwitchToService { .. }
+                ) {
+                    self.smart_er_refresh_task.cancel().await;
+                }
+                if matches!(&e, Effect::ProbeMySqlConnection { .. }) {
+                    self.table_detail_tasks.cancel().await;
+                }
+                Ok(cmd_connection::run(
                     e,
                     &self.action_tx,
-                    &self.connection.dsn_builder,
+                    &self.connection,
+                    &self.connection_task,
                     &self.metadata_provider,
-                    &self.metadata_cache,
-                    &self.connection.connection_store,
-                    self.connection.pg_service_entry_reader.as_ref(),
                     state,
                 )
-                .await?;
-                Ok(vec![])
+                .await
+                .into_iter()
+                .collect())
             }
 
             e @ (Effect::FetchMetadata { .. }
+            | Effect::FetchEffectiveUser { .. }
             | Effect::FetchTableDetail { .. }
-            | Effect::PrefetchTableDetail { .. }
-            | Effect::ProcessPrefetchQueue
+            | Effect::PrefetchTableColumnsAndFks { .. }
+            | Effect::SchedulePrefetchQueueProcessing { .. }
             | Effect::DelayedProcessPrefetchQueue { .. }
-            | Effect::CacheInvalidate { .. }) => {
+            | Effect::CancelMetadataTasks) => {
+                if matches!(&e, Effect::FetchMetadata { .. }) {
+                    self.metadata_tasks.cancel().await;
+                    self.smart_er_refresh_task.cancel().await;
+                }
                 cmd_browse::metadata::run(
                     e,
                     &self.action_tx,
                     &self.metadata_provider,
-                    &self.metadata_cache,
-                    state,
+                    &self.connection.sqlite_path_validator,
+                    &self.table_detail_tasks,
+                    &self.metadata_tasks,
                     completion_engine,
                 )
-                .await?;
+                .await;
+                Ok(vec![])
+            }
+
+            Effect::CancelConnectionTask => {
+                self.connection_task.cancel().await;
+                Ok(vec![])
+            }
+
+            Effect::CancelSqliteDiagnostics => {
+                self.sqlite_diagnostics_task.cancel().await;
+                Ok(vec![])
+            }
+
+            Effect::CancelTrackedTasks => {
+                self.cancel_tracked_tasks().await;
                 Ok(vec![])
             }
 
@@ -438,27 +269,28 @@ impl EffectRunner {
             | Effect::ExecuteAdhoc { .. }
             | Effect::ExecuteExplain { .. }
             | Effect::ExecuteWrite { .. }
-            | Effect::CountRowsForExport { .. }
-            | Effect::ExportCsv { .. }) => {
+            | Effect::ExportCsv { .. }
+            | Effect::ExportCsvFromCache { .. }) => {
                 cmd_browse::query::run(
                     e,
                     &self.action_tx,
                     &self.query.query_executor,
                     &self.query.query_history_store,
+                    &self.query.cached_result_exporter,
+                    &self.query_tasks,
                     state,
                 )
-                .await?;
+                .await;
                 Ok(vec![])
             }
 
             e @ (Effect::GenerateErDiagramFromCache { .. }
             | Effect::ExtractFkNeighbors { .. }
             | Effect::WriteErFailureLog { .. }
-            | Effect::SmartErRefresh { .. }) => {
+            | Effect::SmartErRefreshCacheAndDiff { .. }) => {
                 cmd_er::run(
                     e,
                     &self.action_tx,
-                    &self.metadata_provider,
                     &self.er.er_exporter,
                     &self.er.config_writer,
                     &self.er.er_log_writer,
@@ -469,18 +301,44 @@ impl EffectRunner {
                 Ok(vec![])
             }
 
-            e @ Effect::LoadQueryHistory { .. } => {
-                cmd_query_history::run(e, &self.action_tx, &self.query.query_history_store);
+            Effect::SmartErRefresh { dsn, run_id } => {
+                self.smart_er_refresh_task
+                    .replace(cmd_er::smart_refresh_task(
+                        self.action_tx.clone(),
+                        Arc::clone(&self.metadata_provider),
+                        dsn,
+                        run_id,
+                    ))
+                    .await;
                 Ok(vec![])
             }
 
-            e @ Effect::StartFilePickerWalk { .. } => {
-                cmd_file_picker::run(e, &self.action_tx, &self.utility.file_system_walker);
+            Effect::LoadQueryHistory {
+                project_name,
+                scope,
+            } => {
+                spawn_query_history_load(
+                    project_name,
+                    scope,
+                    &self.action_tx,
+                    &self.query.query_history_store,
+                );
                 Ok(vec![])
             }
 
-            e @ Effect::SaveSettings { .. } => {
-                cmd_settings::run(e, &self.action_tx, &self.settings.settings_store).await;
+            Effect::SaveSettings { settings } => {
+                Ok(vec![cmd_settings::run(settings, &self.settings_store)])
+            }
+
+            e @ (Effect::FetchSqliteDiagnosticsCore { .. }
+            | Effect::FetchSqliteDiagnosticsQuickCheck { .. }) => {
+                sqlite_diagnostics::run(
+                    e,
+                    &self.action_tx,
+                    &self.query.sqlite_diagnostics,
+                    &self.sqlite_diagnostics_task,
+                )
+                .await;
                 Ok(vec![])
             }
 
@@ -488,10 +346,31 @@ impl EffectRunner {
             | Effect::EvictTablesFromCompletionCache { .. }
             | Effect::ClearCompletionEngineCache
             | Effect::ResizeCompletionCache { .. }
-            | Effect::TriggerCompletion) => {
-                cmd_completion::run(e, &self.action_tx, state, completion_engine).await?;
-                Ok(vec![])
-            }
+            | Effect::TriggerCompletion) => Ok(cmd_completion::run(e, state, completion_engine)),
+        }
+    }
+
+    async fn cancel_tracked_tasks(&self) {
+        let connection_task = self.connection_task.abort();
+        let metadata_task = self.metadata_tasks.abort();
+        let smart_er_task = self.smart_er_refresh_task.abort();
+        let sqlite_diagnostics_tasks = self.sqlite_diagnostics_task.abort();
+        let query_task = self.query_tasks.abort();
+        let table_detail_task = self.table_detail_tasks.abort();
+        if let Some(task) = metadata_task {
+            let _ = task.await;
+        }
+        if let Some(task) = query_task {
+            let _ = task.await;
+        }
+        if let Some(task) = table_detail_task {
+            let _ = task.await;
+        }
+        if let Some(task) = connection_task {
+            let _ = task.await;
+        }
+        for task in smart_er_task.into_iter().chain(sqlite_diagnostics_tasks) {
+            let _ = task.await;
         }
     }
 }
@@ -499,44 +378,143 @@ impl EffectRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cmd::test_support::*;
-    use crate::domain::{DatabaseMetadata, TableSummary};
+    use crate::cmd::test_fixtures::{self, NoopRenderer};
+    use crate::domain::{DatabaseMetadata, TableSignatureSnapshot, TableSummary};
+    use crate::model::shared::render_output::{
+        BrowseLayout, DetailLayout, ExplorerLayout, JsonDetailLayout,
+    };
     use crate::ports::outbound::connection_store::MockConnectionStore;
     use crate::ports::outbound::metadata::MockMetadataProvider;
     use crate::ports::outbound::query_executor::MockQueryExecutor;
-    use crate::ports::outbound::{RenderOutput, RenderResult};
+    use crate::ports::outbound::{MySqlConnectionProbeResult, RenderOutput, RenderResult};
     use crate::services::AppServices;
     use tokio::sync::mpsc;
 
-    struct NoopRenderer;
-    impl Renderer for NoopRenderer {
-        fn draw(
-            &mut self,
-            _state: &AppState,
-            _services: &AppServices,
-            _now: Instant,
-        ) -> RenderResult<RenderOutput> {
-            Ok(RenderOutput::default())
+    mod external_editor {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use super::*;
+        use crate::update::action::ExternalEditorTarget;
+
+        enum EditorOutcome {
+            Success,
+            Failure,
+            Panic,
         }
 
-        fn suspend(&mut self) -> RenderResult<()> {
-            Ok(())
+        struct RecordingEditor {
+            phase: Arc<AtomicUsize>,
+            outcome: EditorOutcome,
         }
 
-        fn resume(&mut self) -> RenderResult<()> {
-            Ok(())
+        impl ExternalEditor for RecordingEditor {
+            fn edit(&self, content: &str, extension: &str) -> Result<String, ExternalEditorError> {
+                assert_eq!(self.phase.load(Ordering::SeqCst), 1);
+                assert_eq!(content, "SELECT 1");
+                assert_eq!(extension, "sql");
+                self.phase.store(2, Ordering::SeqCst);
+                match self.outcome {
+                    EditorOutcome::Success => Ok("SELECT 2".to_string()),
+                    EditorOutcome::Failure => Err(ExternalEditorError::NotConfigured),
+                    EditorOutcome::Panic => panic!("simulated editor task panic"),
+                }
+            }
+        }
+
+        struct RecordingRenderer(Arc<AtomicUsize>);
+
+        impl Renderer for RecordingRenderer {
+            fn suspend(&mut self) -> RenderResult<()> {
+                assert_eq!(self.0.swap(1, Ordering::SeqCst), 0);
+                Ok(())
+            }
+
+            fn resume(&mut self) -> RenderResult<()> {
+                assert_eq!(self.0.swap(3, Ordering::SeqCst), 2);
+                Ok(())
+            }
+
+            fn draw(
+                &mut self,
+                _state: &AppState,
+                _services: &AppServices,
+                _now: Instant,
+            ) -> RenderResult<RenderOutput> {
+                Ok(RenderOutput::default())
+            }
+        }
+
+        async fn run_editor(outcome: EditorOutcome) -> Vec<Action> {
+            let (tx, _rx) = mpsc::channel(8);
+            let mut runner = test_fixtures::make_runner(
+                Arc::new(MockMetadataProvider::new()),
+                Arc::new(MockQueryExecutor::new()),
+                Arc::new(MockConnectionStore::new()),
+                tx,
+            );
+            let phase = Arc::new(AtomicUsize::new(0));
+            runner.utility.external_editor = Arc::new(RecordingEditor {
+                phase: Arc::clone(&phase),
+                outcome,
+            });
+            let mut renderer = RecordingRenderer(Arc::clone(&phase));
+            let actions = runner
+                .execute_effects(
+                    vec![Effect::OpenExternalEditor {
+                        target: ExternalEditorTarget::SqlEditor,
+                        content: "SELECT 1".to_string(),
+                    }],
+                    &mut renderer,
+                    &mut AppState::new("test".to_string()),
+                    &RefCell::new(CompletionEngine::new()),
+                    &AppServices::stub(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(phase.load(Ordering::SeqCst), 3);
+            actions
+        }
+
+        #[tokio::test]
+        async fn success_restores_terminal_before_loading_edited_sql() {
+            let actions = run_editor(EditorOutcome::Success).await;
+            assert!(
+                matches!(actions.as_slice(), [Action::ExternalEditorFinished { target: ExternalEditorTarget::SqlEditor, content }] if content == "SELECT 2")
+            );
+        }
+
+        #[tokio::test]
+        async fn editor_failure_restores_terminal_and_reports_error() {
+            let actions = run_editor(EditorOutcome::Failure).await;
+            assert!(matches!(
+                actions.as_slice(),
+                [Action::ExternalEditorFailed(
+                    ExternalEditorError::NotConfigured
+                )]
+            ));
+        }
+
+        #[tokio::test]
+        async fn editor_task_panic_still_restores_terminal() {
+            let actions = run_editor(EditorOutcome::Panic).await;
+            assert!(matches!(
+                actions.as_slice(),
+                [Action::ExternalEditorFailed(
+                    ExternalEditorError::EditorFailed(_)
+                )]
+            ));
         }
     }
 
     mod render {
         use super::*;
-        use crate::model::browse::jsonb_detail::JsonbDetailState;
+        use crate::model::browse::json_detail::JsonDetailState;
 
         struct ExplorerWidthRenderer {
             explorer_content_width: usize,
         }
 
-        struct JsonbVisibleRowsRenderer {
+        struct JsonVisibleRowsRenderer {
             visible_rows: usize,
         }
 
@@ -548,21 +526,19 @@ mod tests {
                 _now: Instant,
             ) -> RenderResult<RenderOutput> {
                 Ok(RenderOutput {
-                    explorer_content_width: self.explorer_content_width,
+                    browse: BrowseLayout {
+                        explorer: ExplorerLayout {
+                            content_width: self.explorer_content_width,
+                            ..ExplorerLayout::default()
+                        },
+                        ..BrowseLayout::default()
+                    },
                     ..RenderOutput::default()
                 })
             }
-
-            fn suspend(&mut self) -> RenderResult<()> {
-                Ok(())
-            }
-
-            fn resume(&mut self) -> RenderResult<()> {
-                Ok(())
-            }
         }
 
-        impl Renderer for JsonbVisibleRowsRenderer {
+        impl Renderer for JsonVisibleRowsRenderer {
             fn draw(
                 &mut self,
                 _state: &AppState,
@@ -570,71 +546,61 @@ mod tests {
                 _now: Instant,
             ) -> RenderResult<RenderOutput> {
                 Ok(RenderOutput {
-                    jsonb_detail_editor_visible_rows: Some(self.visible_rows),
+                    details: DetailLayout {
+                        json: Some(JsonDetailLayout {
+                            editor_visible_rows: self.visible_rows,
+                        }),
+                        ..DetailLayout::default()
+                    },
                     ..RenderOutput::default()
                 })
-            }
-
-            fn suspend(&mut self) -> RenderResult<()> {
-                Ok(())
-            }
-
-            fn resume(&mut self) -> RenderResult<()> {
-                Ok(())
             }
         }
 
         #[tokio::test]
         async fn calls_draw() {
-            let (tx, _rx) = mpsc::channel(8);
-            let runner = make_runner(
+            let (tx, mut _rx) = mpsc::channel(8);
+            let runner = test_fixtures::make_runner(
                 Arc::new(MockMetadataProvider::new()),
                 Arc::new(MockQueryExecutor::new()),
                 Arc::new(MockConnectionStore::new()),
-                TtlCache::new(300),
                 tx,
             );
 
-            let state = &mut AppState::new("test".to_string());
-            let ce = RefCell::new(CompletionEngine::new());
-            let mut renderer = NoopRenderer;
-
-            runner
-                .run(
-                    vec![Effect::Render],
-                    &mut renderer,
-                    state,
-                    &ce,
-                    &AppServices::stub(),
-                )
-                .await
-                .unwrap();
+            test_fixtures::run_one_effect(
+                &runner,
+                Effect::Render,
+                AppState::new("test".to_string()),
+                RefCell::new(CompletionEngine::new()),
+                &mut _rx,
+                None,
+            )
+            .await
+            .unwrap();
         }
 
         #[tokio::test]
         async fn clamps_stale_explorer_horizontal_offset_to_new_maximum() {
             let (tx, _rx) = mpsc::channel(8);
-            let runner = make_runner(
+            let runner = test_fixtures::make_runner(
                 Arc::new(MockMetadataProvider::new()),
                 Arc::new(MockQueryExecutor::new()),
                 Arc::new(MockConnectionStore::new()),
-                TtlCache::new(300),
                 tx,
             );
 
             let state = &mut AppState::new("test".to_string());
-            state.session.set_metadata(Some(Arc::new(DatabaseMetadata {
-                database_name: "test".to_string(),
-                schemas: vec![],
-                table_summaries: vec![TableSummary::new(
+            state.session.set_metadata(Some(Arc::new({
+                let mut metadata = DatabaseMetadata::new("test".to_string());
+                metadata.table_summaries = vec![TableSummary::new(
                     "public".to_string(),
                     "abcdefghij".to_string(),
                     Some(0),
                     false,
-                )],
-                fetched_at: Instant::now(),
+                )];
+                metadata
             })));
-            state.ui.explorer_horizontal_offset = 20;
+            state.ui.set_explorer_horizontal_offset(20);
 
             let ce = RefCell::new(CompletionEngine::new());
             let mut renderer = ExplorerWidthRenderer {
@@ -642,7 +608,7 @@ mod tests {
             };
 
             runner
-                .run(
+                .execute_effects(
                     vec![Effect::Render],
                     &mut renderer,
                     state,
@@ -652,38 +618,37 @@ mod tests {
                 .await
                 .unwrap();
 
-            assert_eq!(state.ui.explorer_horizontal_offset, 9);
+            assert_eq!(state.ui.explorer_horizontal_offset(), 9);
         }
 
         #[tokio::test]
-        async fn recomputes_jsonb_editor_scroll_when_visible_rows_change() {
+        async fn recomputes_json_editor_scroll_when_visible_rows_change() {
             let (tx, _rx) = mpsc::channel(8);
-            let runner = make_runner(
+            let runner = test_fixtures::make_runner(
                 Arc::new(MockMetadataProvider::new()),
                 Arc::new(MockQueryExecutor::new()),
                 Arc::new(MockConnectionStore::new()),
-                TtlCache::new(300),
                 tx,
             );
 
             let state = &mut AppState::new("test".to_string());
-            state.jsonb_detail = JsonbDetailState::open_pretty(
+            state.json_detail = JsonDetailState::open_pretty(
                 0,
                 0,
                 "settings".to_string(),
                 "{}".to_string(),
                 "{\n  \"a\": 1,\n  \"b\": 2,\n  \"c\": 3\n}".to_string(),
             );
-            state.jsonb_detail.editor_mut().set_content_with_cursor(
+            state.json_detail.editor_mut().set_content_with_cursor(
                 "{\n  \"a\": 1,\n  \"b\": 2,\n  \"c\": 3\n}".to_string(),
                 29,
             );
 
             let ce = RefCell::new(CompletionEngine::new());
-            let mut renderer = JsonbVisibleRowsRenderer { visible_rows: 2 };
+            let mut renderer = JsonVisibleRowsRenderer { visible_rows: 2 };
 
             runner
-                .run(
+                .execute_effects(
                     vec![Effect::Render],
                     &mut renderer,
                     state,
@@ -693,9 +658,264 @@ mod tests {
                 .await
                 .unwrap();
 
-            assert_eq!(state.ui.jsonb_detail_editor_visible_rows, 2);
-            assert_eq!(state.jsonb_detail.editor().cursor_to_position().0, 3);
-            assert_eq!(state.jsonb_detail.editor().scroll_row(), 2);
+            assert_eq!(state.ui.json_detail_editor_visible_rows(), 2);
+            assert_eq!(state.json_detail.editor().cursor_to_position().0, 3);
+            assert_eq!(state.json_detail.editor().scroll_row(), 2);
+        }
+    }
+
+    mod task_cancellation {
+        use std::future::pending;
+        use std::sync::{Condvar, Mutex};
+        use std::time::Duration as StdDuration;
+
+        use tokio::sync::oneshot;
+        use tokio::time::{Duration, timeout};
+
+        use crate::domain::{DiagnosticField, SqliteDiagnosticsSnapshot};
+        use crate::ports::outbound::DbOperationError;
+
+        use super::*;
+
+        struct BlockingDropState {
+            entered: Mutex<Option<oneshot::Sender<()>>>,
+            released: (Mutex<bool>, Condvar),
+            finished: Mutex<Option<oneshot::Sender<()>>>,
+        }
+
+        impl BlockingDropState {
+            fn release(&self) {
+                let (released, condvar) = &self.released;
+                *released.lock().expect("release lock poisoned") = true;
+                condvar.notify_one();
+            }
+        }
+
+        struct BlockingDrop(Arc<BlockingDropState>);
+
+        impl Drop for BlockingDrop {
+            fn drop(&mut self) {
+                self.0
+                    .entered
+                    .lock()
+                    .expect("drop signal lock poisoned")
+                    .take()
+                    .expect("drop signal should be observed once")
+                    .send(())
+                    .ok();
+                let (released, condvar) = &self.0.released;
+                let mut released = released.lock().expect("release lock poisoned");
+                while !*released {
+                    let (next, result) = condvar
+                        .wait_timeout(released, StdDuration::from_secs(10))
+                        .expect("release wait poisoned");
+                    released = next;
+                    if result.timed_out() {
+                        break;
+                    }
+                }
+                let finished_sender = self
+                    .0
+                    .finished
+                    .lock()
+                    .expect("finished signal lock poisoned")
+                    .take();
+                if let Some(sender) = finished_sender {
+                    sender.send(()).ok();
+                }
+            }
+        }
+
+        struct TaskDropSignal(Mutex<Option<oneshot::Sender<()>>>);
+
+        impl Drop for TaskDropSignal {
+            fn drop(&mut self) {
+                self.0
+                    .lock()
+                    .expect("task drop signal lock poisoned")
+                    .take()
+                    .expect("task drop signal should be observed once")
+                    .send(())
+                    .ok();
+            }
+        }
+
+        struct BlockingDiagnosticsProvider {
+            started: Arc<tokio::sync::Notify>,
+            drop_state: Arc<BlockingDropState>,
+        }
+
+        #[async_trait::async_trait]
+        impl SqliteDiagnosticsProvider for BlockingDiagnosticsProvider {
+            async fn fetch_core_diagnostics(
+                &self,
+                _dsn: &str,
+            ) -> Result<SqliteDiagnosticsSnapshot, DbOperationError> {
+                let _drop_signal = BlockingDrop(Arc::clone(&self.drop_state));
+                self.started.notify_one();
+                pending().await
+            }
+
+            async fn fetch_quick_check(&self, _dsn: &str) -> DiagnosticField {
+                let _drop_signal = BlockingDrop(Arc::clone(&self.drop_state));
+                self.started.notify_one();
+                pending().await
+            }
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn cancel_tracked_tasks_aborts_all_groups_before_joining() {
+            let (tx, mut rx) = mpsc::channel(8);
+            let runner = test_fixtures::make_runner(
+                Arc::new(MockMetadataProvider::new()),
+                Arc::new(MockQueryExecutor::new()),
+                Arc::new(MockConnectionStore::new()),
+                tx,
+            );
+
+            let (query_started_tx, query_started_rx) = oneshot::channel();
+            let (query_drop_tx, mut query_drop_rx) = oneshot::channel();
+            let (query_finished_tx, mut query_finished_rx) = oneshot::channel();
+            let query_drop_state = Arc::new(BlockingDropState {
+                entered: Mutex::new(Some(query_drop_tx)),
+                released: (Mutex::new(false), Condvar::new()),
+                finished: Mutex::new(Some(query_finished_tx)),
+            });
+            runner
+                .query_tasks
+                .replace({
+                    let drop_state = Arc::clone(&query_drop_state);
+                    async move {
+                        let _drop_signal = BlockingDrop(drop_state);
+                        query_started_tx.send(()).ok();
+                        pending::<()>().await;
+                    }
+                })
+                .await;
+            query_started_rx.await.expect("query task should start");
+
+            let (table_started_tx, table_started_rx) = oneshot::channel();
+            let (table_drop_tx, mut table_drop_rx) = oneshot::channel();
+            runner
+                .table_detail_tasks
+                .replace({
+                    async move {
+                        let _drop_signal = TaskDropSignal(Mutex::new(Some(table_drop_tx)));
+                        table_started_tx.send(()).ok();
+                        pending::<()>().await;
+                    }
+                })
+                .await;
+            table_started_rx
+                .await
+                .expect("table detail task should start");
+
+            let (connection_started_tx, connection_started_rx) = oneshot::channel();
+            let (connection_drop_tx, mut connection_drop_rx) = oneshot::channel();
+            runner
+                .connection_task
+                .replace(async move {
+                    let _drop_signal = TaskDropSignal(Mutex::new(Some(connection_drop_tx)));
+                    connection_started_tx.send(()).ok();
+                    pending::<()>().await;
+                })
+                .await;
+            connection_started_rx
+                .await
+                .expect("connection task should start");
+
+            let diagnostics_started = Arc::new(tokio::sync::Notify::new());
+            let (diagnostics_drop_tx, mut diagnostics_drop_rx) = oneshot::channel();
+            let diagnostics_drop_state = Arc::new(BlockingDropState {
+                entered: Mutex::new(Some(diagnostics_drop_tx)),
+                released: (Mutex::new(false), Condvar::new()),
+                finished: Mutex::new(None),
+            });
+            let diagnostics_provider = Arc::new(BlockingDiagnosticsProvider {
+                started: Arc::clone(&diagnostics_started),
+                drop_state: Arc::clone(&diagnostics_drop_state),
+            }) as Arc<dyn SqliteDiagnosticsProvider>;
+            sqlite_diagnostics::run(
+                Effect::FetchSqliteDiagnosticsCore {
+                    dsn: "sqlite:///tmp/app.db".to_string(),
+                    run_id: 1,
+                },
+                &runner.action_tx,
+                &diagnostics_provider,
+                &runner.sqlite_diagnostics_task,
+            )
+            .await;
+            timeout(Duration::from_secs(1), diagnostics_started.notified())
+                .await
+                .expect("SQLite diagnostics task should start");
+
+            let mut state = AppState::new("test".to_string());
+            let completion_engine = RefCell::new(CompletionEngine::new());
+            let mut renderer = test_fixtures::NoopRenderer;
+            let services = AppServices::stub();
+            let mut follow_up = Box::pin(runner.execute_effects(
+                vec![
+                    Effect::CancelTrackedTasks,
+                    Effect::DispatchActions(vec![Action::Render]),
+                ],
+                &mut renderer,
+                &mut state,
+                &completion_engine,
+                &services,
+            ));
+            timeout(Duration::from_secs(1), async {
+                tokio::select! {
+                    _ = &mut follow_up => {
+                        panic!("follow-up ran before query task joined")
+                    }
+                    result = &mut query_drop_rx => {
+                        result.expect("query drop signal should be sent");
+                    }
+                }
+            })
+            .await
+            .expect("query task should enter its drop gate");
+            query_drop_state.release();
+            timeout(Duration::from_secs(1), &mut query_finished_rx)
+                .await
+                .expect("query task should leave its drop gate")
+                .expect("query finished signal should be sent");
+            timeout(Duration::from_secs(1), async {
+                tokio::select! {
+                    _ = &mut follow_up => {
+                        panic!("follow-up ran before SQLite diagnostics task joined")
+                    }
+                    result = &mut diagnostics_drop_rx => {
+                        result.expect("SQLite diagnostics drop signal should be sent");
+                    }
+                }
+            })
+            .await
+            .expect("SQLite diagnostics task should enter its drop gate");
+            assert!(
+                timeout(Duration::from_millis(50), &mut follow_up)
+                    .await
+                    .is_err(),
+                "follow-up ran before SQLite diagnostics task joined"
+            );
+            diagnostics_drop_state.release();
+            let actions = timeout(Duration::from_secs(1), follow_up)
+                .await
+                .expect("cancellation and follow-up should finish")
+                .expect("effect execution should succeed");
+            let table_dropped = timeout(Duration::from_secs(1), &mut table_drop_rx)
+                .await
+                .is_ok();
+            let connection_aborted = timeout(Duration::from_secs(1), &mut connection_drop_rx)
+                .await
+                .is_ok();
+            assert!(connection_aborted, "connection task was not aborted");
+            assert!(table_dropped, "table detail task was not aborted");
+            assert!(matches!(actions.as_slice(), [Action::Render]));
+            assert!(
+                rx.try_recv().is_err(),
+                "SQLite diagnostics task emitted a late action"
+            );
         }
     }
 
@@ -704,171 +924,1383 @@ mod tests {
 
         #[tokio::test]
         async fn dispatches_all_actions() {
-            let (tx, _rx) = mpsc::channel(8);
-            let runner = make_runner(
+            let (tx, mut _rx) = mpsc::channel(8);
+            let runner = test_fixtures::make_runner(
                 Arc::new(MockMetadataProvider::new()),
                 Arc::new(MockQueryExecutor::new()),
                 Arc::new(MockConnectionStore::new()),
-                TtlCache::new(300),
                 tx,
             );
 
-            let state = &mut AppState::new("test".to_string());
-            let ce = RefCell::new(CompletionEngine::new());
-            let mut renderer = NoopRenderer;
+            let run = test_fixtures::run_one_effect(
+                &runner,
+                Effect::DispatchActions(vec![
+                    Action::ProcessPrefetchQueue { run_id: 1 },
+                    Action::ProcessPrefetchQueue { run_id: 1 },
+                ]),
+                AppState::new("test".to_string()),
+                RefCell::new(CompletionEngine::new()),
+                &mut _rx,
+                None,
+            )
+            .await
+            .unwrap();
 
-            let result = runner
-                .run(
-                    vec![Effect::DispatchActions(vec![
-                        Action::ProcessPrefetchQueue,
-                        Action::ProcessPrefetchQueue,
-                    ])],
-                    &mut renderer,
-                    state,
-                    &ce,
-                    &AppServices::stub(),
-                )
-                .await
-                .unwrap();
-
-            assert_eq!(result.len(), 2);
-            assert!(matches!(result[0], Action::ProcessPrefetchQueue));
-            assert!(matches!(result[1], Action::ProcessPrefetchQueue));
+            assert_eq!(run.actions.len(), 2);
+            assert!(matches!(
+                run.actions[0],
+                Action::ProcessPrefetchQueue { run_id: 1 }
+            ));
+            assert!(matches!(
+                run.actions[1],
+                Action::ProcessPrefetchQueue { run_id: 1 }
+            ));
         }
     }
 
-    mod external_editor {
+    mod query_context_termination {
+        use std::future::pending;
+        use std::path::PathBuf;
+        use std::sync::Mutex;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        use tokio::sync::oneshot;
+        use tokio::time::{Duration, timeout};
+
         use super::*;
-        use crate::update::action::ExternalEditorTarget;
-        use std::sync::atomic::{AtomicU8, Ordering};
+        use crate::domain::connection::{ConnectionId, DatabaseType};
+        use crate::domain::{QueryResult, Table, WriteExecutionResult};
+        use crate::model::connection::cache::ConnectionCache;
+        use crate::ports::outbound::{AccessMode, DbOperationError};
+        use crate::update::action::ConnectionTarget;
+        use crate::update::reducer::reduce;
 
-        const PHASE_START: u8 = 0;
-        const PHASE_SUSPENDED: u8 = 1;
-        const PHASE_EDITED: u8 = 2;
-        const PHASE_RESUMED: u8 = 3;
+        struct DropSignal(Arc<AtomicBool>);
 
-        /// Monotonic suspend -> edit -> resume probe: each step only advances
-        /// when its predecessor already ran, so a final `PHASE_RESUMED` proves
-        /// the editor ran with the terminal released and that it was restored.
-        #[derive(Default)]
-        struct Phase(AtomicU8);
-
-        impl Phase {
-            fn advance(&self, from: u8, to: u8) {
-                if self.0.load(Ordering::SeqCst) == from {
-                    self.0.store(to, Ordering::SeqCst);
-                }
-            }
-
-            fn get(&self) -> u8 {
-                self.0.load(Ordering::SeqCst)
+        impl Drop for DropSignal {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
             }
         }
 
-        struct RecordingRenderer {
-            phase: Arc<Phase>,
+        struct PendingQueryExecutor {
+            started: Mutex<Option<oneshot::Sender<()>>>,
+            dropped: Arc<AtomicBool>,
         }
 
-        impl Renderer for RecordingRenderer {
-            fn draw(
-                &mut self,
-                _state: &AppState,
-                _services: &AppServices,
-                _now: Instant,
-            ) -> RenderResult<RenderOutput> {
-                Ok(RenderOutput::default())
-            }
-
-            fn suspend(&mut self) -> RenderResult<()> {
-                self.phase.advance(PHASE_START, PHASE_SUSPENDED);
-                Ok(())
-            }
-
-            fn resume(&mut self) -> RenderResult<()> {
-                self.phase.advance(PHASE_EDITED, PHASE_RESUMED);
-                Ok(())
-            }
-        }
-
-        struct StubExternalEditor {
-            phase: Arc<Phase>,
-            outcome: Result<String, ExternalEditorError>,
-        }
-
-        impl ExternalEditor for StubExternalEditor {
-            fn edit(
+        #[async_trait::async_trait]
+        impl QueryExecutor for PendingQueryExecutor {
+            async fn execute_preview(
                 &self,
-                _content: &str,
-                _extension: &str,
-            ) -> Result<String, ExternalEditorError> {
-                self.phase.advance(PHASE_SUSPENDED, PHASE_EDITED);
-                self.outcome.clone()
+                _dsn: &str,
+                _schema: &str,
+                _table: &str,
+                _limit: usize,
+                _offset: usize,
+            ) -> Result<QueryResult, DbOperationError> {
+                let _guard = DropSignal(Arc::clone(&self.dropped));
+                self.started
+                    .lock()
+                    .expect("started signal lock poisoned")
+                    .take()
+                    .expect("preview should start once")
+                    .send(())
+                    .ok();
+                pending().await
+            }
+
+            async fn execute_adhoc(
+                &self,
+                _dsn: &str,
+                _query: &str,
+                _access_mode: AccessMode,
+            ) -> Result<QueryResult, DbOperationError> {
+                unreachable!("test only starts a preview")
+            }
+
+            async fn execute_write(
+                &self,
+                _dsn: &str,
+                _query: &str,
+                _access_mode: AccessMode,
+            ) -> Result<WriteExecutionResult, DbOperationError> {
+                unreachable!("test only starts a preview")
+            }
+
+            async fn export_to_csv(
+                &self,
+                _dsn: &str,
+                _query: &str,
+                _file_name: &str,
+            ) -> Result<PathBuf, DbOperationError> {
+                unreachable!("test only starts a preview")
             }
         }
 
-        async fn run_open(
-            outcome: Result<String, ExternalEditorError>,
-        ) -> (Vec<Action>, Arc<Phase>) {
-            let phase = Arc::new(Phase::default());
-            let (tx, _rx) = mpsc::channel(8);
-            let runner = make_runner_builder(
-                Arc::new(MockMetadataProvider::new()),
-                Arc::new(MockQueryExecutor::new()),
-                Arc::new(MockConnectionStore::new()),
-                TtlCache::new(300),
-                tx,
-            )
-            .external_editor(Arc::new(StubExternalEditor {
-                phase: Arc::clone(&phase),
-                outcome,
-            }))
-            .build();
+        struct PendingTableDetailProvider {
+            started: Mutex<Option<oneshot::Sender<()>>>,
+            dropped: Arc<AtomicBool>,
+        }
 
-            let state = &mut AppState::new("test".to_string());
-            let ce = RefCell::new(CompletionEngine::new());
-            let mut renderer = RecordingRenderer {
-                phase: Arc::clone(&phase),
+        #[async_trait::async_trait]
+        impl MetadataProvider for PendingTableDetailProvider {
+            async fn fetch_metadata(
+                &self,
+                _dsn: &str,
+            ) -> Result<DatabaseMetadata, DbOperationError> {
+                unreachable!("test only starts table detail")
+            }
+
+            async fn fetch_table_detail(
+                &self,
+                _dsn: &str,
+                _schema: &str,
+                _table: &str,
+            ) -> Result<Table, DbOperationError> {
+                let _guard = DropSignal(Arc::clone(&self.dropped));
+                self.started
+                    .lock()
+                    .expect("started signal lock poisoned")
+                    .take()
+                    .expect("table detail should start once")
+                    .send(())
+                    .ok();
+                pending().await
+            }
+
+            async fn fetch_table_columns_and_fks(
+                &self,
+                _dsn: &str,
+                _schema: &str,
+                _table: &str,
+            ) -> Result<Table, DbOperationError> {
+                unreachable!("test only starts table detail")
+            }
+
+            async fn fetch_table_signatures(
+                &self,
+                _dsn: &str,
+            ) -> Result<TableSignatureSnapshot, DbOperationError> {
+                unreachable!("test only starts table detail")
+            }
+        }
+
+        #[tokio::test]
+        async fn connection_switch_drops_pending_query_task() {
+            let (started_tx, started_rx) = oneshot::channel();
+            let dropped = Arc::new(AtomicBool::new(false));
+            let executor = PendingQueryExecutor {
+                started: Mutex::new(Some(started_tx)),
+                dropped: Arc::clone(&dropped),
             };
+            let (action_tx, _action_rx) = mpsc::channel(8);
+            let runner = test_fixtures::make_runner(
+                Arc::new(MockMetadataProvider::new()),
+                Arc::new(executor),
+                Arc::new(MockConnectionStore::new()),
+                action_tx,
+            );
+            let mut state = AppState::new("test".to_string());
+            let current_id = ConnectionId::new();
+            state.session.activate_connection_with_dsn(
+                &current_id,
+                "current",
+                DatabaseType::PostgreSQL,
+                "postgres://localhost/current",
+            );
+            let target_id = ConnectionId::new();
+            state
+                .connection_caches
+                .insert(target_id.clone(), ConnectionCache::default());
+            let run_id = state.query.begin_running(Instant::now());
+            let completion_engine = RefCell::new(CompletionEngine::new());
+            let mut renderer = NoopRenderer;
 
-            let actions = runner
-                .run(
-                    vec![Effect::OpenExternalEditor {
-                        target: ExternalEditorTarget::SqlEditor,
-                        content: "select 1".into(),
+            runner
+                .execute_effects(
+                    vec![Effect::ExecutePreview {
+                        dsn: "postgres://localhost/current".to_string(),
+                        schema: "public".to_string(),
+                        table: "users".to_string(),
+                        generation: 1,
+                        run_id,
+                        limit: 100,
+                        offset: 0,
+                        target_page: 0,
                     }],
                     &mut renderer,
-                    state,
-                    &ce,
+                    &mut state,
+                    &completion_engine,
+                    &AppServices::stub(),
+                )
+                .await
+                .unwrap();
+            timeout(Duration::from_secs(1), started_rx)
+                .await
+                .expect("pending query should start")
+                .expect("started signal should be sent");
+
+            let effects = reduce(
+                &mut state,
+                Action::SwitchConnection(ConnectionTarget {
+                    id: target_id,
+                    dsn: "sqlite:///tmp/target.db".to_string(),
+                    name: "target".to_string(),
+                    database_type: DatabaseType::SQLite,
+                    database: None,
+                }),
+                Instant::now(),
+                &AppServices::stub(),
+            );
+            runner
+                .execute_effects(
+                    effects,
+                    &mut renderer,
+                    &mut state,
+                    &completion_engine,
                     &AppServices::stub(),
                 )
                 .await
                 .unwrap();
 
-            (actions, phase)
+            timeout(Duration::from_secs(1), async {
+                while !dropped.load(Ordering::SeqCst) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("context termination should drop the pending query task");
+            assert!(!state.query.is_current_run(run_id));
         }
 
         #[tokio::test]
-        async fn loads_edited_text_back_between_suspend_and_resume() {
-            let (actions, phase) = run_open(Ok("select 2".to_string())).await;
+        async fn cancelling_context_drops_pending_table_detail_task() {
+            let (started_tx, started_rx) = oneshot::channel();
+            let dropped = Arc::new(AtomicBool::new(false));
+            let provider = PendingTableDetailProvider {
+                started: Mutex::new(Some(started_tx)),
+                dropped: Arc::clone(&dropped),
+            };
+            let (action_tx, _action_rx) = mpsc::channel(8);
+            let runner = test_fixtures::make_runner(
+                Arc::new(provider),
+                Arc::new(MockQueryExecutor::new()),
+                Arc::new(MockConnectionStore::new()),
+                action_tx,
+            );
+            let mut state = AppState::new("test".to_string());
+            let completion_engine = RefCell::new(CompletionEngine::new());
+            let mut renderer = NoopRenderer;
 
-            assert_eq!(actions.len(), 1);
-            assert!(matches!(
-                &actions[0],
-                Action::ExternalEditorFinished {
-                    target: ExternalEditorTarget::SqlEditor,
-                    content,
-                } if content == "select 2"
-            ));
-            assert_eq!(phase.get(), PHASE_RESUMED);
+            runner
+                .execute_effects(
+                    vec![Effect::FetchTableDetail {
+                        dsn: "postgres://localhost/current".to_string(),
+                        schema: "public".to_string(),
+                        table: "users".to_string(),
+                        generation: 1,
+                        run_id: 1,
+                    }],
+                    &mut renderer,
+                    &mut state,
+                    &completion_engine,
+                    &AppServices::stub(),
+                )
+                .await
+                .unwrap();
+            timeout(Duration::from_secs(1), started_rx)
+                .await
+                .expect("pending table detail should start")
+                .expect("started signal should be sent");
+
+            let shutdown_effects = reduce(
+                &mut state,
+                Action::Quit,
+                Instant::now(),
+                &AppServices::stub(),
+            );
+            assert!(state.should_quit);
+            runner
+                .execute_effects(
+                    shutdown_effects,
+                    &mut renderer,
+                    &mut state,
+                    &completion_engine,
+                    &AppServices::stub(),
+                )
+                .await
+                .unwrap();
+
+            timeout(Duration::from_secs(1), async {
+                while !dropped.load(Ordering::SeqCst) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("context cancellation should drop the pending table detail task");
+        }
+    }
+
+    mod metadata_context_termination {
+        use std::future::pending;
+        use std::sync::Mutex;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use tokio::sync::oneshot;
+        use tokio::time::{Duration, timeout};
+
+        use super::*;
+        use crate::domain::Table;
+        use crate::domain::connection::{ConnectionId, DatabaseType};
+        use crate::ports::outbound::DbOperationError;
+        use crate::update::action::ConnectionTarget;
+        use crate::update::reducer::reduce;
+
+        struct DropSignal(Arc<AtomicUsize>);
+
+        impl Drop for DropSignal {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        struct PendingMetadataProvider {
+            metadata_started: Mutex<Option<oneshot::Sender<()>>>,
+            effective_user_started: Mutex<Option<oneshot::Sender<()>>>,
+            effective_user_result: Mutex<Option<oneshot::Receiver<String>>>,
+            dropped: Arc<AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl MetadataProvider for PendingMetadataProvider {
+            async fn fetch_metadata(
+                &self,
+                _dsn: &str,
+            ) -> Result<DatabaseMetadata, DbOperationError> {
+                let _guard = DropSignal(Arc::clone(&self.dropped));
+                self.metadata_started
+                    .lock()
+                    .expect("metadata started signal lock poisoned")
+                    .take()
+                    .expect("metadata should start once")
+                    .send(())
+                    .ok();
+                pending().await
+            }
+
+            async fn fetch_effective_user(
+                &self,
+                _dsn: &str,
+            ) -> Result<Option<String>, DbOperationError> {
+                let _guard = DropSignal(Arc::clone(&self.dropped));
+                self.effective_user_started
+                    .lock()
+                    .expect("effective user started signal lock poisoned")
+                    .take()
+                    .expect("effective user should start once")
+                    .send(())
+                    .ok();
+                let result = self.effective_user_result.lock().unwrap().take();
+                match result {
+                    Some(result) => Ok(Some(result.await.unwrap())),
+                    None => pending().await,
+                }
+            }
+
+            async fn fetch_table_detail(
+                &self,
+                _dsn: &str,
+                _schema: &str,
+                _table: &str,
+            ) -> Result<Table, DbOperationError> {
+                unreachable!("test only starts metadata tasks")
+            }
+
+            async fn fetch_table_columns_and_fks(
+                &self,
+                _dsn: &str,
+                _schema: &str,
+                _table: &str,
+            ) -> Result<Table, DbOperationError> {
+                unreachable!("test only starts metadata tasks")
+            }
+
+            async fn fetch_table_signatures(
+                &self,
+                _dsn: &str,
+            ) -> Result<TableSignatureSnapshot, DbOperationError> {
+                unreachable!("test only starts metadata tasks")
+            }
+        }
+
+        struct ProbeThatObservesDrop {
+            metadata_dropped: Arc<AtomicUsize>,
+            started: Mutex<Option<oneshot::Sender<bool>>>,
+        }
+
+        #[async_trait::async_trait]
+        impl MySqlConnectionProbe for ProbeThatObservesDrop {
+            async fn probe(
+                &self,
+                _dsn: &str,
+            ) -> Result<MySqlConnectionProbeResult, DbOperationError> {
+                self.started
+                    .lock()
+                    .expect("probe started signal lock poisoned")
+                    .take()
+                    .expect("probe should start once")
+                    .send(self.metadata_dropped.load(Ordering::SeqCst) > 0)
+                    .ok();
+                Ok(MySqlConnectionProbeResult {
+                    lower_case_table_names: 0,
+                })
+            }
         }
 
         #[tokio::test]
-        async fn restores_the_terminal_when_the_editor_fails() {
-            let (actions, phase) = run_open(Err(ExternalEditorError::NotConfigured)).await;
+        async fn drops_old_metadata_before_new_mysql_probe_starts() {
+            let (metadata_started_tx, metadata_started_rx) = oneshot::channel();
+            let (probe_started_tx, probe_started_rx) = oneshot::channel();
+            let dropped = Arc::new(AtomicUsize::new(0));
+            let metadata_provider = PendingMetadataProvider {
+                metadata_started: Mutex::new(Some(metadata_started_tx)),
+                effective_user_started: Mutex::new(None),
+                effective_user_result: Mutex::new(None),
+                dropped: Arc::clone(&dropped),
+            };
+            let probe = ProbeThatObservesDrop {
+                metadata_dropped: Arc::clone(&dropped),
+                started: Mutex::new(Some(probe_started_tx)),
+            };
+            let (action_tx, _action_rx) = mpsc::channel(8);
+            let runner = test_fixtures::make_runner_with_dsn_and_probe(
+                Arc::new(metadata_provider),
+                Arc::new(MockQueryExecutor::new()),
+                Arc::new(MockConnectionStore::new()),
+                action_tx,
+                Arc::new(test_fixtures::NoopDsnBuilder),
+                Arc::new(probe),
+            );
+            let mut state = AppState::new("test".to_string());
+            let completion_engine = RefCell::new(CompletionEngine::new());
+            let mut renderer = NoopRenderer;
 
-            assert_eq!(actions.len(), 1);
-            assert!(matches!(actions[0], Action::ExternalEditorFailed(_)));
-            assert_eq!(phase.get(), PHASE_RESUMED);
+            runner
+                .execute_effects(
+                    vec![Effect::FetchMetadata {
+                        dsn: "postgres://localhost/old".to_string(),
+                        run_id: 1,
+                    }],
+                    &mut renderer,
+                    &mut state,
+                    &completion_engine,
+                    &AppServices::stub(),
+                )
+                .await
+                .unwrap();
+            metadata_started_rx.await.expect("metadata should start");
+
+            runner
+                .execute_effects(
+                    vec![Effect::ProbeMySqlConnection {
+                        target: ConnectionTarget {
+                            id: ConnectionId::new(),
+                            dsn: "mysql://localhost/new".to_string(),
+                            name: "new".to_string(),
+                            database_type: DatabaseType::MySQL,
+                            database: Some("new".to_string()),
+                        },
+                        run_id: 2,
+                    }],
+                    &mut renderer,
+                    &mut state,
+                    &completion_engine,
+                    &AppServices::stub(),
+                )
+                .await
+                .unwrap();
+
+            assert!(
+                probe_started_rx
+                    .await
+                    .expect("probe should start after cancellation")
+            );
+            assert_eq!(dropped.load(Ordering::SeqCst), 1);
+        }
+
+        #[tokio::test]
+        async fn removed_table_allows_new_effective_user_result_after_old_tasks_join() {
+            let (started_tx, started_rx) = oneshot::channel();
+            let (result_tx, result_rx) = oneshot::channel();
+            let provider = PendingMetadataProvider {
+                metadata_started: Mutex::new(None),
+                effective_user_started: Mutex::new(Some(started_tx)),
+                effective_user_result: Mutex::new(Some(result_rx)),
+                dropped: Arc::new(AtomicUsize::new(0)),
+            };
+            let (action_tx, mut action_rx) = mpsc::channel(8);
+            let runner = test_fixtures::make_runner(
+                Arc::new(provider),
+                Arc::new(MockQueryExecutor::new()),
+                Arc::new(MockConnectionStore::new()),
+                action_tx,
+            );
+            let old_dropped = Arc::new(AtomicUsize::new(0));
+            let (old_started_tx, old_started_rx) = oneshot::channel();
+            runner
+                .query_tasks
+                .replace({
+                    let dropped = Arc::clone(&old_dropped);
+                    async move {
+                        let _guard = DropSignal(dropped);
+                        old_started_tx.send(()).unwrap();
+                        pending::<()>().await;
+                    }
+                })
+                .await;
+            old_started_rx.await.unwrap();
+            let mut state = AppState::new("test".to_string());
+            state.session.activate_connection_with_dsn(
+                &ConnectionId::new(),
+                "test",
+                DatabaseType::PostgreSQL,
+                "postgres://localhost/test",
+            );
+            let _ = state
+                .session
+                .select_table("public", "users", &mut state.query);
+            let run_id = state.session.begin_metadata_refresh();
+            let services = AppServices::stub();
+            let effects = reduce(
+                &mut state,
+                Action::MetadataLoaded {
+                    run_id,
+                    metadata: Arc::new(DatabaseMetadata::new("test".to_string())),
+                },
+                Instant::now(),
+                &services,
+            );
+
+            runner
+                .execute_effects(
+                    effects,
+                    &mut NoopRenderer,
+                    &mut state,
+                    &RefCell::new(CompletionEngine::new()),
+                    &services,
+                )
+                .await
+                .unwrap();
+            timeout(Duration::from_secs(1), started_rx)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(old_dropped.load(Ordering::SeqCst), 1);
+            result_tx.send("refreshed_user".to_string()).unwrap();
+            let action = timeout(Duration::from_secs(1), action_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(matches!(action, Action::EffectiveUserLoaded { .. }));
+            reduce(&mut state, action, Instant::now(), &services);
+
+            assert_eq!(state.session.effective_user(), Some("refreshed_user"));
+            assert!(state.session.selected_table_key().is_none());
+        }
+
+        #[tokio::test]
+        async fn quit_drops_effective_user_and_delayed_prefetch_tasks() {
+            let (effective_user_started_tx, effective_user_started_rx) = oneshot::channel();
+            let dropped = Arc::new(AtomicUsize::new(0));
+            let provider = PendingMetadataProvider {
+                metadata_started: Mutex::new(None),
+                effective_user_started: Mutex::new(Some(effective_user_started_tx)),
+                effective_user_result: Mutex::new(None),
+                dropped: Arc::clone(&dropped),
+            };
+            let (action_tx, mut action_rx) = mpsc::channel(8);
+            let runner = test_fixtures::make_runner(
+                Arc::new(provider),
+                Arc::new(MockQueryExecutor::new()),
+                Arc::new(MockConnectionStore::new()),
+                action_tx,
+            );
+            let mut state = AppState::new("test".to_string());
+            let completion_engine = RefCell::new(CompletionEngine::new());
+            let mut renderer = NoopRenderer;
+
+            runner
+                .execute_effects(
+                    vec![
+                        Effect::FetchEffectiveUser {
+                            dsn: "postgres://localhost/current".to_string(),
+                            run_id: 1,
+                        },
+                        Effect::DelayedProcessPrefetchQueue {
+                            run_id: 1,
+                            delay_secs: 60,
+                        },
+                    ],
+                    &mut renderer,
+                    &mut state,
+                    &completion_engine,
+                    &AppServices::stub(),
+                )
+                .await
+                .unwrap();
+            effective_user_started_rx
+                .await
+                .expect("effective user should start");
+
+            let shutdown_effects = reduce(
+                &mut state,
+                Action::Quit,
+                Instant::now(),
+                &AppServices::stub(),
+            );
+            runner
+                .execute_effects(
+                    shutdown_effects,
+                    &mut renderer,
+                    &mut state,
+                    &completion_engine,
+                    &AppServices::stub(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(dropped.load(Ordering::SeqCst), 1);
+            assert!(
+                timeout(Duration::from_millis(100), action_rx.recv())
+                    .await
+                    .is_err()
+            );
+        }
+    }
+
+    mod connection_task_lifecycle {
+        use std::fs;
+        use std::future::pending;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use tempfile::tempdir;
+        use tokio::sync::mpsc::UnboundedSender;
+        use tokio::time::{Duration, timeout};
+
+        use super::*;
+        use crate::domain::Table;
+        use crate::domain::connection::{
+            ConnectionConfig, ConnectionId, DatabaseType, MySqlConnectionConfig, MySqlSslMode,
+            PostgresConnectionConfig, SqliteConnectionConfig, SslMode,
+        };
+        use crate::ports::outbound::DbOperationError;
+        use crate::update::action::ConnectionTarget;
+        use crate::update::reducer::reduce;
+
+        struct DropSignal(Arc<AtomicUsize>);
+
+        impl Drop for DropSignal {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        struct PendingMySqlConnectionProbe {
+            started: UnboundedSender<String>,
+            dropped: Arc<AtomicUsize>,
+        }
+
+        struct PendingMetadataProvider {
+            started: UnboundedSender<String>,
+            dropped: Arc<AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl MySqlConnectionProbe for PendingMySqlConnectionProbe {
+            async fn probe(
+                &self,
+                dsn: &str,
+            ) -> Result<MySqlConnectionProbeResult, DbOperationError> {
+                let _drop_signal = DropSignal(Arc::clone(&self.dropped));
+                self.started
+                    .send(dsn.to_string())
+                    .expect("probe receiver should stay alive");
+                pending().await
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl MetadataProvider for PendingMetadataProvider {
+            async fn fetch_metadata(
+                &self,
+                dsn: &str,
+            ) -> Result<DatabaseMetadata, DbOperationError> {
+                let _drop_signal = DropSignal(Arc::clone(&self.dropped));
+                self.started
+                    .send(dsn.to_string())
+                    .expect("metadata receiver should stay alive");
+                pending().await
+            }
+
+            async fn fetch_table_detail(
+                &self,
+                _dsn: &str,
+                _schema: &str,
+                _table: &str,
+            ) -> Result<Table, DbOperationError> {
+                pending().await
+            }
+
+            async fn fetch_table_columns_and_fks(
+                &self,
+                _dsn: &str,
+                _schema: &str,
+                _table: &str,
+            ) -> Result<Table, DbOperationError> {
+                pending().await
+            }
+
+            async fn fetch_table_signatures(
+                &self,
+                _dsn: &str,
+            ) -> Result<TableSignatureSnapshot, DbOperationError> {
+                pending().await
+            }
+        }
+
+        fn mysql_target(dsn: &str) -> ConnectionTarget {
+            ConnectionTarget {
+                id: ConnectionId::new(),
+                dsn: dsn.to_string(),
+                name: dsn.to_string(),
+                database_type: DatabaseType::MySQL,
+                database: Some("app".to_string()),
+            }
+        }
+
+        fn mysql_config() -> ConnectionConfig {
+            ConnectionConfig::MySQL(MySqlConnectionConfig::new(
+                "localhost",
+                3306,
+                Some("app".to_string()),
+                "user",
+                "secret",
+                MySqlSslMode::Required,
+            ))
+        }
+
+        fn postgres_config() -> ConnectionConfig {
+            ConnectionConfig::PostgreSQL(PostgresConnectionConfig::new(
+                "localhost",
+                5432,
+                "app",
+                "user",
+                "secret",
+                SslMode::Prefer,
+            ))
+        }
+
+        #[tokio::test]
+        async fn replacing_probe_aborts_previous_task_before_starting_new_one() {
+            let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+            let dropped = Arc::new(AtomicUsize::new(0));
+            let probe = PendingMySqlConnectionProbe {
+                started: started_tx,
+                dropped: Arc::clone(&dropped),
+            };
+            let (action_tx, _action_rx) = mpsc::channel(8);
+            let runner = test_fixtures::make_runner_with_dsn_and_probe(
+                Arc::new(MockMetadataProvider::new()),
+                Arc::new(MockQueryExecutor::new()),
+                Arc::new(MockConnectionStore::new()),
+                action_tx,
+                Arc::new(test_fixtures::NoopDsnBuilder),
+                Arc::new(probe),
+            );
+            let mut state = AppState::new("test".to_string());
+            let completion_engine = RefCell::new(CompletionEngine::new());
+            let mut renderer = NoopRenderer;
+
+            runner
+                .execute_effects(
+                    vec![Effect::ProbeMySqlConnection {
+                        target: mysql_target("mysql://localhost/old"),
+                        run_id: 1,
+                    }],
+                    &mut renderer,
+                    &mut state,
+                    &completion_engine,
+                    &AppServices::stub(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                started_rx.recv().await.as_deref(),
+                Some("mysql://localhost/old")
+            );
+
+            runner
+                .execute_effects(
+                    vec![Effect::ProbeMySqlConnection {
+                        target: mysql_target("mysql://localhost/new"),
+                        run_id: 2,
+                    }],
+                    &mut renderer,
+                    &mut state,
+                    &completion_engine,
+                    &AppServices::stub(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(dropped.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                started_rx.recv().await.as_deref(),
+                Some("mysql://localhost/new")
+            );
+
+            runner
+                .execute_effects(
+                    vec![Effect::CancelTrackedTasks],
+                    &mut renderer,
+                    &mut state,
+                    &completion_engine,
+                    &AppServices::stub(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(dropped.load(Ordering::SeqCst), 2);
+        }
+
+        #[tokio::test]
+        async fn replacing_save_probe_aborts_previous_task_before_new_probe() {
+            let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+            let dropped = Arc::new(AtomicUsize::new(0));
+            let probe = PendingMySqlConnectionProbe {
+                started: started_tx,
+                dropped: Arc::clone(&dropped),
+            };
+            let (action_tx, _action_rx) = mpsc::channel(8);
+            let runner = test_fixtures::make_runner_with_dsn_and_probe(
+                Arc::new(MockMetadataProvider::new()),
+                Arc::new(MockQueryExecutor::new()),
+                Arc::new(MockConnectionStore::new()),
+                action_tx,
+                Arc::new(test_fixtures::NoopDsnBuilder),
+                Arc::new(probe),
+            );
+            let mut state = AppState::new("test".to_string());
+            let completion_engine = RefCell::new(CompletionEngine::new());
+            let mut renderer = NoopRenderer;
+
+            runner
+                .execute_effects(
+                    vec![Effect::SaveAndConnect {
+                        id: None,
+                        name: "old".to_string(),
+                        config: mysql_config(),
+                        run_id: 1,
+                        run_guard: test_fixtures::active_connection_save_guard(1),
+                    }],
+                    &mut renderer,
+                    &mut state,
+                    &completion_engine,
+                    &AppServices::stub(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(started_rx.recv().await.as_deref(), Some(""));
+
+            runner
+                .execute_effects(
+                    vec![Effect::ProbeMySqlConnection {
+                        target: mysql_target("mysql://localhost/new"),
+                        run_id: 2,
+                    }],
+                    &mut renderer,
+                    &mut state,
+                    &completion_engine,
+                    &AppServices::stub(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(dropped.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                started_rx.recv().await.as_deref(),
+                Some("mysql://localhost/new")
+            );
+
+            runner
+                .execute_effects(
+                    vec![Effect::CancelTrackedTasks],
+                    &mut renderer,
+                    &mut state,
+                    &completion_engine,
+                    &AppServices::stub(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(dropped.load(Ordering::SeqCst), 2);
+        }
+
+        #[tokio::test]
+        async fn quitting_aborts_pending_mysql_probe_task() {
+            let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+            let dropped = Arc::new(AtomicUsize::new(0));
+            let probe = PendingMySqlConnectionProbe {
+                started: started_tx,
+                dropped: Arc::clone(&dropped),
+            };
+            let (action_tx, _action_rx) = mpsc::channel(8);
+            let runner = test_fixtures::make_runner_with_dsn_and_probe(
+                Arc::new(MockMetadataProvider::new()),
+                Arc::new(MockQueryExecutor::new()),
+                Arc::new(MockConnectionStore::new()),
+                action_tx,
+                Arc::new(test_fixtures::NoopDsnBuilder),
+                Arc::new(probe),
+            );
+            let mut state = AppState::new("test".to_string());
+            let completion_engine = RefCell::new(CompletionEngine::new());
+            let mut renderer = NoopRenderer;
+
+            runner
+                .execute_effects(
+                    vec![Effect::ProbeMySqlConnection {
+                        target: mysql_target("mysql://localhost/pending"),
+                        run_id: 1,
+                    }],
+                    &mut renderer,
+                    &mut state,
+                    &completion_engine,
+                    &AppServices::stub(),
+                )
+                .await
+                .unwrap();
+            timeout(Duration::from_secs(1), started_rx.recv())
+                .await
+                .expect("pending probe should start")
+                .expect("probe start signal should be sent");
+
+            let shutdown_effects = reduce(
+                &mut state,
+                Action::Quit,
+                Instant::now(),
+                &AppServices::stub(),
+            );
+            assert!(state.should_quit);
+            runner
+                .execute_effects(
+                    shutdown_effects,
+                    &mut renderer,
+                    &mut state,
+                    &completion_engine,
+                    &AppServices::stub(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(dropped.load(Ordering::SeqCst), 1);
+        }
+
+        #[tokio::test]
+        async fn quitting_cancels_sqlite_save_before_persistence() {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("app.db");
+            fs::write(&path, b"").unwrap();
+
+            let (action_tx, mut action_rx) = mpsc::channel(8);
+            let mut store = MockConnectionStore::new();
+            store.expect_save().never();
+            let runner = test_fixtures::make_runner_with_dsn(
+                Arc::new(MockMetadataProvider::new()),
+                Arc::new(MockQueryExecutor::new()),
+                Arc::new(store),
+                action_tx,
+                Arc::new(test_fixtures::NoopDsnBuilder),
+            );
+            let mut state = AppState::new("test".to_string());
+            let run_id = state.session.begin_connection_save();
+            let run_guard = state.session.connection_save_guard();
+            let completion_engine = RefCell::new(CompletionEngine::new());
+            let mut renderer = NoopRenderer;
+
+            runner
+                .execute_effects(
+                    vec![Effect::SaveAndConnect {
+                        id: None,
+                        name: "Local".to_string(),
+                        config: ConnectionConfig::SQLite(
+                            SqliteConnectionConfig::new(path.to_string_lossy().to_string())
+                                .unwrap(),
+                        ),
+                        run_id,
+                        run_guard,
+                    }],
+                    &mut renderer,
+                    &mut state,
+                    &completion_engine,
+                    &AppServices::stub(),
+                )
+                .await
+                .unwrap();
+
+            let shutdown_effects = reduce(
+                &mut state,
+                Action::Quit,
+                Instant::now(),
+                &AppServices::stub(),
+            );
+            assert!(state.should_quit);
+            tokio::task::yield_now().await;
+            runner
+                .execute_effects(
+                    shutdown_effects,
+                    &mut renderer,
+                    &mut state,
+                    &completion_engine,
+                    &AppServices::stub(),
+                )
+                .await
+                .unwrap();
+
+            assert!(
+                timeout(Duration::from_millis(100), action_rx.recv())
+                    .await
+                    .is_err()
+            );
+        }
+
+        #[tokio::test]
+        async fn cancelling_postgres_save_aborts_metadata_before_action() {
+            let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+            let dropped = Arc::new(AtomicUsize::new(0));
+            let provider = PendingMetadataProvider {
+                started: started_tx,
+                dropped: Arc::clone(&dropped),
+            };
+            let (action_tx, mut action_rx) = mpsc::channel(8);
+            let runner = test_fixtures::make_runner(
+                Arc::new(provider),
+                Arc::new(MockQueryExecutor::new()),
+                Arc::new(MockConnectionStore::new()),
+                action_tx,
+            );
+            let mut state = AppState::new("test".to_string());
+            let completion_engine = RefCell::new(CompletionEngine::new());
+            let mut renderer = NoopRenderer;
+
+            runner
+                .execute_effects(
+                    vec![Effect::SaveAndConnect {
+                        id: None,
+                        name: "PostgreSQL".to_string(),
+                        config: postgres_config(),
+                        run_id: 1,
+                        run_guard: test_fixtures::active_connection_save_guard(1),
+                    }],
+                    &mut renderer,
+                    &mut state,
+                    &completion_engine,
+                    &AppServices::stub(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(started_rx.recv().await.as_deref(), Some(""));
+
+            runner
+                .execute_effects(
+                    vec![Effect::CancelConnectionTask],
+                    &mut renderer,
+                    &mut state,
+                    &completion_engine,
+                    &AppServices::stub(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(dropped.load(Ordering::SeqCst), 1);
+            assert!(
+                timeout(Duration::from_millis(100), action_rx.recv())
+                    .await
+                    .is_err()
+            );
+        }
+    }
+
+    mod smart_er_refresh_lifecycle {
+        use std::future::pending;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use tokio::sync::mpsc::UnboundedSender;
+        use tokio::time::{Duration, timeout};
+
+        use super::*;
+        use crate::domain::Table;
+        use crate::ports::outbound::DbOperationError;
+        use crate::update::reducer::reduce;
+
+        struct DropSignal(Arc<AtomicUsize>);
+
+        impl Drop for DropSignal {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        struct PendingSmartErProvider {
+            started: UnboundedSender<String>,
+            dropped: Arc<AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl MetadataProvider for PendingSmartErProvider {
+            async fn fetch_metadata(
+                &self,
+                dsn: &str,
+            ) -> Result<DatabaseMetadata, DbOperationError> {
+                let _guard = DropSignal(Arc::clone(&self.dropped));
+                self.started.send(dsn.to_string()).ok();
+                pending().await
+            }
+
+            async fn fetch_table_detail(
+                &self,
+                _dsn: &str,
+                _schema: &str,
+                _table: &str,
+            ) -> Result<Table, DbOperationError> {
+                unreachable!("test only starts smart ER refresh")
+            }
+
+            async fn fetch_table_columns_and_fks(
+                &self,
+                _dsn: &str,
+                _schema: &str,
+                _table: &str,
+            ) -> Result<Table, DbOperationError> {
+                unreachable!("test only starts smart ER refresh")
+            }
+
+            async fn fetch_table_signatures(
+                &self,
+                _dsn: &str,
+            ) -> Result<TableSignatureSnapshot, DbOperationError> {
+                unreachable!("test only starts smart ER refresh")
+            }
+        }
+
+        async fn wait_for_no_action(action_rx: &mut mpsc::Receiver<Action>) {
+            assert!(
+                timeout(Duration::from_millis(100), action_rx.recv())
+                    .await
+                    .is_err()
+            );
+        }
+
+        fn runner_with_pending_provider(
+            started: UnboundedSender<String>,
+            dropped: Arc<AtomicUsize>,
+            action_tx: mpsc::Sender<Action>,
+        ) -> EffectRunner {
+            test_fixtures::make_runner(
+                Arc::new(PendingSmartErProvider { started, dropped }),
+                Arc::new(MockQueryExecutor::new()),
+                Arc::new(MockConnectionStore::new()),
+                action_tx,
+            )
+        }
+
+        #[tokio::test]
+        async fn rerun_aborts_previous_refresh_before_starting_new_one() {
+            let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+            let dropped = Arc::new(AtomicUsize::new(0));
+            let (action_tx, mut action_rx) = mpsc::channel(8);
+            let runner = runner_with_pending_provider(started_tx, Arc::clone(&dropped), action_tx);
+            let mut state = AppState::new("test".to_string());
+            let completion_engine = RefCell::new(CompletionEngine::new());
+            let mut renderer = NoopRenderer;
+
+            runner
+                .execute_effects(
+                    vec![Effect::SmartErRefresh {
+                        dsn: "postgres://localhost/old".to_string(),
+                        run_id: 1,
+                    }],
+                    &mut renderer,
+                    &mut state,
+                    &completion_engine,
+                    &AppServices::stub(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                started_rx.recv().await.as_deref(),
+                Some("postgres://localhost/old")
+            );
+
+            runner
+                .execute_effects(
+                    vec![Effect::SmartErRefresh {
+                        dsn: "postgres://localhost/new".to_string(),
+                        run_id: 2,
+                    }],
+                    &mut renderer,
+                    &mut state,
+                    &completion_engine,
+                    &AppServices::stub(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(dropped.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                started_rx.recv().await.as_deref(),
+                Some("postgres://localhost/new")
+            );
+            wait_for_no_action(&mut action_rx).await;
+        }
+
+        #[tokio::test]
+        async fn connection_switch_aborts_pending_refresh_and_emits_no_action() {
+            let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+            let dropped = Arc::new(AtomicUsize::new(0));
+            let (action_tx, mut action_rx) = mpsc::channel(8);
+            let runner = runner_with_pending_provider(started_tx, Arc::clone(&dropped), action_tx);
+            let mut state = AppState::new("test".to_string());
+            let completion_engine = RefCell::new(CompletionEngine::new());
+            let mut renderer = NoopRenderer;
+
+            runner
+                .execute_effects(
+                    vec![Effect::SmartErRefresh {
+                        dsn: "postgres://localhost/current".to_string(),
+                        run_id: 1,
+                    }],
+                    &mut renderer,
+                    &mut state,
+                    &completion_engine,
+                    &AppServices::stub(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                started_rx.recv().await.as_deref(),
+                Some("postgres://localhost/current")
+            );
+
+            runner
+                .execute_effects(
+                    vec![Effect::SwitchConnection {
+                        connection_index: usize::MAX,
+                    }],
+                    &mut renderer,
+                    &mut state,
+                    &completion_engine,
+                    &AppServices::stub(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(dropped.load(Ordering::SeqCst), 1);
+            wait_for_no_action(&mut action_rx).await;
+        }
+
+        #[tokio::test]
+        async fn metadata_refresh_aborts_pending_smart_er_refresh() {
+            let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+            let dropped = Arc::new(AtomicUsize::new(0));
+            let (action_tx, mut action_rx) = mpsc::channel(8);
+            let runner = runner_with_pending_provider(started_tx, Arc::clone(&dropped), action_tx);
+            let mut state = AppState::new("test".to_string());
+            let completion_engine = RefCell::new(CompletionEngine::new());
+            let mut renderer = NoopRenderer;
+
+            runner
+                .execute_effects(
+                    vec![Effect::SmartErRefresh {
+                        dsn: "postgres://localhost/current".to_string(),
+                        run_id: 1,
+                    }],
+                    &mut renderer,
+                    &mut state,
+                    &completion_engine,
+                    &AppServices::stub(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                started_rx.recv().await.as_deref(),
+                Some("postgres://localhost/current")
+            );
+
+            runner
+                .execute_effects(
+                    vec![Effect::FetchMetadata {
+                        dsn: "postgres://localhost/current".to_string(),
+                        run_id: 2,
+                    }],
+                    &mut renderer,
+                    &mut state,
+                    &completion_engine,
+                    &AppServices::stub(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(dropped.load(Ordering::SeqCst), 1);
+            wait_for_no_action(&mut action_rx).await;
+        }
+
+        #[tokio::test]
+        async fn quit_aborts_pending_refresh_and_emits_no_action() {
+            let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+            let dropped = Arc::new(AtomicUsize::new(0));
+            let (action_tx, mut action_rx) = mpsc::channel(8);
+            let runner = runner_with_pending_provider(started_tx, Arc::clone(&dropped), action_tx);
+            let mut state = AppState::new("test".to_string());
+            let completion_engine = RefCell::new(CompletionEngine::new());
+            let mut renderer = NoopRenderer;
+
+            runner
+                .execute_effects(
+                    vec![Effect::SmartErRefresh {
+                        dsn: "postgres://localhost/current".to_string(),
+                        run_id: 1,
+                    }],
+                    &mut renderer,
+                    &mut state,
+                    &completion_engine,
+                    &AppServices::stub(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                started_rx.recv().await.as_deref(),
+                Some("postgres://localhost/current")
+            );
+
+            let shutdown_effects = reduce(
+                &mut state,
+                Action::Quit,
+                Instant::now(),
+                &AppServices::stub(),
+            );
+            assert!(state.should_quit);
+            runner
+                .execute_effects(
+                    shutdown_effects,
+                    &mut renderer,
+                    &mut state,
+                    &completion_engine,
+                    &AppServices::stub(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(dropped.load(Ordering::SeqCst), 1);
+            wait_for_no_action(&mut action_rx).await;
         }
     }
 }

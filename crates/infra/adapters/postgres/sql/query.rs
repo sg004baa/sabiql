@@ -93,6 +93,10 @@ impl PostgresAdapter {
         "
     }
 
+    pub(in crate::adapters::postgres) fn effective_user_query() -> &'static str {
+        "SELECT current_user"
+    }
+
     pub(in crate::adapters::postgres) fn columns_query(schema: &str, table: &str) -> String {
         format!(
             r"
@@ -114,6 +118,8 @@ impl PostgresAdapter {
                         WHERE i.indrelid = cl.oid
                           AND i.indisunique
                           AND NOT i.indisprimary
+                          AND i.indpred IS NULL
+                          AND i.indexprs IS NULL
                           AND array_length(i.indkey, 1) = 1
                           AND a.attnum = ANY(i.indkey)
                     ) as is_unique,
@@ -189,9 +195,11 @@ impl PostgresAdapter {
             FROM (
                 SELECT
                     idx.relname as name,
-                    array_agg(a.attname ORDER BY array_position(ix.indkey, a.attnum)) as columns,
+                    array_agg(key_part.column_name ORDER BY key_part.key_position) as columns,
                     ix.indisunique as is_unique,
                     ix.indisprimary as is_primary,
+                    bool_or(ix.indpred IS NOT NULL) as is_partial,
+                    bool_or(ix.indexprs IS NOT NULL) as has_expression,
                     am.amname as index_type,
                     pg_get_indexdef(idx.oid) as definition
                 FROM pg_index ix
@@ -199,7 +207,17 @@ impl PostgresAdapter {
                 JOIN pg_class tbl ON tbl.oid = ix.indrelid
                 JOIN pg_namespace n ON n.oid = tbl.relnamespace
                 JOIN pg_am am ON am.oid = idx.relam
-                JOIN pg_attribute a ON a.attrelid = tbl.oid AND a.attnum = ANY(ix.indkey)
+                JOIN LATERAL (
+                    SELECT
+                        key_part.key_position,
+                        CASE
+                            WHEN key_part.attnum > 0 THEN a.attname
+                            ELSE pg_get_indexdef(idx.oid, key_part.key_position::integer, true)
+                        END as column_name
+                    FROM unnest(ix.indkey) WITH ORDINALITY AS key_part(attnum, key_position)
+                    LEFT JOIN pg_attribute a
+                        ON a.attrelid = tbl.oid AND a.attnum = key_part.attnum
+                ) key_part ON TRUE
                 WHERE n.nspname = {}
                   AND tbl.relname = {}
                 GROUP BY idx.relname, ix.indisunique, ix.indisprimary, am.amname, idx.oid
@@ -244,7 +262,7 @@ impl PostgresAdapter {
         )
     }
 
-    pub(in crate::adapters::postgres) fn rls_query(schema: &str, table: &str) -> String {
+    fn rls_query(schema: &str, table: &str) -> String {
         format!(
             r"
             SELECT json_build_object(
@@ -295,8 +313,8 @@ impl PostgresAdapter {
                         CASE WHEN (tg.tgtype & 16) != 0 THEN 'UPDATE' END,
                         CASE WHEN (tg.tgtype & 32) != 0 THEN 'TRUNCATE' END
                     ], NULL) AS events,
-                    p.proname AS function_name,
-                    p.prosecdef AS security_definer
+                    p.proname AS definition,
+                    CASE WHEN p.prosecdef THEN 'DEFINER' ELSE 'INVOKER' END AS security_context
                 FROM pg_trigger tg
                 JOIN pg_class c ON c.oid = tg.tgrelid
                 JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -311,7 +329,7 @@ impl PostgresAdapter {
         )
     }
 
-    pub(in crate::adapters::postgres) fn table_info_query(schema: &str, table: &str) -> String {
+    fn table_info_query(schema: &str, table: &str) -> String {
         format!(
             r"
             SELECT row_to_json(t)
@@ -338,10 +356,19 @@ impl PostgresAdapter {
         format!(
             r"
             SELECT json_build_object(
+                'exists', EXISTS (
+                    SELECT 1
+                    FROM pg_class c
+                    JOIN pg_namespace n ON n.oid = c.relnamespace
+                    WHERE n.nspname = {schema}
+                      AND c.relname = {table}
+                ),
                 'columns', ({columns}),
                 'foreign_keys', ({fks})
             )
             ",
+            schema = quote_literal(schema),
+            table = quote_literal(table),
             columns = Self::columns_query(schema, table).trim(),
             fks = Self::foreign_keys_query(schema, table).trim(),
         )
@@ -351,6 +378,13 @@ impl PostgresAdapter {
         format!(
             r"
             SELECT json_build_object(
+                'exists', EXISTS (
+                    SELECT 1
+                    FROM pg_class c
+                    JOIN pg_namespace n ON n.oid = c.relnamespace
+                    WHERE n.nspname = {schema}
+                      AND c.relname = {table}
+                ),
                 'columns', ({columns}),
                 'indexes', ({indexes}),
                 'foreign_keys', ({fks}),
@@ -359,6 +393,8 @@ impl PostgresAdapter {
                 'table_info', ({table_info})
             )
             ",
+            schema = quote_literal(schema),
+            table = quote_literal(table),
             columns = Self::columns_query(schema, table).trim(),
             indexes = Self::indexes_query(schema, table).trim(),
             fks = Self::foreign_keys_query(schema, table).trim(),
@@ -372,6 +408,14 @@ impl PostgresAdapter {
 #[cfg(test)]
 mod tests {
     use crate::adapters::postgres::PostgresAdapter;
+
+    #[test]
+    fn effective_user_query_selects_current_user() {
+        assert_eq!(
+            PostgresAdapter::effective_user_query(),
+            "SELECT current_user"
+        );
+    }
 
     mod preview_query {
         use super::*;
@@ -500,15 +544,39 @@ mod tests {
         }
     }
 
+    mod index_metadata_queries {
+        use super::*;
+
+        #[test]
+        fn indexes_query_expands_key_parts_in_server_order() {
+            let sql = PostgresAdapter::indexes_query("public", "users");
+
+            assert!(sql.contains("unnest(ix.indkey) WITH ORDINALITY"));
+            assert!(sql.contains("pg_get_indexdef(idx.oid, key_part.key_position::integer, true)"));
+            assert!(sql.contains("array_agg(key_part.column_name ORDER BY key_part.key_position)"));
+            assert!(sql.contains("bool_or(ix.indpred IS NOT NULL) as is_partial"));
+            assert!(sql.contains("bool_or(ix.indexprs IS NOT NULL) as has_expression"));
+        }
+
+        #[test]
+        fn columns_query_excludes_partial_and_expression_indexes_from_unique_columns() {
+            let sql = PostgresAdapter::columns_query("public", "users");
+
+            assert!(sql.contains("AND i.indpred IS NULL"));
+            assert!(sql.contains("AND i.indexprs IS NULL"));
+        }
+    }
+
     mod table_detail_query {
         use super::*;
 
         #[test]
-        fn wraps_all_six_categories_in_json_build_object() {
+        fn wraps_existence_and_all_six_categories_in_json_build_object() {
             let sql = PostgresAdapter::table_detail_query("public", "users");
 
             assert!(sql.contains("json_build_object("));
             for key in [
+                "'exists'",
                 "'columns'",
                 "'indexes'",
                 "'foreign_keys'",
@@ -533,10 +601,11 @@ mod tests {
         use super::*;
 
         #[test]
-        fn wraps_columns_and_fks_only_in_json_build_object() {
+        fn wraps_existence_columns_and_fks_in_json_build_object() {
             let sql = PostgresAdapter::table_columns_and_fks_query("public", "users");
 
             assert!(sql.contains("json_build_object("));
+            assert!(sql.contains("'exists'"));
             assert!(sql.contains("'columns'"));
             assert!(sql.contains("'foreign_keys'"));
             assert!(!sql.contains("'indexes'"));
@@ -562,35 +631,21 @@ mod tests {
         const ESCAPED: &str = "'''; DROP TABLE users; --'";
 
         #[rstest]
-        #[case("columns_query", PostgresAdapter::columns_query(HOSTILE, "t"))]
-        #[case(
-            "columns_query_table",
-            PostgresAdapter::columns_query("public", HOSTILE)
-        )]
-        #[case("indexes_query", PostgresAdapter::indexes_query(HOSTILE, "t"))]
-        #[case(
-            "foreign_keys_query",
-            PostgresAdapter::foreign_keys_query(HOSTILE, "t")
-        )]
-        #[case("rls_query", PostgresAdapter::rls_query(HOSTILE, "t"))]
-        #[case("triggers_query", PostgresAdapter::triggers_query(HOSTILE, "t"))]
-        #[case(
-            "table_detail_query",
-            PostgresAdapter::table_detail_query(HOSTILE, "t")
-        )]
-        #[case(
-            "table_detail_query_table",
-            PostgresAdapter::table_detail_query("public", HOSTILE)
-        )]
-        #[case(
-            "table_columns_and_fks_query",
-            PostgresAdapter::table_columns_and_fks_query(HOSTILE, "t")
-        )]
-        #[case(
-            "table_columns_and_fks_query_table",
-            PostgresAdapter::table_columns_and_fks_query("public", HOSTILE)
-        )]
-        fn hostile_input_is_escaped(#[case] _label: &str, #[case] sql: String) {
+        #[case::columns_query(PostgresAdapter::columns_query(HOSTILE, "t"))]
+        #[case::columns_query_table(PostgresAdapter::columns_query("public", HOSTILE))]
+        #[case::indexes_query(PostgresAdapter::indexes_query(HOSTILE, "t"))]
+        #[case::foreign_keys_query(PostgresAdapter::foreign_keys_query(HOSTILE, "t"))]
+        #[case::rls_query(PostgresAdapter::rls_query(HOSTILE, "t"))]
+        #[case::triggers_query(PostgresAdapter::triggers_query(HOSTILE, "t"))]
+        #[case::table_detail_query(PostgresAdapter::table_detail_query(HOSTILE, "t"))]
+        #[case::table_detail_query_table(PostgresAdapter::table_detail_query("public", HOSTILE))]
+        #[case::table_columns_and_fks_query(PostgresAdapter::table_columns_and_fks_query(
+            HOSTILE, "t"
+        ))]
+        #[case::table_columns_and_fks_query_table(PostgresAdapter::table_columns_and_fks_query(
+            "public", HOSTILE
+        ))]
+        fn hostile_input_is_escaped(#[case] sql: String) {
             assert!(
                 sql.contains(ESCAPED),
                 "Hostile input must be quote_literal-escaped in: {sql}"

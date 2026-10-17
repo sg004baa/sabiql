@@ -269,7 +269,7 @@ pub fn resolve_walk_root(database_field: &str, home: Option<&Path>) -> PathBuf {
     if let Some(path) = expanded {
         // Walk from the deepest existing ancestor of what the user typed.
         let candidate = if path.is_dir() {
-            Some(path.clone())
+            Some(path)
         } else {
             path.parent().map(Path::to_path_buf)
         };
@@ -361,7 +361,7 @@ mod tests {
         #[test]
         fn selected_path_tracks_filtered_list() {
             let mut state = FilePickerState::default();
-            state.picker_mut().pane_height = 10;
+            state.picker_mut().set_pane_height(10);
             state.append_paths(&paths(&["/a.db", "/b.db", "/c.db"]));
 
             state.select_next();
@@ -371,7 +371,7 @@ mod tests {
         #[test]
         fn select_next_clamps_to_last() {
             let mut state = FilePickerState::default();
-            state.picker_mut().pane_height = 10;
+            state.picker_mut().set_pane_height(10);
             state.append_paths(&paths(&["/a.db", "/b.db"]));
 
             state.select_next();

@@ -1,15 +1,18 @@
+use crate::filter_input::render_filter_input_line;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
+use unicode_width::UnicodeWidthStr;
 
 use crate::app::model::app_state::AppState;
+use crate::app::model::shared::render_output::PickerLayout;
 use crate::app::model::sql_editor::query_history::GroupedEntry;
+use crate::app::update::input::keybindings::query_history_picker;
 use crate::domain::query_history::{Iso8601Timestamp, QueryResultStatus};
-use crate::features::pickers::table_picker::filter_visible_width;
-use crate::primitives::atoms::text_cursor_spans;
-use crate::primitives::molecules::render_modal;
+use crate::primitives::molecules::{FooterHintBar, render_modal};
+use crate::primitives::utils::text_utils::truncate_to_width_with;
 use crate::theme::{StatusTone, ThemePalette};
 
 const TIMESTAMP_WIDTH: usize = 18;
@@ -76,17 +79,8 @@ struct PreviewData<'a> {
 
 pub struct QueryHistoryPicker;
 
-pub struct QueryHistoryPickerRenderMetrics {
-    pub pane_height: u16,
-    pub filter_visible_width: usize,
-}
-
 impl QueryHistoryPicker {
-    pub fn render(
-        frame: &mut Frame,
-        state: &AppState,
-        theme: &ThemePalette,
-    ) -> QueryHistoryPickerRenderMetrics {
+    pub fn render(frame: &mut Frame, state: &AppState, theme: &ThemePalette) -> PickerLayout {
         let filter_is_empty = state
             .query_history_picker
             .filter_input()
@@ -112,15 +106,18 @@ impl QueryHistoryPicker {
         // border(2) + filter(1) + actual entries + preview — capped at 70%
         let desired_height = (2 + 1 + (grouped_count as u16).max(1) + preview_est).min(max_height);
 
-        let border_footer =
-            format!(" {grouped_count} entries \u{2502} type to filter \u{2502} Enter Select ",);
-
         let (_, inner) = render_modal(
             frame,
             Constraint::Percentage(70),
             Constraint::Max(desired_height),
             " Query History ",
-            &border_footer,
+            FooterHintBar::with_prefix(
+                format!("{grouped_count} entries │ type to filter"),
+                [
+                    query_history_picker::ENTER_SELECT.as_hint(),
+                    query_history_picker::ESC_CLOSE.as_hint(),
+                ],
+            ),
             theme,
         );
 
@@ -141,31 +138,14 @@ impl QueryHistoryPicker {
             (filter_area, list_area, None)
         };
         let (filter_area, list_area, preview_area) = areas;
-        let raw_width = filter_area.width.saturating_sub(4) as usize;
 
-        let input = state.query_history_picker.filter_input();
-        let visible_width = filter_visible_width(raw_width, input.cursor(), input.char_count());
-        let filter_line = if input.content().is_empty() {
-            Line::from(Span::styled(
-                "  type to filter",
-                Style::default().fg(theme.semantic.text.placeholder),
-            ))
-        } else {
-            let cursor_spans = text_cursor_spans(
-                input.content(),
-                input.cursor(),
-                input.viewport_offset(),
-                visible_width,
-                theme,
-            );
-            let mut spans = vec![Span::styled(
-                "  > ",
-                Style::default().fg(theme.component.modal.title),
-            )];
-            spans.extend(cursor_spans);
-            Line::from(spans)
-        };
-        frame.render_widget(Paragraph::new(filter_line), filter_area);
+        let visible_width = render_filter_input_line(
+            frame,
+            filter_area,
+            state.query_history_picker.filter_input(),
+            Some("type to filter"),
+            theme,
+        );
 
         if grouped_count == 0 {
             drop(grouped);
@@ -182,7 +162,7 @@ impl QueryHistoryPicker {
             if let Some(pa) = preview_area {
                 render_empty_preview(frame, pa, theme);
             }
-            return QueryHistoryPickerRenderMetrics {
+            return PickerLayout {
                 pane_height: list_area.height,
                 filter_visible_width: visible_width,
             };
@@ -221,7 +201,7 @@ impl QueryHistoryPicker {
             .with_selected(Some(selected_idx))
             .with_offset(scroll_offset);
         frame.render_stateful_widget(list, list_area, &mut list_state);
-        QueryHistoryPickerRenderMetrics {
+        PickerLayout {
             pane_height: list_area.height,
             filter_visible_width: visible_width,
         }
@@ -236,13 +216,7 @@ fn build_list_item(
     theme: &ThemePalette,
 ) -> ListItem<'static> {
     let query_display = ge.entry.query.replace('\n', " ");
-    let char_len = query_display.chars().count();
-    let truncated = if char_len > query_max && query_max > 3 {
-        let s: String = query_display.chars().take(query_max - 1).collect();
-        format!("{s}\u{2026}")
-    } else {
-        query_display
-    };
+    let truncated = truncate_to_width_with(&query_display, query_max, "\u{2026}");
 
     let ts_short = format_short_timestamp(&ge.entry.executed_at);
 
@@ -283,9 +257,7 @@ fn build_list_item(
     };
 
     // Pad query + badge to fixed width so timestamp column aligns
-    let query_chars = truncated.chars().count();
-    let badge_chars = badge.chars().count();
-    let used = query_chars + badge_chars;
+    let used = UnicodeWidthStr::width(truncated.as_str()) + UnicodeWidthStr::width(badge.as_str());
     let pad = query_max.saturating_sub(used);
 
     if !badge.is_empty() {

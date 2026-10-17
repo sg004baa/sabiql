@@ -53,6 +53,10 @@ impl FileSystemWalker for WalkdirFileWalker {
 
 /// Walk `root`, streaming matching paths in chunks. Returns whether the scan was
 /// cut short by the result-count or time bound.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "filesystem traversal is an I/O boundary that enforces a real-time scan deadline"
+)]
 fn walk_and_stream(
     root: &std::path::Path,
     options: &WalkOptions,

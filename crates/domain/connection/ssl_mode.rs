@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::str::FromStr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -27,34 +26,22 @@ impl SslMode {
             Self::VerifyFull,
         ]
     }
-}
 
-impl fmt::Display for SslMode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    pub const fn as_str(&self) -> &'static str {
         match self {
-            Self::Disable => write!(f, "disable"),
-            Self::Allow => write!(f, "allow"),
-            Self::Prefer => write!(f, "prefer"),
-            Self::Require => write!(f, "require"),
-            Self::VerifyCa => write!(f, "verify-ca"),
-            Self::VerifyFull => write!(f, "verify-full"),
+            Self::Disable => "disable",
+            Self::Allow => "allow",
+            Self::Prefer => "prefer",
+            Self::Require => "require",
+            Self::VerifyCa => "verify-ca",
+            Self::VerifyFull => "verify-full",
         }
     }
 }
 
-impl FromStr for SslMode {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "disable" => Ok(Self::Disable),
-            "allow" => Ok(Self::Allow),
-            "prefer" => Ok(Self::Prefer),
-            "require" => Ok(Self::Require),
-            "verify-ca" => Ok(Self::VerifyCa),
-            "verify-full" => Ok(Self::VerifyFull),
-            _ => Err(format!("Unknown SSL mode: {s}")),
-        }
+impl fmt::Display for SslMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -68,35 +55,13 @@ mod tests {
     }
 
     #[test]
-    fn from_str_parses_all_variants() {
-        assert_eq!(SslMode::from_str("disable").unwrap(), SslMode::Disable);
-        assert_eq!(SslMode::from_str("allow").unwrap(), SslMode::Allow);
-        assert_eq!(SslMode::from_str("prefer").unwrap(), SslMode::Prefer);
-        assert_eq!(SslMode::from_str("require").unwrap(), SslMode::Require);
-        assert_eq!(SslMode::from_str("verify-ca").unwrap(), SslMode::VerifyCa);
-        assert_eq!(
-            SslMode::from_str("verify-full").unwrap(),
-            SslMode::VerifyFull
-        );
-    }
+    fn display_matches_wire_values() {
+        let values = SslMode::all_variants()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
 
-    #[test]
-    fn from_str_is_case_insensitive() {
-        assert_eq!(SslMode::from_str("PREFER").unwrap(), SslMode::Prefer);
-        assert_eq!(SslMode::from_str("Verify-CA").unwrap(), SslMode::VerifyCa);
-    }
-
-    #[test]
-    fn from_str_returns_error_for_unknown() {
-        assert!(SslMode::from_str("unknown").is_err());
-    }
-
-    #[test]
-    fn display_matches_parse() {
-        for variant in SslMode::all_variants() {
-            let s = variant.to_string();
-            let parsed = SslMode::from_str(&s).unwrap();
-            assert_eq!(*variant, parsed);
-        }
+        assert_eq!(values, "disable,allow,prefer,require,verify-ca,verify-full");
     }
 }

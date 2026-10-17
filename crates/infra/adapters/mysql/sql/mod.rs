@@ -1,54 +1,19 @@
-fn quote_ident_mysql(name: &str) -> String {
-    format!("`{}`", name.replace('`', "``"))
-}
+mod ddl;
+mod literal;
+mod metadata;
 
-fn quote_literal(value: &str) -> String {
-    // MySQL's default sql_mode treats `\` as an escape character inside
-    // string literals (unlike PostgreSQL), so it must be doubled or values
-    // like `C:\temp` would be silently corrupted (`\t` → TAB).
-    format!("'{}'", value.replace('\\', "\\\\").replace('\'', "''"))
-}
+pub(super) use metadata::{
+    COLUMN_METADATA_BASE_RESULT_COLUMNS, EFFECTIVE_USER_QUERY, EFFECTIVE_USER_RESULT_COLUMNS,
+    FOREIGN_KEY_RESULT_COLUMNS, PREVIEW_COLUMN_METADATA_RESULT_COLUMNS, SIGNATURE_COLUMNS_QUERY,
+    SIGNATURE_COLUMNS_RESULT_COLUMNS, SIGNATURE_FOREIGN_KEYS_QUERY, SIGNATURE_UNIQUE_COLUMNS_QUERY,
+    SIGNATURE_UNIQUE_COLUMNS_RESULT_COLUMNS, TABLES_QUERY, TABLES_RESULT_COLUMNS,
+    TRIGGER_RESULT_COLUMNS, UNIQUE_COLUMN_RESULT_COLUMNS, build_legacy_metadata_select_query,
+    build_metadata_select_query, build_preview_query, column_metadata_result_columns,
+    columns_query_for_capabilities, foreign_keys_query, index_result_columns,
+    indexes_query_for_capabilities, preview_columns_query, preview_identity_alias,
+    show_create_query, show_create_result_columns, table_query, triggers_query,
+    unique_columns_query,
+};
 
-pub(in crate::adapters::mysql) mod ddl;
-pub(in crate::adapters::mysql) mod dialect;
-pub(in crate::adapters::mysql) mod query;
-
-#[cfg(test)]
-mod tests {
-    use super::{quote_ident_mysql, quote_literal};
-
-    #[test]
-    fn quote_ident_mysql_simple() {
-        assert_eq!(quote_ident_mysql("users"), "`users`");
-    }
-
-    #[test]
-    fn quote_ident_mysql_with_backtick() {
-        assert_eq!(quote_ident_mysql("user`name"), "`user``name`");
-    }
-
-    #[test]
-    fn quote_ident_mysql_empty() {
-        assert_eq!(quote_ident_mysql(""), "``");
-    }
-
-    #[test]
-    fn quote_literal_escapes_embedded_quotes() {
-        assert_eq!(quote_literal("O'Reilly"), "'O''Reilly'");
-    }
-
-    #[test]
-    fn quote_literal_supports_empty_string() {
-        assert_eq!(quote_literal(""), "''");
-    }
-
-    #[test]
-    fn quote_literal_escapes_backslashes() {
-        assert_eq!(quote_literal(r"C:\temp\new"), r"'C:\\temp\\new'");
-    }
-
-    #[test]
-    fn quote_literal_escapes_backslash_before_quote() {
-        assert_eq!(quote_literal(r"a\'b"), r"'a\\''b'");
-    }
-}
+#[allow(unused_imports, reason = "re-exported for MySQL metadata unit tests")]
+pub(super) use metadata::{COLUMN_METADATA_RESULT_COLUMNS, INDEX_RESULT_COLUMNS};

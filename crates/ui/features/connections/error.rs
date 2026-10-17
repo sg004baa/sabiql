@@ -1,31 +1,27 @@
 use std::time::Instant;
 
-use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::prelude::*;
-use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::theme::ThemePalette;
 
 use crate::app::model::app_state::AppState;
+use crate::app::model::connection::error_state::ConnectionErrorState;
+use crate::app::update::input::keybindings::connection_error;
 use crate::primitives::atoms::key_chip;
-use crate::primitives::molecules::render_modal;
+use crate::primitives::molecules::{FooterHintBar, render_modal};
 use crate::primitives::utils::text_utils::wrapped_line_count;
 
 pub struct ConnectionError;
 
 impl ConnectionError {
     pub fn render(frame: &mut Frame, state: &AppState, now: Instant, theme: &ThemePalette) {
-        Self::render_at(frame, state, now, theme);
-    }
-
-    pub fn render_at(frame: &mut Frame, state: &AppState, now: Instant, theme: &ThemePalette) {
         let error_state = &state.connection_error;
-        let Some(ref error_info) = error_state.error_info else {
+        let Some(error_info) = error_state.error_info() else {
             return;
         };
 
-        let details_expanded = error_state.details_expanded;
+        let details_expanded = error_state.details_expanded();
         let full_area = frame.area();
         let modal_outer_width = full_area.width * 70 / 100;
         let content_width = modal_outer_width.saturating_sub(4);
@@ -51,13 +47,12 @@ impl ConnectionError {
         };
         let height = Constraint::Length((FIXED_OVERHEAD + details_height).clamp(9, max_height));
 
-        let hint_text = " Esc/q to close ";
         let (_, inner) = render_modal(
             frame,
             Constraint::Percentage(70),
             height,
             " Connection Error ",
-            hint_text,
+            FooterHintBar::new([connection_error::ESC_CLOSE.as_hint()]),
             theme,
         );
 
@@ -72,7 +67,7 @@ impl ConnectionError {
         ])
         .split(inner);
 
-        Self::render_summary(frame, chunks[0], error_info.kind.summary(), theme);
+        Self::render_summary(frame, chunks[0], error_info.summary(), theme);
         Self::render_hint(frame, chunks[2], state, theme);
         Self::render_details_section(frame, chunks[4], error_state, details_expanded, theme);
         Self::render_actions(frame, chunks[6], state, now, theme);
@@ -94,15 +89,15 @@ impl ConnectionError {
     fn render_hint(frame: &mut Frame, area: Rect, state: &AppState, theme: &ThemePalette) {
         let hint = state
             .connection_error
-            .error_info
-            .as_ref()
-            .map_or("", |e| e.kind.hint());
+            .error_info()
+            .map_or("", |error_info| error_info.hint());
         let mut spans = vec![
             Span::styled("Hint: ", Style::default().fg(theme.semantic.text.accent)),
             Span::styled(hint, Style::default().fg(theme.semantic.text.secondary)),
         ];
         if state.session.is_service_connection()
-            && let Some(ref path) = state.runtime.service_file_path
+            && !state.connection_error.has_destination()
+            && let Some(path) = state.service_file_path()
         {
             spans.push(Span::styled(
                 format!("  (edit {})", path.display()),
@@ -116,7 +111,7 @@ impl ConnectionError {
     fn render_details_section(
         frame: &mut Frame,
         area: Rect,
-        error_state: &crate::app::model::connection::error_state::ConnectionErrorState,
+        error_state: &ConnectionErrorState,
         expanded: bool,
         theme: &ThemePalette,
     ) {
@@ -136,7 +131,7 @@ impl ConnectionError {
                     .lines()
                     .map(|l| Line::from(l.replace('\t', "    ")))
                     .collect();
-                let scroll = error_state.scroll_offset;
+                let scroll = error_state.scroll_offset();
                 let para = Paragraph::new(lines)
                     .scroll((scroll as u16, 0))
                     .wrap(Wrap { trim: false })
@@ -170,27 +165,32 @@ impl ConnectionError {
         theme: &ThemePalette,
     ) {
         let error_state = &state.connection_error;
+        let first = if state.can_retry_connection_error() {
+            connection_error::RETRY.as_hint()
+        } else {
+            connection_error::EDIT.as_hint()
+        };
         let mut spans = vec![Span::styled(
             "Actions: ",
             Style::default().fg(theme.semantic.text.muted),
         )];
-
-        if state.session.is_service_connection() {
-            spans.push(key_chip("r", theme));
-            spans.push(Span::raw(" Retry  "));
-        } else {
-            spans.push(key_chip("e", theme));
-            spans.push(Span::raw(" Re-enter  "));
+        spans.push(key_chip(first.0, theme));
+        spans.push(Span::raw(format!(" {}  ", first.1)));
+        for (index, (key, desc)) in [
+            connection_error::SWITCH.as_hint(),
+            connection_error::DETAILS.as_hint(),
+            connection_error::COPY.as_hint(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            spans.push(key_chip(key, theme));
+            spans.push(Span::raw(if index == 2 {
+                format!(" {desc}")
+            } else {
+                format!(" {desc}  ")
+            }));
         }
-
-        spans.extend([
-            key_chip("s", theme),
-            Span::raw(" Switch  "),
-            key_chip("d", theme),
-            Span::raw(" Details  "),
-            key_chip("y", theme),
-            Span::raw(" Copy"),
-        ]);
 
         if error_state.is_copied_visible_at(now) {
             spans.push(Span::raw("   "));

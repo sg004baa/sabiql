@@ -1,108 +1,139 @@
-use std::time::Instant;
-
 use sabiql_domain::{
     Column, ColumnAttributes, DatabaseMetadata, FkAction, ForeignKey, Index, IndexAttributes,
-    IndexType, QueryResult, QuerySource, Table, TableSummary, Trigger, TriggerEvent, TriggerTiming,
+    IndexType, QueryResult, QuerySource, Table, TableKind, TableKindInfo, TableStorageAttributes,
+    TableSummary, Trigger, TriggerEvent, TriggerTiming,
 };
 
-pub fn sample_metadata(now: Instant) -> DatabaseMetadata {
-    DatabaseMetadata {
-        database_name: "test_db".to_string(),
-        schemas: vec![],
-        table_summaries: vec![
-            TableSummary::new("public".to_string(), "users".to_string(), Some(100), false),
-            TableSummary::new("public".to_string(), "posts".to_string(), Some(50), false),
-            TableSummary::new(
-                "public".to_string(),
-                "comments".to_string(),
-                Some(200),
-                false,
-            ),
-        ],
-        fetched_at: now,
-    }
-}
-
-pub fn sample_table_detail() -> Table {
+pub fn minimal_table(schema: &str, name: &str) -> Table {
     Table {
-        schema: "public".to_string(),
-        name: "users".to_string(),
-        owner: Some("postgres".to_string()),
-        columns: vec![
-            Column {
-                name: "id".to_string(),
-                data_type: "integer".to_string(),
-                attributes: ColumnAttributes::PRIMARY_KEY | ColumnAttributes::UNIQUE,
-                default: None,
-                comment: Some("Primary key".to_string()),
-                extra: None,
-                ordinal_position: 1,
-            },
-            Column {
-                name: "name".to_string(),
-                data_type: "varchar(255)".to_string(),
-                attributes: ColumnAttributes::empty(),
-                default: None,
-                comment: None,
-                extra: None,
-                ordinal_position: 2,
-            },
-            Column {
-                name: "email".to_string(),
-                data_type: "varchar(255)".to_string(),
-                attributes: ColumnAttributes::NULLABLE | ColumnAttributes::UNIQUE,
-                default: None,
-                comment: None,
-                extra: None,
-                ordinal_position: 3,
-            },
-        ],
-        primary_key: Some(vec!["id".to_string()]),
-        indexes: vec![
-            Index {
-                name: "users_pkey".to_string(),
-                columns: vec!["id".to_string()],
-                attributes: IndexAttributes::UNIQUE | IndexAttributes::PRIMARY,
-                index_type: IndexType::BTree,
-                definition: None,
-            },
-            Index {
-                name: "idx_users_email".to_string(),
-                columns: vec!["email".to_string()],
-                attributes: IndexAttributes::UNIQUE,
-                index_type: IndexType::BTree,
-                definition: None,
-            },
-        ],
-        foreign_keys: vec![ForeignKey {
-            name: "fk_users_department".to_string(),
-            from_schema: "public".to_string(),
-            from_table: "users".to_string(),
-            from_columns: vec!["department_id".to_string()],
-            to_schema: "public".to_string(),
-            to_table: "departments".to_string(),
-            to_columns: vec!["id".to_string()],
-            on_delete: FkAction::Cascade,
-            on_update: FkAction::NoAction,
-        }],
+        schema: schema.to_string(),
+        name: name.to_string(),
+        owner: None,
+        columns: Vec::new(),
+        primary_key: None,
+        foreign_keys: Vec::new(),
+        indexes: Vec::new(),
         rls: None,
-        triggers: vec![Trigger {
-            name: "audit_users".to_string(),
-            timing: TriggerTiming::After,
-            events: vec![TriggerEvent::Insert, TriggerEvent::Update],
-            function_name: "audit_func".to_string(),
-            security_definer: false,
-        }],
-        row_count_estimate: Some(100),
-        comment: Some("User accounts".to_string()),
+        triggers: Vec::new(),
+        row_count_estimate: None,
+        comment: None,
+        source_ddl: None,
+        storage_attributes: TableStorageAttributes::default(),
+        kind_info: TableKindInfo::default(),
     }
 }
 
-pub fn sample_query_result(now: Instant) -> QueryResult {
-    QueryResult {
-        query: "SELECT * FROM users LIMIT 100".to_string(),
-        columns: vec!["id".to_string(), "name".to_string(), "email".to_string()],
-        rows: vec![
+pub fn view_kind_info() -> TableKindInfo {
+    TableKindInfo {
+        kind: TableKind::View,
+        ..TableKindInfo::default()
+    }
+}
+
+pub fn sample_metadata() -> DatabaseMetadata {
+    let mut metadata = DatabaseMetadata::new("test_db".to_string());
+    metadata.table_summaries = vec![
+        TableSummary::new("public".to_string(), "users".to_string(), Some(100), false),
+        TableSummary::new("public".to_string(), "posts".to_string(), Some(50), false),
+        TableSummary::new(
+            "public".to_string(),
+            "comments".to_string(),
+            Some(200),
+            false,
+        ),
+    ];
+    metadata
+}
+
+pub fn sample_postgres_table_detail() -> Table {
+    let mut table = minimal_table("public", "users");
+    table.owner = Some("postgres".to_string());
+    table.columns = vec![
+        Column {
+            name: "id".to_string(),
+            data_type: "integer".to_string(),
+            attributes: ColumnAttributes::PRIMARY_KEY | ColumnAttributes::UNIQUE,
+            default: None,
+            comment: Some("Primary key".to_string()),
+            ordinal_position: 1,
+            character_set_name: None,
+            collation_name: None,
+            generation_expression: None,
+            generation_kind: None,
+        },
+        Column {
+            name: "name".to_string(),
+            data_type: "varchar(255)".to_string(),
+            attributes: ColumnAttributes::empty(),
+            default: None,
+            comment: None,
+            ordinal_position: 2,
+            character_set_name: None,
+            collation_name: None,
+            generation_expression: None,
+            generation_kind: None,
+        },
+        Column {
+            name: "email".to_string(),
+            data_type: "varchar(255)".to_string(),
+            attributes: ColumnAttributes::NULLABLE | ColumnAttributes::UNIQUE,
+            default: None,
+            comment: None,
+            ordinal_position: 3,
+            character_set_name: None,
+            collation_name: None,
+            generation_expression: None,
+            generation_kind: None,
+        },
+    ];
+    table.primary_key = Some(vec!["id".to_string()]);
+    table.indexes = vec![
+        Index {
+            name: "users_pkey".to_string(),
+            columns: vec!["id".to_string()],
+            attributes: IndexAttributes::UNIQUE | IndexAttributes::PRIMARY,
+            index_type: IndexType::BTree,
+            definition: None,
+        },
+        Index {
+            name: "idx_users_email".to_string(),
+            columns: vec!["email".to_string()],
+            attributes: IndexAttributes::UNIQUE,
+            index_type: IndexType::BTree,
+            definition: None,
+        },
+    ];
+    table.foreign_keys = vec![ForeignKey {
+        name: "fk_users_department".to_string(),
+        from_schema: "public".to_string(),
+        from_table: "users".to_string(),
+        from_columns: vec!["department_id".to_string()],
+        to_schema: "public".to_string(),
+        to_table: "departments".to_string(),
+        to_columns: vec!["id".to_string()],
+        on_delete: FkAction::Cascade,
+        on_update: FkAction::NoAction,
+        reference_resolved: true,
+    }];
+    table.triggers = vec![Trigger {
+        name: "audit_users".to_string(),
+        timing: TriggerTiming::After,
+        events: vec![TriggerEvent::Insert, TriggerEvent::Update],
+        action_order: None,
+        definition: "audit_func".to_string(),
+        security_context: Some("INVOKER".to_string()),
+        creation_context: None,
+    }];
+    table.row_count_estimate = Some(100);
+    table.comment = Some("User accounts".to_string());
+    table
+}
+
+pub fn sample_query_result() -> QueryResult {
+    QueryResult::success(
+        "SELECT * FROM users LIMIT 100".to_string(),
+        vec!["id".to_string(), "name".to_string(), "email".to_string()],
+        vec![
             vec![
                 "1".to_string(),
                 "Alice".to_string(),
@@ -114,25 +145,17 @@ pub fn sample_query_result(now: Instant) -> QueryResult {
                 "bob@example.com".to_string(),
             ],
         ],
-        row_count: 2,
-        execution_time_ms: 15,
-        executed_at: now,
-        source: QuerySource::Preview,
-        error: None,
-        command_tag: None,
-    }
+        15,
+        QuerySource::Preview,
+    )
 }
 
-pub fn empty_query_result(now: Instant) -> QueryResult {
-    QueryResult {
-        query: "SELECT * FROM users WHERE 1=0".to_string(),
-        columns: vec!["id".to_string(), "name".to_string(), "email".to_string()],
-        rows: vec![],
-        row_count: 0,
-        execution_time_ms: 5,
-        executed_at: now,
-        source: QuerySource::Preview,
-        error: None,
-        command_tag: None,
-    }
+pub fn empty_query_result() -> QueryResult {
+    QueryResult::success(
+        "SELECT * FROM users WHERE 1=0".to_string(),
+        vec!["id".to_string(), "name".to_string(), "email".to_string()],
+        vec![],
+        5,
+        QuerySource::Preview,
+    )
 }

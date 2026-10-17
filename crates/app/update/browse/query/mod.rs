@@ -6,107 +6,149 @@ use std::time::Instant;
 
 use crate::cmd::effect::Effect;
 use crate::model::app_state::AppState;
-use crate::services::AppServices;
+use crate::model::browse::query_execution::PREVIEW_PAGE_SIZE;
 use crate::update::action::Action;
+use crate::update::dispatch_result::DispatchResult;
+use crate::update::helpers::reject_pending_mysql_connection_probe;
 
-pub fn reduce_query(
+pub(in crate::update) fn dispatch_query(
     state: &mut AppState,
     action: &Action,
     now: Instant,
-    services: &AppServices,
-) -> Option<Vec<Effect>> {
-    execution::reduce(state, action, now, services)
-        .or_else(|| write::reduce(state, action, now, services))
-        .or_else(|| pagination::reduce(state, action, now, services))
+) -> DispatchResult {
+    execution::reduce_execution(state, action, now)
+        .or_else(|| write::reduce_write(state, action, now))
+        .or_else(|| pagination::reduce_pagination(state, action, now))
+}
+
+/// Builds the preview effect for the table currently held in pagination state,
+/// issuing a fresh run_id. Returns `None` when no connection is active.
+///
+/// `generation` is the selection snapshot the eventual completion is validated
+/// against. Refreshes of the active selection pass
+/// `state.session.selection_generation()`; `Action::ExecutePreview` instead
+/// passes the generation captured at selection time, so that results for a
+/// selection cleared in the meantime (e.g. DROP TABLE + reload) are rejected.
+pub(super) fn preview_effect_for_current_table(
+    state: &mut AppState,
+    now: Instant,
+    target_page: usize,
+    generation: u64,
+) -> Option<Effect> {
+    if reject_pending_mysql_connection_probe(state) {
+        return None;
+    }
+    let dsn = state.session.dsn().map(String::from)?;
+    let run_id = state.query.begin_running(now);
+    Some(Effect::ExecutePreview {
+        dsn,
+        schema: state.query.pagination.schema().to_string(),
+        table: state.query.pagination.table().to_string(),
+        generation,
+        run_id,
+        limit: PREVIEW_PAGE_SIZE,
+        offset: target_page * PREVIEW_PAGE_SIZE,
+        target_page,
+    })
 }
 
 #[cfg(test)]
 pub(super) mod tests {
+    use crate::test_support;
+
+    use crate::domain::Column;
     use std::sync::Arc;
     use std::time::Instant;
 
     use crate::domain::{
-        Column, ColumnAttributes, CommandTag, Index, IndexAttributes, IndexType, QueryResult,
-        QuerySource, Table, Trigger, TriggerEvent, TriggerTiming,
+        ColumnAttributes, CommandTag, Index, IndexAttributes, IndexType, QueryResult, QuerySource,
+        Table, Trigger, TriggerEvent, TriggerTiming,
     };
     use crate::model::app_state::AppState;
+    use crate::update::action::{Action, QueryCompletionContext};
+    use crate::update::test_fixtures;
 
     pub fn create_test_state() -> AppState {
         let mut state = AppState::new("test_project".to_string());
-        state.session.dsn = Some("postgres://localhost/test".to_string());
+        test_fixtures::activate_postgres_connection(&mut state, "postgres://localhost/test");
         state
+    }
+
+    pub fn active_dsn(state: &AppState) -> String {
+        state
+            .session
+            .dsn()
+            .expect("query test state must have an active connection")
+            .to_string()
+    }
+
+    pub fn begin_query_run(state: &mut AppState) -> u64 {
+        state.query.begin_running(Instant::now())
+    }
+
+    pub fn query_completed_action(
+        state: &mut AppState,
+        result: Arc<QueryResult>,
+        generation: u64,
+        target_page: Option<usize>,
+    ) -> Action {
+        let run_id = begin_query_run(state);
+        Action::QueryCompleted {
+            run_id,
+            result,
+            context: match target_page {
+                Some(target_page) => QueryCompletionContext::Preview {
+                    generation,
+                    target_page,
+                },
+                None => QueryCompletionContext::Adhoc,
+            },
+        }
     }
 
     pub fn preview_result(row_count: usize) -> Arc<QueryResult> {
         let rows: Vec<Vec<String>> = (0..row_count).map(|i| vec![i.to_string()]).collect();
-        Arc::new(QueryResult {
-            query: "SELECT * FROM users".to_string(),
-            columns: vec!["id".to_string()],
+        Arc::new(QueryResult::success(
+            "SELECT * FROM users".to_string(),
+            vec!["id".to_string()],
             rows,
-            row_count,
-            execution_time_ms: 10,
-            executed_at: Instant::now(),
-            source: QuerySource::Preview,
-            error: None,
-            command_tag: None,
-        })
+            10,
+            QuerySource::Preview,
+        ))
     }
 
     pub fn adhoc_result() -> Arc<QueryResult> {
-        Arc::new(QueryResult {
-            query: "SELECT 1".to_string(),
-            columns: vec!["id".to_string()],
-            rows: vec![vec!["1".to_string()]],
-            row_count: 1,
-            execution_time_ms: 10,
-            executed_at: Instant::now(),
-            source: QuerySource::Adhoc,
-            error: None,
-            command_tag: None,
-        })
+        Arc::new(QueryResult::success(
+            "SELECT 1".to_string(),
+            vec!["id".to_string()],
+            vec![vec!["1".to_string()]],
+            10,
+            QuerySource::Adhoc,
+        ))
     }
 
     pub fn editable_preview_result() -> Arc<QueryResult> {
-        Arc::new(QueryResult {
-            query: "SELECT * FROM users".to_string(),
-            columns: vec!["id".to_string(), "name".to_string()],
-            rows: vec![vec!["1".to_string(), "Alice".to_string()]],
-            row_count: 1,
-            execution_time_ms: 10,
-            executed_at: Instant::now(),
-            source: QuerySource::Preview,
-            error: None,
-            command_tag: None,
-        })
+        Arc::new(QueryResult::success(
+            "SELECT * FROM users".to_string(),
+            vec!["id".to_string(), "name".to_string()],
+            vec![vec!["1".to_string(), "Alice".to_string()]],
+            10,
+            QuerySource::Preview,
+        ))
     }
 
     pub fn users_table_detail() -> Table {
         Table {
             schema: "public".to_string(),
             name: "users".to_string(),
-            owner: None,
             columns: vec![
                 Column {
-                    name: "id".to_string(),
-                    data_type: "int".to_string(),
-                    default: None,
                     attributes: ColumnAttributes::PRIMARY_KEY | ColumnAttributes::UNIQUE,
-                    comment: None,
-                    extra: None,
-                    ordinal_position: 1,
+                    ..test_support::column::test_nullable_column("id", "int", 1)
                 },
-                Column {
-                    name: "name".to_string(),
-                    data_type: "text".to_string(),
-                    default: None,
-                    attributes: ColumnAttributes::NULLABLE,
-                    comment: None,
-                    extra: None,
-                    ordinal_position: 2,
-                },
+                test_support::column::test_nullable_column("name", "text", 2),
             ],
             primary_key: Some(vec!["id".to_string()]),
-            foreign_keys: vec![],
             indexes: vec![Index {
                 name: "users_pkey".to_string(),
                 columns: vec!["id".to_string()],
@@ -114,63 +156,50 @@ pub(super) mod tests {
                 index_type: IndexType::BTree,
                 definition: None,
             }],
-            rls: None,
             triggers: vec![Trigger {
                 name: "trg".to_string(),
                 timing: TriggerTiming::After,
                 events: vec![TriggerEvent::Update],
-                function_name: "f".to_string(),
-                security_definer: false,
+                action_order: None,
+                definition: "f".to_string(),
+                security_context: None,
+                creation_context: None,
             }],
-            row_count_estimate: None,
-            comment: None,
+            ..test_support::table::minimal("", "")
         }
     }
 
-    pub fn jsonb_table_detail() -> Table {
+    pub fn json_table_detail() -> Table {
         let mut detail = users_table_detail();
-        detail.columns.push(Column {
-            name: "metadata".to_string(),
-            data_type: "jsonb".to_string(),
-            default: None,
-            attributes: ColumnAttributes::NULLABLE,
-            comment: None,
-            extra: None,
-            ordinal_position: 3,
-        });
+        detail
+            .columns
+            .push(test_support::column::test_nullable_column(
+                "metadata", "jsonb", 3,
+            ));
         detail
     }
 
-    pub fn editable_preview_result_with_jsonb() -> Arc<QueryResult> {
-        Arc::new(QueryResult {
-            query: "SELECT * FROM users".to_string(),
-            columns: vec!["id".to_string(), "name".to_string(), "metadata".to_string()],
-            rows: vec![vec![
+    pub fn editable_preview_result_with_json() -> Arc<QueryResult> {
+        Arc::new(QueryResult::success(
+            "SELECT * FROM users".to_string(),
+            vec!["id".to_string(), "name".to_string(), "metadata".to_string()],
+            vec![vec![
                 "1".to_string(),
                 "Alice".to_string(),
                 r#"{"role":"admin"}"#.to_string(),
             ]],
-            row_count: 1,
-            execution_time_ms: 10,
-            executed_at: Instant::now(),
-            source: QuerySource::Preview,
-            error: None,
-            command_tag: None,
-        })
+            10,
+            QuerySource::Preview,
+        ))
     }
 
+    // Mirrors the executor's command-tag path: affected rows become row_count
     pub fn adhoc_result_with_tag(tag: CommandTag) -> Arc<QueryResult> {
-        Arc::new(QueryResult {
-            query: String::new(),
-            columns: vec![],
-            rows: vec![],
-            row_count: 0,
-            execution_time_ms: 5,
-            executed_at: Instant::now(),
-            source: QuerySource::Adhoc,
-            error: None,
-            command_tag: Some(tag),
-        })
+        Arc::new(
+            QueryResult::success(String::new(), vec![], vec![], 5, QuerySource::Adhoc)
+                .with_row_count(tag.affected_rows().unwrap_or(0) as usize)
+                .with_command_tag(tag),
+        )
     }
 
     pub fn adhoc_error_result() -> Arc<QueryResult> {
@@ -184,8 +213,7 @@ pub(super) mod tests {
 
     pub fn state_with_table(schema: &str, table: &str) -> AppState {
         let mut state = create_test_state();
-        state.query.pagination.schema = schema.to_string();
-        state.query.pagination.table = table.to_string();
+        state.query.pagination.reset_for_table(schema, table);
         state
     }
 }
