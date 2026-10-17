@@ -235,12 +235,13 @@ fn run_update() -> Result<()> {
         .repo_owner("sg004baa")
         .repo_name("sabiql")
         .build()?
-        .fetch()?;
+        .fetch()?
+        .into_vec();
     let Some(latest) = latest_stable_release(current, &releases) else {
         println!("Already up to date (v{current}).");
         return Ok(());
     };
-    let target_version = format!("v{}", latest.version);
+    let target_version = format!("v{}", latest.version());
 
     let status = self_update::backends::github::Update::configure()
         .repo_owner("sg004baa")
@@ -249,11 +250,11 @@ fn run_update() -> Result<()> {
         .show_download_progress(true)
         .no_confirm(true)
         .current_version(current)
-        .target_version_tag(&target_version)
+        .release_tag(target_version)
         .build()?
         .update()?;
 
-    if status.updated() {
+    if status.is_updated() {
         println!("Updated successfully: v{} -> {}", current, status.version());
     } else {
         println!("Already up to date (v{current}).");
@@ -269,13 +270,13 @@ fn latest_stable_release<'a>(
 ) -> Option<&'a self_update::update::Release> {
     releases
         .iter()
-        .filter(|release| !release.version.contains('-'))
+        .filter(|release| !release.version().contains('-'))
         .filter(|release| {
-            self_update::version::bump_is_greater(current_version, &release.version)
+            self_update::version::bump_is_greater(current_version, release.version())
                 .unwrap_or(false)
         })
         .reduce(|latest, release| {
-            if self_update::version::bump_is_greater(&latest.version, &release.version)
+            if self_update::version::bump_is_greater(latest.version(), release.version())
                 .unwrap_or(false)
             {
                 release

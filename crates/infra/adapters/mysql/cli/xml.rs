@@ -432,9 +432,11 @@ pub(super) fn parse_mysql_field(
         let attribute = attribute.map_err(|error| {
             DbOperationError::QueryFailed(format!("invalid MySQL XML field: {error}"))
         })?;
-        let value = attribute.unescape_value().map_err(|error| {
-            DbOperationError::QueryFailed(format!("invalid MySQL XML field: {error}"))
-        })?;
+        let value = attribute
+            .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+            .map_err(|error| {
+                DbOperationError::QueryFailed(format!("invalid MySQL XML field: {error}"))
+            })?;
         match attribute.key.as_ref() {
             b"name" => name = Some(value.into_owned()),
             b"xsi:nil" | b"nil" => is_null = matches!(value.as_ref(), "true" | "1"),
