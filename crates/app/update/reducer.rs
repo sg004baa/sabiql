@@ -170,6 +170,13 @@ fn select_table(state: &mut AppState, table: &TableSummary) -> Vec<Effect> {
         .session
         .select_table(&table.schema, &table.name, &mut state.query);
     state.result_interaction.reset_interaction();
+    if let Some(index) = state
+        .tables()
+        .iter()
+        .position(|candidate| candidate.schema == table.schema && candidate.name == table.name)
+    {
+        state.ui.set_explorer_selection(Some(index));
+    }
 
     let schema = table.schema.clone();
     let table_name = table.name.clone();
@@ -1609,6 +1616,62 @@ mod tests {
                 )];
                 metadata
             })
+        }
+
+        #[rstest::rstest]
+        #[case::unfiltered("", 31, 31)]
+        #[case::filtered_same_names("target", 1, 31)]
+        #[case::schema_qualified("public.target", 0, 30)]
+        fn table_picker_confirm_reveals_picked_table_in_explorer(
+            #[case] filter: &str,
+            #[case] picker_index: usize,
+            #[case] explorer_index: usize,
+        ) {
+            let mut state = create_test_state();
+            test_fixtures::activate_postgres_connection(&mut state, "postgres://localhost/test");
+            let mut metadata = DatabaseMetadata::new("test".to_string());
+            metadata.table_summaries = (0..30)
+                .map(|i| TableSummary::new("public".into(), format!("table_{i:02}"), None, false))
+                .chain([
+                    TableSummary::new("public".into(), "target".into(), None, false),
+                    TableSummary::new("other".into(), "target".into(), None, false),
+                ])
+                .collect();
+            state.session.set_metadata(Some(Arc::new(metadata)));
+            state.ui.set_explorer_pane_height(14);
+            state.ui.set_explorer_selection(Some(0));
+            state.ui.set_focused_pane(FocusedPane::Result);
+            reduce(
+                &mut state,
+                Action::OpenModal(ModalKind::TablePicker),
+                Instant::now(),
+                &AppServices::stub(),
+            );
+            state.ui.table_picker_mut().insert_filter_str(filter);
+            state.ui.table_picker_mut().set_selection(picker_index);
+
+            let effects = reduce(
+                &mut state,
+                Action::ConfirmSelection,
+                Instant::now(),
+                &AppServices::stub(),
+            );
+
+            assert_eq!(state.input_mode(), InputMode::Normal);
+            assert_eq!(state.ui.explorer_selected(), explorer_index);
+            let offset = state.ui.explorer_scroll_offset();
+            assert!(offset > 0);
+            assert!((offset..offset + state.ui.explorer_visible_items()).contains(&explorer_index));
+            let picked = &state.tables()[explorer_index];
+            assert!(effects.iter().any(|effect| matches!(
+                effect,
+                Effect::DispatchActions(actions) if actions.iter().any(|action| matches!(
+                    action,
+                    Action::ExecutePreview(target)
+                        if (target.schema.as_str(), target.table.as_str())
+                            == (picked.schema.as_str(), picked.name.as_str())
+                ))
+            )));
         }
 
         #[test]
