@@ -19,6 +19,8 @@ pub struct Token {
     pub text: String,
     pub start: usize,
     pub end: usize,
+    // False when scanning stopped inside an unfinished quoted token or comment.
+    pub terminated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -363,6 +365,7 @@ impl SqlLexer {
                             text: "$".to_string(),
                             start: tag_start,
                             end: tag_start + 1,
+                            terminated: true,
                         });
                         // Reprocess characters after $
                         pos = tag_start + 1;
@@ -403,6 +406,7 @@ impl SqlLexer {
                             text: "::".to_string(),
                             start: pos,
                             end: pos + 2,
+                            terminated: true,
                         });
                         pos += 2;
                         continue;
@@ -421,6 +425,7 @@ impl SqlLexer {
                             text: op,
                             start,
                             end: pos,
+                            terminated: true,
                         });
                         continue;
                     }
@@ -432,6 +437,7 @@ impl SqlLexer {
                             text: c.to_string(),
                             start: pos,
                             end: pos + 1,
+                            terminated: true,
                         });
                         pos += 1;
                         continue;
@@ -448,6 +454,7 @@ impl SqlLexer {
                             text: chars[start..pos].iter().collect(),
                             start,
                             end: pos,
+                            terminated: true,
                         });
                         continue;
                     }
@@ -470,6 +477,7 @@ impl SqlLexer {
                             text,
                             start,
                             end: pos,
+                            terminated: true,
                         });
                         continue;
                     }
@@ -480,6 +488,7 @@ impl SqlLexer {
                         text: c.to_string(),
                         start: pos,
                         end: pos + 1,
+                        terminated: true,
                     });
                     pos += 1;
                 }
@@ -501,6 +510,7 @@ impl SqlLexer {
                             text: chars[token_start..=pos].iter().collect(),
                             start: token_start,
                             end: pos + 1,
+                            terminated: true,
                         });
                         state = LexerState::Normal;
                         pos += 1;
@@ -523,6 +533,7 @@ impl SqlLexer {
                             text,
                             start: token_start,
                             end: pos + 1,
+                            terminated: true,
                         });
                         state = LexerState::Normal;
                         pos += 1;
@@ -547,6 +558,7 @@ impl SqlLexer {
                             text: chars[token_start..=pos].iter().collect(),
                             start: token_start,
                             end: pos + 1,
+                            terminated: true,
                         });
                         state = LexerState::Normal;
                         pos += 1;
@@ -570,6 +582,7 @@ impl SqlLexer {
                             text: chars[token_start..=pos].iter().collect(),
                             start: token_start,
                             end: pos + 1,
+                            terminated: true,
                         });
                         state = LexerState::Normal;
                         pos += 1;
@@ -595,6 +608,7 @@ impl SqlLexer {
                                 text: chars[token_start..pos].iter().collect(),
                                 start: token_start,
                                 end: pos,
+                                terminated: true,
                             });
                             state = LexerState::Normal;
                             dollar_tag.clear();
@@ -614,6 +628,7 @@ impl SqlLexer {
                             text: chars[token_start..pos].iter().collect(),
                             start: token_start,
                             end: pos,
+                            terminated: true,
                         });
                         state = LexerState::Normal;
                         // Don't consume newline, let Normal state handle it
@@ -630,6 +645,7 @@ impl SqlLexer {
                             text: chars[token_start..pos].iter().collect(),
                             start: token_start,
                             end: pos,
+                            terminated: true,
                         });
                         state = LexerState::Normal;
                         continue;
@@ -649,6 +665,7 @@ impl SqlLexer {
                             text: chars[token_start..=pos].iter().collect(),
                             start: token_start,
                             end: pos + 1,
+                            terminated: true,
                         });
                         state = LexerState::Normal;
                         pos += 1;
@@ -679,6 +696,7 @@ impl SqlLexer {
                 text,
                 start: token_start,
                 end: end_pos,
+                terminated: false,
             });
         }
 
@@ -688,7 +706,12 @@ impl SqlLexer {
     pub fn is_in_string_or_comment_from_tokens(tokens: &[Token], cursor_pos: usize) -> bool {
         tokens.iter().any(|t| {
             if matches!(t.kind, TokenKind::StringLiteral | TokenKind::Comment) {
-                t.start < cursor_pos && cursor_pos <= t.end
+                t.start < cursor_pos
+                    && (cursor_pos < t.end
+                        || (cursor_pos == t.end
+                            && (!t.terminated
+                                || t.text.starts_with("--")
+                                || t.text.starts_with('#'))))
             } else if matches!(t.kind, TokenKind::BacktickIdentifier(_)) {
                 (t.start < cursor_pos && cursor_pos < t.end)
                     || (cursor_pos == t.end && Self::is_unterminated_backtick(&t.text))
@@ -1678,9 +1701,13 @@ mod tests {
                     TokenKind::StringLiteral if token.text == r#""users.""#
                 )
             }));
-            assert!(SqlLexer::is_in_string_or_comment_from_tokens(
+            assert!(!SqlLexer::is_in_string_or_comment_from_tokens(
                 &tokens,
                 sql.chars().count()
+            ));
+            assert!(SqlLexer::is_in_string_or_comment_from_tokens(
+                &tokens,
+                sql.chars().count() - 1
             ));
             assert!(!SqlLexer::is_in_string_or_comment_from_tokens(
                 &l.tokenize(r#"SELECT "users." FROM "#, 20),
@@ -2545,5 +2572,32 @@ mod tests {
                 assert_eq!(target.unwrap().table, "orders");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod closed_literal_regressions {
+    use super::SqlLexer;
+    use rstest::rstest;
+
+    #[rstest]
+    #[case("SELECT 'hello'", false)]
+    #[case("SELECT 'hello", true)]
+    #[case("SELECT 'hello''", true)]
+    #[case("SELECT 'hello'\u{0027}\u{0027}", false)]
+    #[case("SELECT E'it\\'s'", false)]
+    #[case("SELECT $$hello$$", false)]
+    #[case("SELECT $tag$hello$tag$", false)]
+    #[case("SELECT $tag$hello", true)]
+    #[case("SELECT /* comment */", false)]
+    #[case("SELECT /* comment", true)]
+    #[case("SELECT -- comment", true)]
+    fn completion_resumes_only_after_closed_tokens(#[case] sql: &str, #[case] blocked: bool) {
+        let end = sql.chars().count();
+        let tokens = SqlLexer::default().tokenize(sql, end);
+        assert_eq!(
+            SqlLexer::is_in_string_or_comment_from_tokens(&tokens, end),
+            blocked
+        );
     }
 }

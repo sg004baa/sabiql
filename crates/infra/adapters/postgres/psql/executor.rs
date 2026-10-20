@@ -9,7 +9,9 @@ use tokio::time::timeout;
 
 use crate::adapters::csv_export::CsvOutputError;
 use crate::app::ports::outbound::DbOperationError;
-use crate::domain::{CommandTag, QueryResult, QuerySource, RefreshScope, WriteExecutionResult};
+use crate::domain::{
+    CommandTag, QueryResult, QuerySource, QueryValue, RefreshScope, WriteExecutionResult,
+};
 
 use super::super::PostgresAdapter;
 use super::error::{classify_cli_spawn_error, classify_query_error};
@@ -154,7 +156,7 @@ impl PostgresAdapter {
         query_args: &[&str],
         read_only: bool,
     ) -> Result<String, DbOperationError> {
-        let mut cmd = Self::build_psql_command(dsn, extra_args, query_args, read_only);
+        let mut cmd = Self::build_psql_command(dsn, extra_args, query_args, read_only)?;
 
         Self::collect_output(&mut cmd, self.timeout_secs).await
     }
@@ -164,14 +166,18 @@ impl PostgresAdapter {
         extra_args: &[&str],
         query_args: &[&str],
         read_only: bool,
-    ) -> Command {
+    ) -> Result<Command, DbOperationError> {
+        let (dsn, password) = super::super::dsn::split_connection_password(dsn)?;
         let mut cmd = Command::new("psql");
+        if let Some(password) = password {
+            cmd.env("PGPASSWORD", password);
+        }
         if read_only {
             Self::apply_read_only_pgoptions(&mut cmd);
         }
-        Self::apply_psql_base_args(&mut cmd, dsn);
+        Self::apply_psql_base_args(&mut cmd, &dsn);
         cmd.args(extra_args).args(query_args);
-        cmd
+        Ok(cmd)
     }
 
     fn apply_read_only_pgoptions(cmd: &mut Command) {
@@ -278,7 +284,11 @@ impl PostgresAdapter {
         )]
         let start = Instant::now();
 
-        let output = self.run_psql(dsn, &["--csv"], query, read_only).await?;
+        let null_marker = format!("__sabiql_null_{}__", uuid::Uuid::new_v4());
+        let null_setting = format!("null={null_marker}");
+        let output = self
+            .run_psql(dsn, &["--csv", "-P", &null_setting], query, read_only)
+            .await?;
 
         let elapsed = start.elapsed().as_millis() as u64;
 
@@ -297,7 +307,7 @@ impl PostgresAdapter {
             return Ok(Self::command_tag_result(query, tag, elapsed, source));
         }
 
-        Self::csv_result(query, stdout_trimmed, elapsed, source)
+        Self::csv_result_with_null_marker(query, &output, elapsed, source, &null_marker)
     }
 
     async fn execute_segmented_statements(
@@ -315,10 +325,12 @@ impl PostgresAdapter {
         let start = Instant::now();
 
         let marker = boundary_marker();
+        let null_marker = format!("__sabiql_null_{}__", uuid::Uuid::new_v4());
+        let null_setting = format!("null={null_marker}");
         let args = segmented_query_args(statements, &marker);
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
         let output = self
-            .run_psql_args(dsn, &["--csv"], &arg_refs, read_only)
+            .run_psql_args(dsn, &["--csv", "-P", &null_setting], &arg_refs, read_only)
             .await?;
 
         let elapsed = start.elapsed().as_millis() as u64;
@@ -335,7 +347,13 @@ impl PostgresAdapter {
         }
 
         if let Some(csv_block) = select_result_segment(&segments) {
-            return Self::csv_result(query, csv_block, elapsed, source);
+            return Self::csv_result_with_null_marker(
+                query,
+                csv_block,
+                elapsed,
+                source,
+                &null_marker,
+            );
         }
 
         let tags = segments.join("\n");
@@ -364,11 +382,22 @@ impl PostgresAdapter {
             .with_command_tag(tag)
     }
 
+    #[cfg(test)]
     fn csv_result(
         query: &str,
         csv_block: &str,
         elapsed: u64,
         source: QuerySource,
+    ) -> Result<QueryResult, DbOperationError> {
+        Self::csv_result_with_null_marker(query, csv_block, elapsed, source, "__test_null__")
+    }
+
+    fn csv_result_with_null_marker(
+        query: &str,
+        csv_block: &str,
+        elapsed: u64,
+        source: QuerySource,
+        null_marker: &str,
     ) -> Result<QueryResult, DbOperationError> {
         let mut reader = csv::ReaderBuilder::new()
             .has_headers(true)
@@ -379,11 +408,20 @@ impl PostgresAdapter {
         let mut rows = Vec::new();
         for result in reader.records() {
             let record = result?;
-            let row: Vec<String> = record.iter().map(ToString::to_string).collect();
+            let row: Vec<QueryValue> = record
+                .iter()
+                .map(|value| {
+                    if value == null_marker {
+                        QueryValue::Null
+                    } else {
+                        QueryValue::text(value)
+                    }
+                })
+                .collect();
             rows.push(row);
         }
 
-        Ok(QueryResult::success(
+        Ok(QueryResult::success_with_values(
             query.to_string(),
             columns,
             rows,
@@ -420,7 +458,7 @@ impl PostgresAdapter {
         path: &std::path::Path,
         read_only: bool,
     ) -> Result<(), DbOperationError> {
-        let mut cmd = Self::build_psql_command(dsn, &["--csv"], &["-c", query], read_only);
+        let mut cmd = Self::build_psql_command(dsn, &["--csv"], &["-c", query], read_only)?;
 
         let child = cmd
             .stdout(Stdio::piped())
@@ -847,5 +885,86 @@ mod tests {
                 super::super::PostgresAdapter::parse_affected_rows_with_source(stdout).is_err()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod restored_postgres_regressions {
+    use super::*;
+    use rstest::rstest;
+
+    #[rstest]
+    #[case("postgres://user:p%40ss@localhost/db", "p@ss")]
+    #[case(
+        "postgres://user:first@localhost/db?password=last%20pass&sslmode=require",
+        "last pass"
+    )]
+    #[case(
+        "host='localhost' dbname='db' user='user' password='p a\\\\ss\\'word'",
+        "p a\\ss'word"
+    )]
+    #[case("host=localhost password=first password = 'last pass'", "last pass")]
+    #[case("host=localhost password=''", "")]
+    fn passwords_use_environment_and_not_process_arguments(
+        #[case] dsn: &str,
+        #[case] password: &str,
+    ) {
+        let cmd = PostgresAdapter::build_psql_command(dsn, &["--csv"], &["-c", "SELECT 1"], false)
+            .unwrap();
+        let cmd = cmd.as_std();
+        let first_arg = cmd.get_args().next().unwrap().to_string_lossy();
+        assert!(!first_arg.contains("password="));
+        assert!(!first_arg.contains("p%40ss"));
+        assert_eq!(
+            cmd.get_envs()
+                .find(|(key, _)| *key == "PGPASSWORD")
+                .unwrap()
+                .1
+                .unwrap(),
+            password
+        );
+    }
+
+    #[test]
+    fn malformed_conninfo_is_rejected_without_echoing_secrets() {
+        let err =
+            PostgresAdapter::build_psql_command("host=localhost password='secret", &[], &[], false)
+                .unwrap_err();
+        assert!(!err.to_string().contains("secret"));
+    }
+
+    #[test]
+    fn csv_keeps_null_empty_literal_null_and_multiline_values_distinct() {
+        let result = PostgresAdapter::csv_result_with_null_marker(
+            "SELECT ...",
+            "a,b,c,d\nmarker,\"\",NULL,\"x\ny\"\n",
+            0,
+            QuerySource::Adhoc,
+            "marker",
+        )
+        .unwrap();
+        assert_eq!(
+            result.values(),
+            &[vec![
+                QueryValue::Null,
+                QueryValue::text(""),
+                QueryValue::text("NULL"),
+                QueryValue::text("x\ny")
+            ]]
+        );
+    }
+
+    #[test]
+    fn segmented_results_preserve_all_null_rows() {
+        let segments = split_marker_segments("M\na\nmarker\nmarker\nM\nb\nmarker\n", "M");
+        let result = PostgresAdapter::csv_result_with_null_marker(
+            "SELECT ...",
+            select_result_segment(&segments).unwrap(),
+            0,
+            QuerySource::Adhoc,
+            "marker",
+        )
+        .unwrap();
+        assert_eq!(result.values(), &[vec![QueryValue::Null]]);
     }
 }

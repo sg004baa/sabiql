@@ -9,7 +9,8 @@ use ratatui::widgets::{Block, Cell, Paragraph, Row, Table, Wrap};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use crate::primitives::atoms::{panel_block_highlight, text_cursor_spans};
+use super::detail_view::{search_viewport_offset, slice_chars_fitting_width};
+use crate::primitives::atoms::{CursorKind, panel_block_highlight, text_cursor_spans_with_kind};
 
 use crate::app::model::app_state::AppState;
 use crate::app::model::shared::focused_pane::FocusedPane;
@@ -20,9 +21,7 @@ use crate::app::model::shared::viewport::{
     select_viewport_columns, widths_fingerprint,
 };
 use crate::domain::{QueryResult, QuerySource, QueryValue};
-use crate::primitives::utils::text_utils::{
-    MIN_COL_WIDTH, PADDING, calculate_header_min_widths, truncate_to_width,
-};
+use crate::primitives::utils::text_utils::{MIN_COL_WIDTH, PADDING, calculate_header_min_widths};
 use crate::theme::ThemePalette;
 
 pub struct ResultPane;
@@ -586,45 +585,39 @@ fn calculate_ideal_widths_with(
         .collect()
 }
 
-// TODO: cursor windowing is char-based; editing a CJK cell can render wider
-// than the column until text_cursor_spans becomes display-width aware
 fn cell_edit_line_with_cursor(
     text: &str,
     cursor: usize,
     max_chars: usize,
     theme: &ThemePalette,
 ) -> Line<'static> {
-    let total = text.chars().count();
-
-    // For narrow columns, try to keep cursor visible
     if max_chars == 0 {
         return Line::from(vec![]);
     }
 
-    // Determine viewport window to keep cursor visible
-    let view_start = if cursor >= total {
-        // Cursor at end: need space for block cursor
-        let effective = max_chars.saturating_sub(1);
-        total.saturating_sub(effective)
-    } else if cursor < max_chars {
-        0
-    } else {
-        cursor.saturating_sub(max_chars / 2)
-    };
+    let visible_width = max_chars.saturating_sub(1);
+    let viewport_offset = search_viewport_offset(text, cursor, visible_width);
+    let visible = slice_chars_fitting_width(text, viewport_offset, visible_width);
+    let relative_cursor = cursor.saturating_sub(viewport_offset);
 
-    Line::from(text_cursor_spans(
-        text, cursor, view_start, max_chars, theme,
+    Line::from(text_cursor_spans_with_kind(
+        &visible,
+        relative_cursor,
+        0,
+        visible.chars().count().max(1),
+        CursorKind::Block,
+        theme,
     ))
 }
 
 fn truncate_cell(s: &str, max_width: usize) -> String {
-    let first_line = s.lines().next().unwrap_or(s);
-    truncate_to_width(first_line, max_width)
+    truncate_display_text(s, true, max_width)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::theme::DEFAULT_THEME;
     use rstest::rstest;
 
     fn calculate_ideal_widths(headers: &[String], rows: &[Vec<String>]) -> Vec<u16> {
@@ -633,6 +626,34 @@ mod tests {
                 .and_then(|row| row.get(col_idx))
                 .map(|cell| UnicodeWidthStr::width(cell.lines().next().unwrap_or(cell)))
         })
+    }
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+    fn line_display_width(line: &Line<'_>) -> usize {
+        line.spans
+            .iter()
+            .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+            .sum()
+    }
+
+    #[rstest]
+    #[case(0)]
+    #[case(1)]
+    #[case(4)]
+    #[case(9)]
+    fn wide_cell_cursor_remains_inside_column(#[case] cursor: usize) {
+        let line = cell_edit_line_with_cursor("甲乙丙丁戊己庚辛壬癸", cursor, 8, &DEFAULT_THEME);
+        assert!(line_display_width(&line) <= 8);
+        assert!(
+            line.spans
+                .iter()
+                .any(|span| span.style == DEFAULT_THEME.block_cursor_style())
+        );
     }
 
     mod row_count_display {
@@ -874,14 +895,14 @@ mod tests {
     }
 
     #[test]
-    fn newline_shows_first_line_only() {
+    fn newline_is_rendered_as_escape_literal() {
         let result = truncate_cell("first\nsecond\nthird", 20);
 
-        assert_eq!(result, "first");
+        assert_eq!(result, "first\\nsecond\\nthird");
     }
 
     #[test]
-    fn newline_with_truncation_applies_to_first_line() {
+    fn newline_with_truncation_preserves_escape() {
         let result = truncate_cell("this is a long first line\nsecond", 10);
 
         assert_eq!(result, "this is...");
@@ -963,5 +984,31 @@ mod tests {
             cached.as_micros() as f64 / iterations as f64,
             baseline.as_secs_f64() / cached.as_secs_f64(),
         );
+    }
+    #[test]
+    fn cell_edit_line_with_wide_chars_keeps_tail_cursor_inside_width() {
+        let theme = DEFAULT_THEME;
+        let text = "甲乙丙丁戊己庚辛壬癸";
+        let cursor = text.chars().count();
+        let col_width = 8;
+
+        let line = cell_edit_line_with_cursor(text, cursor, col_width, &theme);
+
+        assert!(line_display_width(&line) <= col_width);
+        assert_eq!(
+            line.spans.last().map(|span| span.content.as_ref()),
+            Some(" ")
+        );
+        // 先頭の全角文字は省略され、末尾側 (カーソル付近) が表示される
+        assert!(!line_text(&line).starts_with('甲'));
+        assert!(text.ends_with(line_text(&line).trim_end_matches(' ')));
+    }
+
+    #[test]
+    fn control_characters_render_as_backslash_escapes() {
+        let raw = "A\0B\nC\tD\r\nE";
+        let result = truncate_cell(raw, 40);
+
+        assert_eq!(result, "A\\0B\\nC\\tD\\r\\nE");
     }
 }

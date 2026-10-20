@@ -254,3 +254,128 @@ mod dispatch_overflow_fallback {
         assert!(error.contains("2 actions dropped"), "got: {error}");
     }
 }
+
+#[cfg(feature = "self-update")]
+mod sha256_digest {
+    use crate::{parse_sha256_digest, release_archive_name};
+
+    const DIGEST: &str = "3ceb307a4d3f790abd375a49d74df9d46b99855f76dc790625abe6000775f82e";
+
+    #[test]
+    fn parses_sha256sum_style_content() {
+        let content = format!("{DIGEST}  sabiql-x86_64-unknown-linux-gnu.tar.gz\n");
+        assert_eq!(parse_sha256_digest(&content, "x.sha256").unwrap(), DIGEST);
+    }
+
+    #[test]
+    fn parses_bare_digest_and_normalizes_case() {
+        let content = format!("{}\n", DIGEST.to_uppercase());
+        assert_eq!(parse_sha256_digest(&content, "x.sha256").unwrap(), DIGEST);
+    }
+
+    #[test]
+    fn rejects_empty_content() {
+        assert!(parse_sha256_digest("  \n", "x.sha256").is_err());
+    }
+
+    #[test]
+    fn rejects_non_hex_or_wrong_length_digest() {
+        assert!(parse_sha256_digest("nothex", "x.sha256").is_err());
+        assert!(parse_sha256_digest(&DIGEST[..40], "x.sha256").is_err());
+        let bad = format!("{}zz", &DIGEST[..62]);
+        assert!(parse_sha256_digest(&bad, "x.sha256").is_err());
+    }
+
+    #[test]
+    fn archive_name_matches_cargo_dist_convention() {
+        let name = release_archive_name();
+        let target = self_update::get_target();
+        let extension = if cfg!(target_os = "windows") {
+            "zip"
+        } else {
+            "tar.gz"
+        };
+        assert_eq!(name, format!("sabiql-{target}.{extension}"));
+    }
+}
+
+#[cfg(feature = "self-update")]
+mod mandatory_update_verification {
+    use crate::{fetch_expected_sha256, verified_updater};
+    use self_update::update::UpdateConfig;
+
+    #[test]
+    fn absent_checksum_asset_stops_before_downloading() {
+        let release = self_update::Release::builder()
+            .version("9.0.0")
+            .build()
+            .unwrap();
+        let err = fetch_expected_sha256(&release, "sabiql-test.tar.gz").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("refusing to update without verification")
+        );
+    }
+
+    struct Response {
+        headers: self_update::http_client::HeaderMap,
+        body: Vec<u8>,
+    }
+    impl self_update::http_client::HttpResponse for Response {
+        fn headers(&self) -> &self_update::http_client::HeaderMap {
+            &self.headers
+        }
+        fn body(self: Box<Self>) -> Box<dyn std::io::Read> {
+            Box::new(std::io::Cursor::new(self.body))
+        }
+    }
+    #[derive(Default)]
+    struct Client {
+        urls: std::sync::Mutex<Vec<String>>,
+    }
+    impl self_update::http_client::HttpClient for Client {
+        fn get(
+            &self,
+            url: &str,
+            _: &self_update::http_client::HeaderMap,
+            _: Option<std::time::Duration>,
+        ) -> self_update::Result<Box<dyn self_update::http_client::HttpResponse>> {
+            self.urls.lock().unwrap().push(url.to_string());
+            let body = if url.ends_with("/releases/tags/v9.0.0") {
+                br#"{"tag_name":"v9.0.0","name":"test","created_at":"2026-01-01T00:00:00Z","assets":[
+                    {"name":"sabiql-test.tar.gz.sha256","url":"https://example.com/hash"},
+                    {"name":"sabiql-test.tar.gz","url":"https://example.com/archive"},
+                    {"name":"sabiql-test-installer.sh","url":"https://example.com/installer"}
+                ]}"#.to_vec()
+            } else {
+                assert_eq!(url, "https://example.com/archive");
+                b"untrusted payload".to_vec()
+            };
+            Ok(Box::new(Response {
+                headers: self_update::http_client::HeaderMap::default(),
+                body,
+            }))
+        }
+    }
+
+    #[test]
+    fn mismatched_checksum_stops_before_extraction_and_installation() {
+        let client = std::sync::Arc::new(Client::default());
+        let updater = verified_updater(
+            "1.0.0",
+            "v9.0.0".into(),
+            "sabiql-test.tar.gz".into(),
+            "ab".repeat(32),
+        )
+        .http_client(client.clone())
+        .build()
+        .unwrap();
+        assert_eq!(updater.release_tag(), Some("v9.0.0"));
+        let error = updater.update().unwrap_err();
+        assert!(
+            matches!(error, self_update::errors::Error::ChecksumMismatch { .. }),
+            "{error}"
+        );
+        assert_eq!(client.urls.lock().unwrap().len(), 2);
+    }
+}

@@ -242,15 +242,10 @@ fn run_update() -> Result<()> {
         return Ok(());
     };
     let target_version = format!("v{}", latest.version());
+    let archive_name = release_archive_name();
+    let expected_sha256 = fetch_expected_sha256(latest, &archive_name)?;
 
-    let status = self_update::backends::github::Update::configure()
-        .repo_owner("sg004baa")
-        .repo_name("sabiql")
-        .bin_name("sabiql")
-        .show_download_progress(true)
-        .no_confirm(true)
-        .current_version(current)
-        .release_tag(target_version)
+    let status = verified_updater(current, target_version, archive_name, expected_sha256)
         .build()?
         .update()?;
 
@@ -284,6 +279,93 @@ fn latest_stable_release<'a>(
                 latest
             }
         })
+}
+
+#[cfg(feature = "self-update")]
+fn verified_updater(
+    current: &str,
+    target_version: String,
+    archive_name: String,
+    expected_sha256: String,
+) -> self_update::backends::github::UpdateBuilder {
+    let mut builder = self_update::backends::github::Update::configure();
+    builder
+        .repo_owner("sg004baa")
+        .repo_name("sabiql")
+        .bin_name("sabiql")
+        .show_download_progress(true)
+        .no_confirm(true)
+        .current_version(current)
+        .release_tag(target_version)
+        .asset_matcher(move |assets| {
+            assets
+                .iter()
+                .find(|asset| asset.name() == archive_name)
+                .cloned()
+        })
+        .verify_checksum(self_update::Checksum::Sha256(expected_sha256));
+    builder
+}
+
+/// cargo-dist release archive name for the running platform, e.g.
+/// `sabiql-x86_64-unknown-linux-gnu.tar.gz`.
+#[cfg(feature = "self-update")]
+fn release_archive_name() -> String {
+    let target = self_update::get_target();
+    let extension = if cfg!(target_os = "windows") {
+        "zip"
+    } else {
+        "tar.gz"
+    };
+    format!("sabiql-{target}.{extension}")
+}
+
+/// Download the cargo-dist `<archive>.sha256` release asset and return the expected
+/// hex digest. Fails if the asset is missing or its content is not a SHA-256 digest.
+#[cfg(feature = "self-update")]
+fn fetch_expected_sha256(
+    release: &self_update::update::Release,
+    archive_name: &str,
+) -> Result<String> {
+    use color_eyre::eyre::eyre;
+
+    let checksum_name = format!("{archive_name}.sha256");
+    let asset = release
+        .assets()
+        .iter()
+        .find(|asset| asset.name() == checksum_name)
+        .ok_or_else(|| {
+            eyre!(
+                "Checksum asset `{checksum_name}` not found in release v{}; refusing to update without verification",
+                release.version()
+            )
+        })?;
+
+    let mut raw = Vec::new();
+    let mut download = self_update::Download::from_url(asset.download_url());
+    download.request_header("Accept", "application/octet-stream");
+    download.download_to(&mut raw)?;
+
+    let content = String::from_utf8(raw)
+        .map_err(|_| eyre!("Checksum asset `{checksum_name}` is not valid UTF-8"))?;
+    parse_sha256_digest(&content, &checksum_name)
+}
+
+/// Parse a cargo-dist checksum asset: `sha256sum`-style content, `<hex digest>  <file name>`.
+#[cfg(feature = "self-update")]
+fn parse_sha256_digest(content: &str, checksum_name: &str) -> Result<String> {
+    use color_eyre::eyre::eyre;
+
+    let digest = content
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| eyre!("Checksum asset `{checksum_name}` is empty"))?;
+    if digest.len() != 64 || !digest.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(eyre!(
+            "Checksum asset `{checksum_name}` does not contain a SHA-256 digest: `{digest}`"
+        ));
+    }
+    Ok(digest.to_lowercase())
 }
 
 #[cfg(not(feature = "self-update"))]

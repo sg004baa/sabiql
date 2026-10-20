@@ -51,19 +51,27 @@ fn find_userinfo_terminator(text: &str, authority_start: usize) -> Option<usize>
         .map_or(text.len(), |offset| authority_start + offset);
     let line = text.get(authority_start..line_end).unwrap_or_default();
 
-    line.match_indices('@').rev().find_map(|(offset, _)| {
-        let at = authority_start + offset;
-        let host = text.get((at + 1)..line_end).unwrap_or_default();
-        let host_end = host
-            .find(['/', '?', '#', ' ', '\t', '\'', '"', ','])
-            .unwrap_or(host.len());
+    line.match_indices('@')
+        .rev()
+        .find_map(|(offset, _)| {
+            let at = authority_start + offset;
+            let host = text.get((at + 1)..line_end).unwrap_or_default();
+            let host_end = host
+                .find(['/', '?', '#', ' ', '\t', '\'', '"', ','])
+                .unwrap_or(host.len());
 
-        if host_end > 0 || host.starts_with(['/', '?', '#']) || host.is_empty() {
-            Some(at)
-        } else {
-            None
-        }
-    })
+            if !host[..host_end].contains('@')
+                && (host_end > 0 || host.starts_with(['/', '?', '#']) || host.is_empty())
+            {
+                Some(at)
+            } else {
+                None
+            }
+        })
+        // No '@' is followed by a plausible host (e.g. truncated/malformed URL where
+        // '@' is followed by whitespace, a quote, or a comma). The password before
+        // the rightmost '@' must still be masked.
+        .or_else(|| line.rfind('@').map(|offset| authority_start + offset))
 }
 
 fn mask_kv_passwords(text: &str) -> String {
@@ -271,5 +279,20 @@ mod tests {
             mask_password("接続先İ password=secret"),
             "接続先İ password=****"
         );
+    }
+}
+
+#[cfg(test)]
+mod malformed_uri_regressions {
+    use super::mask_password;
+    use rstest::rstest;
+
+    #[rstest]
+    #[case("postgres://user:secret@ host", "postgres://user:****@ host")]
+    #[case("postgresql://user:secret@\"", "postgresql://user:****@\"")]
+    #[case("mysql://user:secret@,", "mysql://user:****@,")]
+    #[case("postgres://user:p@ss@\thost", "postgres://user:****@\thost")]
+    fn malformed_hosts_do_not_expose_passwords(#[case] input: &str, #[case] expected: &str) {
+        assert_eq!(mask_password(input), expected);
     }
 }
