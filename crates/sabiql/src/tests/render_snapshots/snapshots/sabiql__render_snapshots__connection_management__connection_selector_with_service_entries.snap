@@ -42,7 +42,7 @@ test_project ▸ - ▸ -                                                        
 │                                │                                                                                                 │                                │
 │                                │                                                                                                 │                                │
 │                                │                                                                                                 │                                │
-│                                ╰ Enter: Confirm │ n: New │ e: Edit │ d: Delete │ Esc: Close ─────────────────────────────────────╯                                │
+│                                ╰ Enter: Confirm │ n: New │ e: Edit │ d: Delete │ Esc/q: Close ───────────────────────────────────╯                                │
 │                                       ││                                                                                                                          │
 │                                       ││                                                                                                                          │
 │                                       ││                                                                                                                          │

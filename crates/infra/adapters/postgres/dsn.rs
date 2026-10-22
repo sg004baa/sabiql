@@ -1,4 +1,4 @@
-use crate::app::ports::outbound::DsnBuilder;
+use crate::app::ports::outbound::{DbOperationError, DsnBuilder};
 use crate::domain::connection::ConnectionProfile;
 
 use super::PostgresAdapter;
@@ -110,6 +110,131 @@ fn parse_conninfo_value(dsn: &str, start: usize) -> (String, usize) {
             .map_or(dsn.len(), |offset| start + offset);
         (dsn[start..end].to_string(), end)
     }
+}
+
+// libpq accepts both URIs and conninfo. Keep credentials out of argv for every
+// psql path (metadata, queries, writes and exports).
+pub(super) fn split_connection_password(
+    dsn: &str,
+) -> Result<(String, Option<String>), DbOperationError> {
+    let invalid =
+        || DbOperationError::QueryFailed("Invalid PostgreSQL connection parameters".into());
+    if dsn.starts_with("postgres://") || dsn.starts_with("postgresql://") {
+        let authority_start = dsn.find("://").unwrap() + 3;
+        let authority_end = dsn[authority_start..]
+            .find(['/', '?', '#'])
+            .map_or(dsn.len(), |offset| authority_start + offset);
+        let mut sanitized = dsn.to_string();
+        let mut password = None;
+        if let Some(at) = dsn[authority_start..authority_end].rfind('@') {
+            let at = authority_start + at;
+            if let Some(colon) = dsn[authority_start..at].find(':') {
+                let colon = authority_start + colon;
+                password = Some(
+                    urlencoding::decode(&dsn[colon + 1..at])
+                        .map_err(|_| invalid())?
+                        .into_owned(),
+                );
+                sanitized.replace_range(colon..at, "");
+            }
+        }
+        if let Some(query_start) = sanitized.find('?') {
+            let query_end = sanitized[query_start..]
+                .find('#')
+                .map_or(sanitized.len(), |offset| query_start + offset);
+            let mut kept = Vec::new();
+            for item in sanitized[query_start + 1..query_end].split('&') {
+                let (key, value) = item.split_once('=').unwrap_or((item, ""));
+                if urlencoding::decode(key).map_err(|_| invalid())? == "password" {
+                    password = Some(
+                        urlencoding::decode(value)
+                            .map_err(|_| invalid())?
+                            .into_owned(),
+                    );
+                } else {
+                    kept.push(item);
+                }
+            }
+            let query = kept.join("&");
+            let replacement = if query.is_empty() {
+                String::new()
+            } else {
+                format!("?{query}")
+            };
+            sanitized.replace_range(query_start..query_end, &replacement);
+        }
+        return Ok((sanitized, password));
+    }
+    if !dsn.contains('=') {
+        return Ok((dsn.to_string(), None));
+    }
+    let bytes = dsn.as_bytes();
+    let mut pos = 0;
+    let mut parts = Vec::new();
+    let mut password = None;
+    while pos < bytes.len() {
+        while bytes.get(pos).is_some_and(u8::is_ascii_whitespace) {
+            pos += 1;
+        }
+        if pos == bytes.len() {
+            break;
+        }
+        let start = pos;
+        while bytes
+            .get(pos)
+            .is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'_')
+        {
+            pos += 1;
+        }
+        if pos == start {
+            return Err(invalid());
+        }
+        let key = &dsn[start..pos];
+        while bytes.get(pos).is_some_and(u8::is_ascii_whitespace) {
+            pos += 1;
+        }
+        if bytes.get(pos) != Some(&b'=') {
+            return Err(invalid());
+        }
+        pos += 1;
+        while bytes.get(pos).is_some_and(u8::is_ascii_whitespace) {
+            pos += 1;
+        }
+        let quoted = bytes.get(pos) == Some(&b'\'');
+        if quoted {
+            pos += 1;
+        }
+        let mut value = String::new();
+        let mut closed = !quoted;
+        while pos < bytes.len() {
+            let ch = dsn[pos..].chars().next().unwrap();
+            if ch == '\\' {
+                pos += 1;
+                let ch = dsn[pos..].chars().next().ok_or_else(invalid)?;
+                value.push(ch);
+                pos += ch.len_utf8();
+            } else if quoted && ch == '\'' {
+                pos += 1;
+                closed = true;
+                break;
+            } else if !quoted && ch.is_ascii_whitespace() {
+                break;
+            } else {
+                value.push(ch);
+                pos += ch.len_utf8();
+            }
+        }
+        if !closed || bytes.get(pos).is_some_and(|c| !c.is_ascii_whitespace()) {
+            return Err(invalid());
+        }
+        if key == "password" {
+            password = Some(value);
+        } else {
+            // Retain empty parameter values too: e.g. host='' selects a socket.
+            parts.push(format!("{key}={}", quote_conninfo_value(&value)));
+        }
+    }
+    Ok((parts.join(" "), password))
 }
 
 #[cfg(test)]
@@ -289,5 +414,47 @@ mod tests {
 
             assert_eq!(PostgresAdapter::extract_database_name(&dsn), "my/db");
         }
+    }
+}
+
+#[cfg(test)]
+mod process_connection_regressions {
+    use super::split_connection_password;
+    use rstest::rstest;
+
+    #[rstest]
+    #[case(
+        "postgresql://user:secret@host1:5432,host2:5433/db?sslmode=require",
+        "postgresql://user@host1:5432,host2:5433/db?sslmode=require",
+        Some("secret")
+    )]
+    #[case(
+        "postgresql:///db?host=%2Ftmp&password=secret",
+        "postgresql:///db?host=%2Ftmp",
+        Some("secret")
+    )]
+    #[case(
+        "postgresql://localhost/db?sslmode=require",
+        "postgresql://localhost/db?sslmode=require",
+        None
+    )]
+    #[case(
+        "service='development database'",
+        "service='development database'",
+        None
+    )]
+    #[case(
+        "host=localhost options='-c search_path=public' password='secret' dbname='a=b'",
+        "host='localhost' options='-c search_path=public' dbname='a=b'",
+        Some("secret")
+    )]
+    fn stripping_password_preserves_other_connection_options(
+        #[case] input: &str,
+        #[case] expected: &str,
+        #[case] password: Option<&str>,
+    ) {
+        let (dsn, secret) = split_connection_password(input).unwrap();
+        assert_eq!(dsn, expected);
+        assert_eq!(secret.as_deref(), password);
     }
 }

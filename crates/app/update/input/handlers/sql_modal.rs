@@ -88,6 +88,10 @@ fn handle_sql_modal_keys_internal(
             return Action::ExplainRequest;
         }
 
+        if plain && combo.key == Key::Char('q') {
+            return Action::CloseModal(ModalKind::SqlModal);
+        }
+
         // Tab switching
         if plain && combo.key == Key::Tab {
             return Action::SqlModalNextTab;

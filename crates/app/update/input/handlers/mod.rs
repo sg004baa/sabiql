@@ -560,3 +560,59 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod restored_close_keys {
+    use super::*;
+    use crate::model::shared::settings::KeymapPreset;
+    use crate::model::sql_editor::modal::SqlModalTab;
+    use crate::ports::inbound::Key;
+    use crate::update::action::{InputTarget, ModalKind};
+    use rstest::rstest;
+
+    #[rstest]
+    #[case(SqlModalTab::Sql)]
+    #[case(SqlModalTab::Plan)]
+    #[case(SqlModalTab::Compare)]
+    fn q_closes_non_editing_sql_tabs(#[case] tab: SqlModalTab) {
+        for preset in [KeymapPreset::Default, KeymapPreset::Ide] {
+            let mut state = AppState::new("test".into());
+            state.modal.set_mode(InputMode::SqlModal);
+            state.sql_modal.set_active_tab(tab);
+            state.settings.load_keymap_preset(preset);
+            assert!(matches!(
+                handle_event(InputEvent::Key(KeyCombo::plain(Key::Char('q'))), &state),
+                Action::CloseModal(ModalKind::SqlModal)
+            ));
+        }
+    }
+
+    #[test]
+    fn q_is_still_text_in_sql_insert_mode() {
+        let mut state = AppState::new("test".into());
+        state.modal.set_mode(InputMode::SqlModal);
+        state.sql_modal.enter_editing();
+        assert!(matches!(
+            handle_event(InputEvent::Key(KeyCombo::plain(Key::Char('q'))), &state),
+            Action::TextInput {
+                target: InputTarget::SqlModal,
+                ch: 'q'
+            }
+        ));
+    }
+
+    #[test]
+    fn q_closes_connection_selector_and_error() {
+        let mut state = AppState::new("test".into());
+        state.modal.set_mode(InputMode::ConnectionSelector);
+        assert!(matches!(
+            handle_event(InputEvent::Key(KeyCombo::plain(Key::Char('q'))), &state),
+            Action::Escape
+        ));
+        state.modal.set_mode(InputMode::ConnectionError);
+        assert!(matches!(
+            handle_event(InputEvent::Key(KeyCombo::plain(Key::Char('q'))), &state),
+            Action::CloseConnectionError
+        ));
+    }
+}

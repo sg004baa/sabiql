@@ -75,12 +75,12 @@ pub mod sql_modal_normal {
     };
 
     pub const CLOSE: KeyBinding = KeyBinding {
-        key_short: "Esc",
-        key: "Esc",
+        key_short: "Esc/q",
+        key: "Esc / q",
         desc_short: "Close",
         description: "Close editor",
         action: Action::CloseModal(ModalKind::SqlModal),
-        combos: &[KeyCombo::plain(Key::Esc)],
+        combos: &[KeyCombo::plain(Key::Esc), KeyCombo::plain(Key::Char('q'))],
     };
 
     pub const CLEAR: KeyBinding = KeyBinding {
@@ -196,12 +196,12 @@ pub mod sql_modal_plan {
     };
 
     pub const CLOSE: KeyBinding = KeyBinding {
-        key_short: "Esc",
-        key: "Esc",
+        key_short: "Esc/q",
+        key: "Esc / q",
         desc_short: "Close",
         description: "Close editor",
         action: Action::CloseModal(ModalKind::SqlModal),
-        combos: &[KeyCombo::plain(Key::Esc)],
+        combos: &[KeyCombo::plain(Key::Esc), KeyCombo::plain(Key::Char('q'))],
     };
 }
 
@@ -296,12 +296,12 @@ pub mod sql_modal_compare {
     };
 
     pub const CLOSE: KeyBinding = KeyBinding {
-        key_short: "Esc",
-        key: "Esc",
+        key_short: "Esc/q",
+        key: "Esc / q",
         desc_short: "Close",
         description: "Close editor",
         action: Action::CloseModal(ModalKind::SqlModal),
-        combos: &[KeyCombo::plain(Key::Esc)],
+        combos: &[KeyCombo::plain(Key::Esc), KeyCombo::plain(Key::Char('q'))],
     };
 }
 

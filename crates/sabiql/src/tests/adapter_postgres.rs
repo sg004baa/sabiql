@@ -302,3 +302,78 @@ mod error_paths {
         );
     }
 }
+
+mod null_value_regressions {
+    use super::*;
+    use sabiql_domain::QueryValue;
+
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL"]
+    async fn adhoc_and_segmented_queries_preserve_null_empty_and_literal_null() {
+        let adapter = PostgresAdapter::new();
+        let dsn = postgres_integration_dsn();
+        for prefix in ["", "SELECT 1; "] {
+            let query = format!(
+                "{prefix}SELECT NULL::text AS n, ''::text AS empty, 'NULL'::text AS literal, ' trailing '::text AS spaced"
+            );
+            let result = adapter
+                .execute_adhoc(&dsn, &query, AccessMode::ReadWrite)
+                .await
+                .unwrap();
+            assert_eq!(
+                result.values(),
+                &[vec![
+                    QueryValue::Null,
+                    QueryValue::text(""),
+                    QueryValue::text("NULL"),
+                    QueryValue::text(" trailing ")
+                ]]
+            );
+            let result = adapter
+                .execute_adhoc(
+                    &dsn,
+                    &format!("{prefix}SELECT NULL::text AS n FROM generate_series(1,3)"),
+                    AccessMode::ReadWrite,
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                result.values(),
+                &[
+                    vec![QueryValue::Null],
+                    vec![QueryValue::Null],
+                    vec![QueryValue::Null]
+                ]
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL"]
+    async fn preview_preserves_null_empty_and_literal_null() {
+        with_postgres_test_db(|db| {
+            Box::pin(async move {
+                let schema = db.schema();
+                db.adapter().execute_adhoc(db.dsn(), &format!(
+                "CREATE TABLE \"{schema}\".nullable_values(id INTEGER PRIMARY KEY, value TEXT); \
+                 INSERT INTO \"{schema}\".nullable_values VALUES (1,NULL),(2,''),(3,'NULL')"
+            ), AccessMode::ReadWrite).await.map_err(|err| err.to_string())?;
+                let result = db
+                    .adapter()
+                    .execute_preview(db.dsn(), schema, "nullable_values", 10, 0)
+                    .await
+                    .map_err(|err| err.to_string())?;
+                assert_eq!(
+                    result.values(),
+                    &[
+                        vec![QueryValue::text("1"), QueryValue::Null],
+                        vec![QueryValue::text("2"), QueryValue::text("")],
+                        vec![QueryValue::text("3"), QueryValue::text("NULL")],
+                    ]
+                );
+                Ok(())
+            })
+        })
+        .await;
+    }
+}

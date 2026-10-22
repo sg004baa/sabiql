@@ -15,6 +15,10 @@ The fork incorporates `riii111/sabiql` through `52781c60e2f3d5a73ca0c7a2ba57559a
 - `Tab` / `Shift+Tab` and `>` / `<` cycle panes; `/` opens the table picker and `Ctrl+K` opens settings. Inspector tabs use `[` / `]` to keep pane cycling available.
 - Result columns retain the 50-cell width cap. Newlines, tabs and other control characters render as visible escapes, and marked rows retain their highlight.
 - The fork's Homebrew/release configuration and self-update repository remain `sg004baa/sabiql`.
+- SQL viewers and connection selection/error dialogs close with `q`; document editing still accepts `q` as text. Cell editing keeps wide-character cursors visible and displays control-character escapes in pending drafts too.
+- PostgreSQL passwords are passed to psql through `PGPASSWORD`, including URI and conninfo connections. Malformed URI passwords remain masked in error details. PostgreSQL preview and adhoc results preserve typed NULL values separately from empty strings and literal `NULL` text.
+- SQL completion resumes immediately after closed strings and block comments, while remaining suppressed inside unfinished strings/comments.
+- Self-update requires the exact platform archive's `.sha256` asset, pins that archive and release, and checks its digest before extraction or installation.
 - Existing fork v2 connection files retain their database types (`database_type`) and SQLite paths stored in `database`. Reading leaves the original file intact; a successful save writes the canonical v3 format while preserving existing connections and application settings.
 
 The remaining engine behavior, feature policies and keymap presets follow upstream v3.0.1.

@@ -54,7 +54,7 @@ pub(super) fn render_detail_search(
     set_terminal_cursor(frame, area, &visible_input, 0, relative_cursor, 0, 1);
 }
 
-fn search_viewport_offset(input: &str, cursor: usize, visible_width: usize) -> usize {
+pub(super) fn search_viewport_offset(input: &str, cursor: usize, visible_width: usize) -> usize {
     if visible_width == 0 {
         return cursor;
     }
@@ -72,7 +72,7 @@ fn search_viewport_offset(input: &str, cursor: usize, visible_width: usize) -> u
     viewport_offset
 }
 
-fn slice_chars_fitting_width(input: &str, start: usize, visible_width: usize) -> String {
+pub(super) fn slice_chars_fitting_width(input: &str, start: usize, visible_width: usize) -> String {
     if visible_width == 0 {
         return String::new();
     }
