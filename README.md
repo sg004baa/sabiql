@@ -12,6 +12,8 @@ This fork tracks [riii111/sabiql](https://github.com/riii111/sabiql) and keeps i
 
 Build this fork from its checkout with `cargo build --workspace --release`. The upstream installation commands below install the upstream distribution.
 
+The committed lockfile includes the certificate-verification and trust-store fixes for RUSTSEC-2026-0381, RUSTSEC-2026-0382, and RUSTSEC-2026-0383. Use `cargo build --workspace --release --locked` to retain those dependency versions, and `cargo audit` to check for newly disclosed vulnerabilities.
+
 ## Concept
 
 > Vim-first · Safe by design · Oil-and-vinegar UI · Fast and lightweight
