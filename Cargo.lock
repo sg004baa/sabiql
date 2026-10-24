@@ -2828,7 +2828,7 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "sabiql"
-version = "3.0.1"
+version = "3.0.2"
 dependencies = [
  "clap",
  "color-eyre",
@@ -2847,7 +2847,7 @@ dependencies = [
 
 [[package]]
 name = "sabiql-app"
-version = "3.0.1"
+version = "3.0.2"
 dependencies = [
  "async-trait",
  "color-eyre",
@@ -2870,7 +2870,7 @@ dependencies = [
 
 [[package]]
 name = "sabiql-domain"
-version = "3.0.1"
+version = "3.0.2"
 dependencies = [
  "rstest",
  "serde",
@@ -2882,7 +2882,7 @@ dependencies = [
 
 [[package]]
 name = "sabiql-infra"
-version = "3.0.1"
+version = "3.0.2"
 dependencies = [
  "arboard",
  "async-trait",
@@ -2908,7 +2908,7 @@ dependencies = [
 
 [[package]]
 name = "sabiql-redis"
-version = "3.0.1"
+version = "3.0.2"
 dependencies = [
  "arboard",
  "async-trait",
@@ -2929,7 +2929,7 @@ dependencies = [
 
 [[package]]
 name = "sabiql-tui-kit"
-version = "3.0.1"
+version = "3.0.2"
 dependencies = [
  "color-eyre",
  "crossterm",
@@ -2943,7 +2943,7 @@ dependencies = [
 
 [[package]]
 name = "sabiql-ui"
-version = "3.0.1"
+version = "3.0.2"
 dependencies = [
  "crossterm",
  "ratatui",

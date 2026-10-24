@@ -11,19 +11,19 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "3.0.1"
+version = "3.0.2"
 edition = "2024"
 rust-version = "1.98"
 license = "MIT"
 repository = "https://github.com/sg004baa/sabiql"
 
 [workspace.dependencies]
-sabiql-tui-kit = { path = "crates/tui-kit", version = "3.0.1" }
+sabiql-tui-kit = { path = "crates/tui-kit", version = "3.0.2" }
 # When adding third-party dependencies, update `absolute-paths-allowed-crates` in clippy.toml.
-sabiql-domain = { path = "crates/domain", version = "3.0.1" }
-sabiql-app = { path = "crates/app", version = "3.0.1" }
-sabiql-infra = { path = "crates/infra", version = "3.0.1" }
-sabiql-ui = { path = "crates/ui", version = "3.0.1" }
+sabiql-domain = { path = "crates/domain", version = "3.0.2" }
+sabiql-app = { path = "crates/app", version = "3.0.2" }
+sabiql-infra = { path = "crates/infra", version = "3.0.2" }
+sabiql-ui = { path = "crates/ui", version = "3.0.2" }
 walkdir = "2"
 arboard = "3"
 async-trait = "0.1"
