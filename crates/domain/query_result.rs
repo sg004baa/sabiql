@@ -154,6 +154,7 @@ pub struct QueryResult {
     explicit_row_identity: Option<ExplicitRowIdentity>,
     row_count: usize,
     typed_values: bool,
+    binary_as_text: bool,
 }
 
 impl QueryResult {
@@ -177,6 +178,7 @@ impl QueryResult {
             explicit_row_identity: None,
             row_count,
             typed_values: false,
+            binary_as_text: false,
             execution_time_ms,
             source,
             error: None,
@@ -202,6 +204,7 @@ impl QueryResult {
             explicit_row_identity: None,
             row_count,
             typed_values: true,
+            binary_as_text: false,
             execution_time_ms,
             source,
             error: None,
@@ -225,6 +228,7 @@ impl QueryResult {
             explicit_row_identity: None,
             row_count: 0,
             typed_values: false,
+            binary_as_text: false,
             execution_time_ms,
             source,
             error: Some(error),
@@ -232,6 +236,31 @@ impl QueryResult {
             refresh_scope: RefreshScope::None,
             mysql_diagnostics: Vec::new(),
         }
+    }
+
+    /// Display binary values as UTF-8 text without changing their stored bytes.
+    #[must_use]
+    pub fn with_binary_text_display(mut self) -> Self {
+        self.binary_as_text = true;
+        self
+    }
+
+    #[must_use]
+    pub fn displays_binary_as_text(&self) -> bool {
+        self.binary_as_text
+    }
+
+    fn value_display_ref<'a>(&self, value: &'a QueryValue) -> Cow<'a, str> {
+        if self.binary_as_text
+            && let QueryValue::Blob(bytes) = value
+        {
+            let text = String::from_utf8_lossy(bytes);
+            if text.contains('\0') {
+                return Cow::Owned(escape_display_text(&text));
+            }
+            return text;
+        }
+        value.display_value_ref()
     }
 
     #[must_use]
@@ -334,7 +363,8 @@ impl QueryResult {
     #[must_use]
     pub fn display_value_ref_at(&self, row: usize, col: usize) -> Option<Cow<'_, str>> {
         if self.typed_values {
-            self.value_at(row, col).map(QueryValue::display_value_ref)
+            self.value_at(row, col)
+                .map(|value| self.value_display_ref(value))
         } else {
             self.value_at(row, col)
                 .and_then(|value| value.as_str().map(Cow::Borrowed))
@@ -349,9 +379,12 @@ impl QueryResult {
     #[must_use]
     pub fn display_row_at(&self, row: usize) -> Option<Vec<String>> {
         if self.typed_values {
-            self.values
-                .get(row)
-                .map(|values| values.iter().map(QueryValue::display_value).collect())
+            self.values.get(row).map(|values| {
+                values
+                    .iter()
+                    .map(|value| self.value_display_ref(value).into_owned())
+                    .collect()
+            })
         } else {
             self.values.get(row).map(|values| {
                 values
@@ -548,5 +581,60 @@ mod tests {
         fn display_value_escapes_embedded_nul_byte() {
             assert_eq!(QueryValue::text("a\0bc").display_value(), "a\\0bc");
         }
+    }
+}
+
+#[cfg(test)]
+mod binary_text_display_tests {
+    use super::*;
+    use rstest::rstest;
+
+    #[rstest]
+    #[case(b"abcdefghijklmnop", "abcdefghijklmnop")]
+    #[case("日本語".as_bytes(), "日本語")]
+    #[case(b"a\xffb", "a\u{fffd}b")]
+    #[case(b"a\0b", "a\\0b")]
+    #[case(b"", "")]
+    fn text_display_preserves_binary_bytes(#[case] bytes: &[u8], #[case] expected: &str) {
+        let value = QueryValue::Blob(bytes.to_vec());
+        let sql_value = value.copy_value();
+        let result = QueryResult::success_with_values(
+            "SELECT payload".into(),
+            vec!["payload".into()],
+            vec![vec![value.clone()]],
+            0,
+            QuerySource::Preview,
+        )
+        .with_binary_text_display();
+        assert_eq!(result.display_value_at(0, 0).as_deref(), Some(expected));
+        assert_eq!(result.display_row_at(0), Some(vec![expected.into()]));
+        assert_eq!(result.value_at(0, 0), Some(&value));
+        assert_eq!(result.value_at(0, 0).unwrap().copy_value(), sql_value);
+    }
+
+    #[test]
+    fn default_binary_display_and_literal_hex_text_are_preserved() {
+        let result = QueryResult::success_with_values(
+            String::new(),
+            vec!["blob".into(), "text".into(), "null".into()],
+            vec![vec![
+                QueryValue::Blob(b"abc".to_vec()),
+                QueryValue::text("0x616263"),
+                QueryValue::Null,
+            ]],
+            0,
+            QuerySource::Preview,
+        );
+        assert!(
+            result
+                .display_value_at(0, 0)
+                .unwrap()
+                .starts_with("BLOB (3 bytes)")
+        );
+        let result = result.with_binary_text_display();
+        assert_eq!(
+            result.display_row_at(0),
+            Some(vec!["abc".into(), "0x616263".into(), "NULL".into()])
+        );
     }
 }

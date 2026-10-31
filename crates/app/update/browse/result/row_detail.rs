@@ -29,7 +29,10 @@ pub(in crate::update) fn reduce_row_detail(
                 let Some(values) = result.values().get(row_idx) else {
                     return DispatchResult::handled();
                 };
-                RowDetailState::open_with_values(&result.columns, values)
+                let Some(cells) = result.display_row_at(row_idx) else {
+                    return DispatchResult::handled();
+                };
+                RowDetailState::open_with_display_values(&result.columns, values, &cells)
             } else {
                 let Some(cells) = result.display_row_at(row_idx) else {
                     return DispatchResult::handled();
@@ -179,6 +182,34 @@ mod tests {
             Instant::now(),
         );
         state
+    }
+
+    #[test]
+    fn binary_text_row_detail_preserves_binary_json_value() {
+        let mut state = state_with_result();
+        state.query.set_current_result(Arc::new(
+            QueryResult::success_with_values(
+                String::new(),
+                vec!["payload".into()],
+                vec![vec![QueryValue::Blob(b"abcdefghijklmnop".to_vec())]],
+                0,
+                QuerySource::Preview,
+            )
+            .with_binary_text_display(),
+        ));
+        reduce_row_detail(
+            &mut state,
+            &Action::OpenModal(ModalKind::RowDetail),
+            Instant::now(),
+        );
+        assert!(state.row_detail.content().contains("abcdefghijklmnop"));
+        assert!(!state.row_detail.content().contains("BLOB ("));
+        assert!(
+            state
+                .row_detail
+                .json_for_yank()
+                .contains("X'6162636465666768696A6B6C6D6E6F70'")
+        );
     }
 
     #[test]
