@@ -157,7 +157,8 @@ impl QueryExecutor for MySqlAdapter {
             values.visible,
             elapsed,
             QuerySource::Preview,
-        );
+        )
+        .with_binary_text_display();
         if let Some(identity_values) = values.identity {
             query_result = query_result.with_explicit_row_identity(
                 preview

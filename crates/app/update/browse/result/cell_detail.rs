@@ -150,7 +150,11 @@ fn selected_cell_value(state: &AppState) -> Option<(usize, usize, String, String
     let row_idx = state.result_interaction.selection().row()?;
     let col_idx = state.result_interaction.selection().cell()?;
     let column_name = result.columns.get(col_idx)?.clone();
-    let cell_value = if result.has_typed_values() {
+    let cell_value = if result.displays_binary_as_text()
+        && let Some(QueryValue::Blob(bytes)) = result.value_at(row_idx, col_idx)
+    {
+        String::from_utf8_lossy(bytes).into_owned()
+    } else if result.has_typed_values() {
         result.value_at(row_idx, col_idx)?.copy_value()
     } else {
         result.display_value_at(row_idx, col_idx)?
@@ -242,6 +246,28 @@ mod tests {
         }));
         state.result_interaction.activate_cell(0, 1);
         state
+    }
+
+    #[test]
+    fn binary_text_detail_shows_text_without_changing_bytes() {
+        let mut state = state_with_cell("varbinary(32)", "");
+        let bytes = b"abcdefghijklmnop".to_vec();
+        state.query.set_current_result(Arc::new(
+            QueryResult::success_with_values(
+                String::new(),
+                vec!["id".into(), "body".into()],
+                vec![vec![QueryValue::text("1"), QueryValue::Blob(bytes.clone())]],
+                0,
+                QuerySource::Preview,
+            )
+            .with_binary_text_display(),
+        ));
+        reduce_cell_detail(&mut state, &Action::ResultOpenCellDetail, Instant::now());
+        assert_eq!(state.cell_detail.content(), "abcdefghijklmnop");
+        assert_eq!(
+            state.query.visible_result().unwrap().value_at(0, 1),
+            Some(&QueryValue::Blob(bytes))
+        );
     }
 
     #[test]

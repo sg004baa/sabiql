@@ -1199,6 +1199,10 @@ mod query_preview {
                     return Err(format!("unexpected binary charset preview: {preview:?}"));
                 }
 
+                if preview.display_value_at(0, 1).as_deref() != Some("\\0\u{fffd}\u{fffd}\r") {
+                    return Err(format!("binary preview did not use text display: {preview:?}"));
+                }
+
                 for (column, value) in [
                     ("binary_char", expected[0].clone()),
                     ("binary_varchar", expected[1].clone()),

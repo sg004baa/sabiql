@@ -430,6 +430,15 @@ fn display_value_at_width(
     col: usize,
     max_width: usize,
 ) -> Option<String> {
+    if result.displays_binary_as_text()
+        && let Some(QueryValue::Blob(bytes)) = result.value_at(row, col)
+    {
+        return Some(truncate_display_text(
+            &String::from_utf8_lossy(bytes),
+            true,
+            max_width,
+        ));
+    }
     if result.has_typed_values() {
         result
             .value_at(row, col)
@@ -452,6 +461,14 @@ fn query_value_display_at_width(value: &QueryValue, max_width: usize) -> String 
 }
 
 fn display_width_at(result: &QueryResult, row: usize, col: usize) -> Option<usize> {
+    if result.displays_binary_as_text()
+        && let Some(QueryValue::Blob(bytes)) = result.value_at(row, col)
+    {
+        return Some(display_width_of_first_line(
+            &String::from_utf8_lossy(bytes),
+            true,
+        ));
+    }
     if result.has_typed_values() {
         result.value_at(row, col).map(query_value_display_width)
     } else {
@@ -670,6 +687,27 @@ mod tests {
 
     mod display_values {
         use super::*;
+
+        #[test]
+        fn binary_text_uses_full_text_and_text_width() {
+            let result = QueryResult::success_with_values(
+                String::new(),
+                vec!["payload".into()],
+                vec![vec![QueryValue::Blob(b"abcdefghijklmnop".to_vec())]],
+                0,
+                QuerySource::Preview,
+            )
+            .with_binary_text_display();
+            assert_eq!(
+                display_value_at_width(&result, 0, 0, 50).as_deref(),
+                Some("abcdefghijklmnop")
+            );
+            assert_eq!(display_width_at(&result, 0, 0), Some(16));
+            assert_eq!(
+                display_value_at_width(&result, 0, 0, 8).as_deref(),
+                Some("abcde...")
+            );
+        }
 
         #[test]
         fn width_limited_display_avoids_materializing_the_full_nul_text() {

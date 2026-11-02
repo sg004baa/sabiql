@@ -35,7 +35,15 @@ impl RowDetailState {
             .iter()
             .map(QueryValue::display_value)
             .collect::<Vec<_>>();
-        let display_text = Self::display_text(columns, &cells);
+        Self::open_with_display_values(columns, values, &cells)
+    }
+
+    pub fn open_with_display_values(
+        columns: &[String],
+        values: &[QueryValue],
+        cells: &[String],
+    ) -> Self {
+        let display_text = Self::display_text(columns, cells);
         let json_text =
             serde_json::to_string_pretty(&row_json(columns, values.iter().map(sqlite_json_value)))
                 .unwrap_or_else(|_| "{}".to_string());
